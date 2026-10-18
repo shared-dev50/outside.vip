@@ -254,7 +254,145 @@ Lineup:
     },
   });
 
-  console.log(`✅ Created 3 events: [${event1.title}], [${event2.title}], [${event3.title}]`);
+  // Event 4: Alte Cruise Sunset
+  const event4 = await prisma.event.create({
+    data: {
+      slug: 'alte-cruise-sunset-rooftop-session',
+      organizerId: organizerUser.id,
+      title: 'ALTE CRUISE: Sunset Rooftop Session',
+      tagline: 'Golden hour melodies, west African alté, afro-fusion, and curated craft cocktails',
+      description: `Outside.vip brings the iconic Alté Cruise series back to the capital. Expect seamless transitions between neo-afrobeats, highlife, Amapiano blends, and ambient electronics as the sun sinks over the skyline.
+
+Featuring:
+• Native Sound System
+• DJ Ayane & Friends
+• Special live saxophone accompaniment
+• Curated mezcal & botanical cocktail pop-ups`,
+      category: EventCategory.MUSIC,
+      status: EventStatus.PUBLISHED,
+      coverImageUrl: 'https://images.unsplash.com/photo-1514525253161-7a46d19cd819?auto=format&fit=crop&w=1600&q=85',
+      thumbnailUrl: 'https://images.unsplash.com/photo-1514525253161-7a46d19cd819?auto=format&fit=crop&w=400&q=80',
+      venueName: 'The GTC Horizon Sky Lounge',
+      venueAddress: 'Waiyaki Way, Westlands',
+      city: 'Nairobi',
+      country: 'Kenya',
+      latitude: -1.2683,
+      longitude: 36.8055,
+      startAt: new Date(Date.now() + 1000 * 60 * 60 * 24 * 3), // 3 days from now
+      endAt: new Date(Date.now() + 1000 * 60 * 60 * 24 * 3 + 1000 * 60 * 60 * 6),
+      timezone: 'Africa/Nairobi',
+      ageRestriction: '21+',
+      dressCode: 'Retro Glam / Elevated Streetwear',
+      isFeatured: true,
+      ticketTiers: {
+        create: [
+          {
+            name: 'Sunset Admission',
+            description: 'Entry before 6:30 PM with 1 complimentary signature spritz.',
+            priceInCents: 2500,
+            currency: 'USD',
+            totalCapacity: 250,
+            soldQuantity: 140,
+            status: TicketTierStatus.ACTIVE,
+          },
+          {
+            name: 'Reserved Table for 4',
+            description: 'Dedicated lounge booth, bottle service credit, and charcuterie board.',
+            priceInCents: 15000,
+            currency: 'USD',
+            totalCapacity: 25,
+            soldQuantity: 18,
+            status: TicketTierStatus.ACTIVE,
+          },
+        ],
+      },
+    },
+    include: { ticketTiers: true },
+  });
+
+  // Event 5: Coastal Sundowner (Food & Drink)
+  const event5 = await prisma.event.create({
+    data: {
+      slug: 'coastal-sundowner-diani-seafood',
+      organizerId: organizerUser.id,
+      title: 'COASTAL SUNDOWNER: Swahili Feast & Sound',
+      tagline: 'Fresh Indian Ocean catch, tamarind cocktails, and barefoot acoustic rhythms',
+      description: `A sensory culinary and musical journey on the white sands of Diani. Chef-curated charcoal grilled prawns, coconut crab curries, live percussion, and sunset beach bonfires.`,
+      category: EventCategory.FOOD_DRINK,
+      status: EventStatus.PUBLISHED,
+      coverImageUrl: 'https://images.unsplash.com/photo-1555396273-367ea4eb4db5?auto=format&fit=crop&w=1600&q=85',
+      thumbnailUrl: 'https://images.unsplash.com/photo-1555396273-367ea4eb4db5?auto=format&fit=crop&w=400&q=80',
+      venueName: 'Nomad Beach Club Sandbank',
+      venueAddress: 'Diani Beach Road',
+      city: 'Diani',
+      country: 'Kenya',
+      latitude: -4.2778,
+      longitude: 39.5894,
+      startAt: new Date(Date.now() + 1000 * 60 * 60 * 24 * 10),
+      endAt: new Date(Date.now() + 1000 * 60 * 60 * 24 * 10 + 1000 * 60 * 60 * 7),
+      timezone: 'Africa/Nairobi',
+      ageRestriction: 'All Ages',
+      dressCode: 'Coastal Linen / Barefoot Chic',
+      isFeatured: false,
+      ticketTiers: {
+        create: [
+          {
+            name: 'Tasting Pass & Entry',
+            description: 'Access to beach lounge, live acoustic sets, and 4 culinary tasting tokens.',
+            priceInCents: 4500,
+            currency: 'USD',
+            totalCapacity: 200,
+            soldQuantity: 88,
+            status: TicketTierStatus.ACTIVE,
+          },
+        ],
+      },
+    },
+    include: { ticketTiers: true },
+  });
+
+  // Event 6: Savannah Cinema & Vinyl (Arts & Culture)
+  const event6 = await prisma.event.create({
+    data: {
+      slug: 'savannah-cinema-vinyl-under-stars',
+      organizerId: organizerUser.id,
+      title: 'SAVANNAH CINEMA: African Classic Film & Vinyl',
+      tagline: 'Open-air cinema projection, rare vinyl selections, and warm fire pits',
+      description: `Experience classic and contemporary African cinema projected on a 40-foot outdoor screen overlooking the silhouette of acacia trees. Pre-show vinyl listening session powered by vintage Klipsch horn speakers.`,
+      category: EventCategory.ARTS_CULTURE,
+      status: EventStatus.PUBLISHED,
+      coverImageUrl: 'https://images.unsplash.com/photo-1489599849927-2ee91cede3ba?auto=format&fit=crop&w=1600&q=85',
+      thumbnailUrl: 'https://images.unsplash.com/photo-1489599849927-2ee91cede3ba?auto=format&fit=crop&w=400&q=80',
+      venueName: 'The Silo Wilds Amphitheatre',
+      venueAddress: 'Magadi Road, Langata',
+      city: 'Nairobi',
+      country: 'Kenya',
+      latitude: -1.3653,
+      longitude: 36.7588,
+      startAt: new Date(Date.now() + 1000 * 60 * 60 * 24 * 5),
+      endAt: new Date(Date.now() + 1000 * 60 * 60 * 24 * 5 + 1000 * 60 * 60 * 5),
+      timezone: 'Africa/Nairobi',
+      ageRestriction: '18+',
+      dressCode: 'Warm Safari Layers',
+      isFeatured: false,
+      ticketTiers: {
+        create: [
+          {
+            name: 'Lawn Blanket Pass',
+            description: 'Includes handwoven picnic mat, wireless headphones, and bottomless popcorn.',
+            priceInCents: 1800,
+            currency: 'USD',
+            totalCapacity: 150,
+            soldQuantity: 92,
+            status: TicketTierStatus.ACTIVE,
+          },
+        ],
+      },
+    },
+    include: { ticketTiers: true },
+  });
+
+  console.log(`✅ Created 6 diverse events: [${event1.title}], [${event2.title}], [${event3.title}], [${event4.title}], [${event5.title}], [${event6.title}]`);
 
   // Create sample confirmed order and tickets for Attendee Alex
   const vipTier = event1.ticketTiers.find((t) => t.name === 'VIP Creek Terrace')!;

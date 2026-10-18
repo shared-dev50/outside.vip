@@ -27,6 +27,16 @@ describe('Outside.vip Server API Endpoints', () => {
     expect(firstEvent).toHaveProperty('currency');
   });
 
+  it('GET /api/events with category and sortBy should filter and sort correctly', async () => {
+    const res = await request(app).get('/api/events?category=FESTIVAL&sortBy=price_asc');
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.data.events.length).toBeGreaterThan(0);
+    for (const event of res.body.data.events) {
+      expect(event.category).toBe('FESTIVAL');
+    }
+  });
+
   it('GET /api/events/:slug should return individual event with ticket tiers and availability', async () => {
     const res = await request(app).get('/api/events/sol-fest-baobab-edition-2026');
     expect(res.status).toBe(200);

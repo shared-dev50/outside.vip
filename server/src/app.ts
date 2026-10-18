@@ -8,6 +8,7 @@ import { errorHandler } from './middleware/errorHandler.js';
 import { healthRouter } from './modules/health/health.routes.js';
 import { authRouter } from './modules/auth/auth.routes.js';
 import { eventsRouter } from './modules/events/events.routes.js';
+import { organizerRouter } from './modules/organizer/organizer.routes.js';
 
 export const app = express();
 
@@ -41,6 +42,7 @@ app.use(authenticateUser);
 app.use('/api/health', healthRouter);
 app.use('/api/auth', authRouter);
 app.use('/api/events', eventsRouter);
+app.use('/api/organizer', organizerRouter);
 
 // Fallback 404 handler
 app.use('/api/*', (_req, res) => {

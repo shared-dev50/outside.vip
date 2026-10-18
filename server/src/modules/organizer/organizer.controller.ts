@@ -1,0 +1,483 @@
+import { Request, Response, NextFunction } from 'express';
+import { EventStatus, TicketTierStatus, OrderStatus, TicketStatus } from '@prisma/client';
+import { prisma } from '../../db/prisma.js';
+import { createEventSchema, updateEventSchema } from './organizer.schema.js';
+import { NotFoundError, ForbiddenError, BadRequestError } from '../../utils/errors.js';
+
+function slugify(text: string): string {
+  return text
+    .toLowerCase()
+    .trim()
+    .replace(/[^\w\s-]/g, '')
+    .replace(/[\s_-]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+export async function getDashboardStats(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const organizerId = req.user!.userId;
+
+    // Count events by status
+    const [totalEvents, publishedEvents, draftEvents] = await Promise.all([
+      prisma.event.count({ where: { organizerId } }),
+      prisma.event.count({ where: { organizerId, status: EventStatus.PUBLISHED } }),
+      prisma.event.count({ where: { organizerId, status: EventStatus.DRAFT } }),
+    ]);
+
+    // Count tickets sold for organizer's events
+    const ticketsSoldCount = await prisma.ticket.count({
+      where: {
+        event: { organizerId },
+        status: { in: [TicketStatus.ISSUED, TicketStatus.CHECKED_IN] },
+      },
+    });
+
+    // Sum actual gross revenue from COMPLETED orders for organizer's events
+    const completedOrders = await prisma.order.findMany({
+      where: {
+        event: { organizerId },
+        status: OrderStatus.COMPLETED,
+      },
+      select: { totalInCents: true },
+    });
+
+    const grossRevenueInCents = completedOrders.reduce((sum, order) => sum + order.totalInCents, 0);
+
+    res.json({
+      success: true,
+      data: {
+        totalEvents,
+        publishedEvents,
+        draftEvents,
+        ticketsSold: ticketsSoldCount,
+        grossRevenueInCents,
+        grossRevenueFormatted: `$${(grossRevenueInCents / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+        currency: 'USD',
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function listOrganizerEvents(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const organizerId = req.user!.userId;
+
+    const events = await prisma.event.findMany({
+      where: { organizerId },
+      orderBy: { updatedAt: 'desc' },
+      include: {
+        ticketTiers: {
+          select: {
+            id: true,
+            name: true,
+            priceInCents: true,
+            totalCapacity: true,
+            soldQuantity: true,
+            status: true,
+          },
+        },
+        orders: {
+          where: { status: OrderStatus.COMPLETED },
+          select: { totalInCents: true },
+        },
+      },
+    });
+
+    const enhanced = events.map((event) => {
+      const totalCapacity = event.ticketTiers.reduce((acc, t) => acc + t.totalCapacity, 0);
+      const ticketsSold = event.ticketTiers.reduce((acc, t) => acc + t.soldQuantity, 0);
+      const revenueInCents = event.orders.reduce((acc, o) => acc + o.totalInCents, 0);
+
+      // Clean orders array before returning
+      const { orders: _, ...rest } = event;
+      return {
+        ...rest,
+        totalCapacity,
+        ticketsSold,
+        revenueInCents,
+        revenueFormatted: `$${(revenueInCents / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+      };
+    });
+
+    res.json({
+      success: true,
+      data: { events: enhanced },
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function getOrganizerEventById(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const organizerId = req.user!.userId;
+    const { id } = req.params;
+
+    const event = await prisma.event.findUnique({
+      where: { id },
+      include: {
+        ticketTiers: {
+          orderBy: { priceInCents: 'asc' },
+        },
+        organizer: {
+          select: {
+            id: true,
+            name: true,
+            email: true,
+            avatarUrl: true,
+            organizer: true,
+          },
+        },
+      },
+    });
+
+    if (!event) {
+      throw new NotFoundError('Event not found');
+    }
+
+    if (event.organizerId !== organizerId && req.user!.role !== 'ADMIN') {
+      throw new ForbiddenError('You do not have permission to view or edit this event');
+    }
+
+    res.json({
+      success: true,
+      data: { event },
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function createOrganizerEvent(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const organizerId = req.user!.userId;
+    const input = createEventSchema.parse(req.body);
+
+    // Auto-generate unique slug
+    const baseSlug = slugify(input.title) || 'event';
+    let slug = baseSlug;
+    let counter = 1;
+    while (await prisma.event.findUnique({ where: { slug } })) {
+      counter++;
+      slug = `${baseSlug}-${counter}`;
+    }
+
+    const event = await prisma.$transaction(async (tx) => {
+      return tx.event.create({
+        data: {
+          slug,
+          organizerId,
+          title: input.title,
+          tagline: input.tagline,
+          description: input.description,
+          category: input.category,
+          status: input.status,
+          coverImageUrl: input.coverImageUrl,
+          thumbnailUrl: input.thumbnailUrl,
+          venueName: input.venueName,
+          venueAddress: input.venueAddress,
+          city: input.city,
+          country: input.country,
+          startAt: new Date(input.startAt),
+          endAt: new Date(input.endAt),
+          timezone: input.timezone,
+          ageRestriction: input.ageRestriction,
+          dressCode: input.dressCode,
+          ticketTiers: {
+            create: input.ticketTiers.map((tier) => ({
+              name: tier.name,
+              description: tier.description,
+              priceInCents: tier.priceInCents,
+              currency: tier.currency,
+              totalCapacity: tier.totalCapacity,
+              minPerOrder: tier.minPerOrder,
+              maxPerOrder: tier.maxPerOrder,
+              salesStartAt: tier.salesStartAt ? new Date(tier.salesStartAt) : null,
+              salesEndAt: tier.salesEndAt ? new Date(tier.salesEndAt) : null,
+              status: tier.status,
+            })),
+          },
+        },
+        include: {
+          ticketTiers: true,
+        },
+      });
+    });
+
+    res.status(201).json({
+      success: true,
+      data: { event },
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function updateOrganizerEvent(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const organizerId = req.user!.userId;
+    const { id } = req.params;
+    const input = updateEventSchema.parse(req.body);
+
+    const existingEvent = await prisma.event.findUnique({
+      where: { id },
+      include: { ticketTiers: true },
+    });
+
+    if (!existingEvent) {
+      throw new NotFoundError('Event not found');
+    }
+
+    if (existingEvent.organizerId !== organizerId && req.user!.role !== 'ADMIN') {
+      throw new ForbiddenError('You do not have permission to edit this event');
+    }
+
+    // Validate date order if both or either updated
+    const startAtDate = input.startAt ? new Date(input.startAt) : existingEvent.startAt;
+    const endAtDate = input.endAt ? new Date(input.endAt) : existingEvent.endAt;
+    if (endAtDate.getTime() <= startAtDate.getTime()) {
+      throw new BadRequestError('Event end time must be after the start time');
+    }
+
+    const updatedEvent = await prisma.$transaction(async (tx) => {
+      // 1. Update event details
+      await tx.event.update({
+        where: { id },
+        data: {
+          ...(input.title !== undefined && { title: input.title }),
+          ...(input.tagline !== undefined && { tagline: input.tagline }),
+          ...(input.description !== undefined && { description: input.description }),
+          ...(input.category !== undefined && { category: input.category }),
+          ...(input.coverImageUrl !== undefined && { coverImageUrl: input.coverImageUrl }),
+          ...(input.thumbnailUrl !== undefined && { thumbnailUrl: input.thumbnailUrl }),
+          ...(input.venueName !== undefined && { venueName: input.venueName }),
+          ...(input.venueAddress !== undefined && { venueAddress: input.venueAddress }),
+          ...(input.city !== undefined && { city: input.city }),
+          ...(input.country !== undefined && { country: input.country }),
+          ...(input.startAt !== undefined && { startAt: new Date(input.startAt) }),
+          ...(input.endAt !== undefined && { endAt: new Date(input.endAt) }),
+          ...(input.timezone !== undefined && { timezone: input.timezone }),
+          ...(input.ageRestriction !== undefined && { ageRestriction: input.ageRestriction }),
+          ...(input.dressCode !== undefined && { dressCode: input.dressCode }),
+          ...(input.status !== undefined && { status: input.status }),
+        },
+      });
+
+      // 2. Manage ticket tiers if provided
+      if (input.ticketTiers) {
+        const incomingTierIds = new Set(input.ticketTiers.filter((t) => t.id).map((t) => t.id));
+
+        // Check for tiers removed in this update
+        for (const existingTier of existingEvent.ticketTiers) {
+          if (!incomingTierIds.has(existingTier.id)) {
+            if (existingTier.soldQuantity > 0) {
+              // Preserve historical sales! Deactivate instead of deleting
+              await tx.ticketTier.update({
+                where: { id: existingTier.id },
+                data: { status: TicketTierStatus.HIDDEN },
+              });
+            } else {
+              // Safe to delete unused tier
+              await tx.ticketTier.delete({ where: { id: existingTier.id } });
+            }
+          }
+        }
+
+        // Upsert incoming tiers
+        for (const tier of input.ticketTiers) {
+          if (tier.id) {
+            // Update existing tier
+            await tx.ticketTier.update({
+              where: { id: tier.id },
+              data: {
+                name: tier.name,
+                description: tier.description,
+                priceInCents: tier.priceInCents,
+                currency: tier.currency,
+                totalCapacity: tier.totalCapacity,
+                minPerOrder: tier.minPerOrder,
+                maxPerOrder: tier.maxPerOrder,
+                salesStartAt: tier.salesStartAt ? new Date(tier.salesStartAt) : null,
+                salesEndAt: tier.salesEndAt ? new Date(tier.salesEndAt) : null,
+                status: tier.status,
+              },
+            });
+          } else {
+            // Create new tier
+            await tx.ticketTier.create({
+              data: {
+                eventId: id,
+                name: tier.name,
+                description: tier.description,
+                priceInCents: tier.priceInCents,
+                currency: tier.currency,
+                totalCapacity: tier.totalCapacity,
+                minPerOrder: tier.minPerOrder,
+                maxPerOrder: tier.maxPerOrder,
+                salesStartAt: tier.salesStartAt ? new Date(tier.salesStartAt) : null,
+                salesEndAt: tier.salesEndAt ? new Date(tier.salesEndAt) : null,
+                status: tier.status,
+              },
+            });
+          }
+        }
+      }
+
+      return tx.event.findUnique({
+        where: { id },
+        include: {
+          ticketTiers: {
+            orderBy: { priceInCents: 'asc' },
+          },
+        },
+      });
+    });
+
+    res.json({
+      success: true,
+      data: { event: updatedEvent },
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function publishEvent(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const organizerId = req.user!.userId;
+    const { id } = req.params;
+
+    const event = await prisma.event.findUnique({
+      where: { id },
+      include: { ticketTiers: true },
+    });
+
+    if (!event) {
+      throw new NotFoundError('Event not found');
+    }
+
+    if (event.organizerId !== organizerId && req.user!.role !== 'ADMIN') {
+      throw new ForbiddenError('You do not have permission to publish this event');
+    }
+
+    // Comprehensive Publishing Validation
+    if (!event.title || event.title.trim().length < 2) {
+      throw new BadRequestError('Event title must be at least 2 characters to publish');
+    }
+
+    if (!event.venueName || event.venueName.trim().length === 0) {
+      throw new BadRequestError('Venue name is required before publishing');
+    }
+
+    if (!event.city || event.city.trim().length === 0) {
+      throw new BadRequestError('City is required before publishing');
+    }
+
+    if (!event.coverImageUrl || event.coverImageUrl.trim().length === 0) {
+      throw new BadRequestError('Cover artwork image is required before publishing');
+    }
+
+    if (new Date(event.endAt).getTime() <= new Date(event.startAt).getTime()) {
+      throw new BadRequestError('Event end time must be after start time');
+    }
+
+    const activeTiers = event.ticketTiers.filter(
+      (t) => t.status !== TicketTierStatus.HIDDEN && t.totalCapacity > 0
+    );
+
+    if (activeTiers.length === 0) {
+      throw new BadRequestError('At least one active ticket tier with positive capacity is required to publish');
+    }
+
+    const updated = await prisma.event.update({
+      where: { id },
+      data: { status: EventStatus.PUBLISHED },
+      include: { ticketTiers: true },
+    });
+
+    res.json({
+      success: true,
+      data: {
+        event: updated,
+        message: 'Event successfully published to Outside.vip public discovery!',
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function unpublishEvent(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const organizerId = req.user!.userId;
+    const { id } = req.params;
+
+    const event = await prisma.event.findUnique({
+      where: { id },
+    });
+
+    if (!event) {
+      throw new NotFoundError('Event not found');
+    }
+
+    if (event.organizerId !== organizerId && req.user!.role !== 'ADMIN') {
+      throw new ForbiddenError('You do not have permission to unpublish this event');
+    }
+
+    const updated = await prisma.event.update({
+      where: { id },
+      data: { status: EventStatus.DRAFT },
+      include: { ticketTiers: true },
+    });
+
+    res.json({
+      success: true,
+      data: {
+        event: updated,
+        message: 'Event unpublished and reverted to draft status.',
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function deleteOrganizerEvent(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const organizerId = req.user!.userId;
+    const { id } = req.params;
+
+    const event = await prisma.event.findUnique({
+      where: { id },
+      include: {
+        tickets: true,
+        orders: true,
+      },
+    });
+
+    if (!event) {
+      throw new NotFoundError('Event not found');
+    }
+
+    if (event.organizerId !== organizerId && req.user!.role !== 'ADMIN') {
+      throw new ForbiddenError('You do not have permission to delete this event');
+    }
+
+    if (event.tickets.length > 0 || event.orders.length > 0) {
+      throw new BadRequestError(
+        'Cannot delete an event with existing orders or tickets. You can unpublish or archive it instead to preserve attendee records.'
+      );
+    }
+
+    await prisma.event.delete({ where: { id } });
+
+    res.json({
+      success: true,
+      data: { message: 'Event successfully deleted.' },
+    });
+  } catch (error) {
+    next(error);
+  }
+}

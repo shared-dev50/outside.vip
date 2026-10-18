@@ -3,88 +3,85 @@ import { Link } from 'react-router-dom';
 
 export const Footer: React.FC = () => {
   return (
-    <footer className="border-t border-surface-800 bg-surface-950 mt-24">
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-16">
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-12 mb-12">
-          {/* Brand info */}
-          <div className="md:col-span-2 space-y-4">
-            <Link to="/" className="flex items-center gap-2">
-              <span className="font-display font-black tracking-tight text-2xl text-white">
-                OUTSIDE<span className="text-brand-neon">.VIP</span>
+    <footer className="border-t border-stone-200/80 bg-[#FAF9F6] text-stone-600">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12 sm:py-16">
+        {/* Main Footer Grid: Editorial Brand Area & Structured Navigation */}
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-10 lg:gap-16 items-start">
+          {/* Brand Area (Spans 6 cols on desktop) */}
+          <div className="lg:col-span-7 space-y-4">
+            <Link
+              to="/"
+              className="inline-block group focus:outline-none focus-visible:ring-2 focus-visible:ring-stone-900 rounded"
+              aria-label="Outside.vip homepage"
+            >
+              <span className="font-display font-black text-2xl tracking-tight text-stone-900 group-hover:opacity-85 transition-opacity">
+                outside<span className="text-stone-400 font-normal">.vip</span>
               </span>
             </Link>
-            <p className="text-slate-400 text-sm max-w-sm leading-relaxed">
-              The high-velocity event discovery & ticketing platform for subcultures, electronic sounds, festivals, and forward-thinking gatherings.
-            </p>
-            <div className="flex items-center gap-2 pt-2 text-xs font-mono text-slate-500">
-              <span className="inline-block w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-              All systems operational · Stripe Checkout & QR Engine Active
+
+            <div className="space-y-1.5 max-w-md">
+              <p className="font-display font-bold text-lg sm:text-xl text-stone-900 tracking-tight leading-snug">
+                There&apos;s a world out there.
+              </p>
+              <p className="text-xs sm:text-sm text-stone-500 leading-relaxed">
+                Find something worth showing up for.
+              </p>
             </div>
           </div>
 
-          {/* Platform Links */}
-          <div className="space-y-3">
-            <h4 className="text-xs uppercase font-mono tracking-widest text-slate-300 font-semibold">
-              Platform
-            </h4>
-            <ul className="space-y-2 text-sm text-slate-400">
-              <li>
-                <Link to="/" className="hover:text-brand-neon transition-colors">
-                  Explore Events
-                </Link>
-              </li>
-              <li>
-                <Link to="/organizer" className="hover:text-brand-neon transition-colors">
-                  Organizer Dashboard
-                </Link>
-              </li>
-              <li>
-                <Link to="/organizer/events/new" className="hover:text-brand-neon transition-colors">
-                  Create Event
-                </Link>
-              </li>
-              <li>
-                <Link to="/scanner" className="hover:text-brand-neon transition-colors">
-                  Browser Scanner
-                </Link>
-              </li>
-            </ul>
-          </div>
+          {/* Navigation Area (Spans 5 cols on desktop, 2 distinct groups) */}
+          <div className="lg:col-span-5 grid grid-cols-2 gap-8 sm:gap-10">
+            {/* Group 1: Explore */}
+            <div className="space-y-3">
+              <h2 className="font-mono text-[11px] uppercase tracking-[0.2em] font-bold text-stone-400">
+                Explore
+              </h2>
+              <ul className="space-y-2.5 text-xs sm:text-sm font-medium">
+                <li>
+                  <Link
+                    to="/events"
+                    className="text-stone-600 hover:text-stone-900 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-stone-900 rounded-sm"
+                  >
+                    Discover Events
+                  </Link>
+                </li>
+              </ul>
+            </div>
 
-          {/* Curated Cities */}
-          <div className="space-y-3">
-            <h4 className="text-xs uppercase font-mono tracking-widest text-slate-300 font-semibold">
-              Destinations
-            </h4>
-            <ul className="space-y-2 text-sm text-slate-400">
-              <li className="flex items-center justify-between">
-                <span>Kilifi / Coastal</span>
-                <span className="text-xs font-mono text-brand-neon">Festival Hub</span>
-              </li>
-              <li className="flex items-center justify-between">
-                <span>Nairobi</span>
-                <span className="text-xs font-mono text-slate-500">Underground</span>
-              </li>
-              <li className="flex items-center justify-between">
-                <span>Lagos</span>
-                <span className="text-xs font-mono text-slate-500">Coming Soon</span>
-              </li>
-              <li className="flex items-center justify-between">
-                <span>Cape Town</span>
-                <span className="text-xs font-mono text-slate-500">Coming Soon</span>
-              </li>
-            </ul>
+            {/* Group 2: For Organizers */}
+            <div className="space-y-3">
+              <h2 className="font-mono text-[11px] uppercase tracking-[0.2em] font-bold text-stone-400">
+                For Organizers
+              </h2>
+              <ul className="space-y-2.5 text-xs sm:text-sm font-medium">
+                <li>
+                  <Link
+                    to="/organizer"
+                    className="text-stone-600 hover:text-stone-900 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-stone-900 rounded-sm"
+                  >
+                    Organizer Portal
+                  </Link>
+                </li>
+                <li>
+                  <Link
+                    to="/organizer/events/new"
+                    className="text-stone-600 hover:text-stone-900 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-stone-900 rounded-sm"
+                  >
+                    Create an Event
+                  </Link>
+                </li>
+              </ul>
+            </div>
           </div>
         </div>
 
-        <div className="pt-8 border-t border-surface-850 flex flex-col md:flex-row items-center justify-between text-xs text-slate-500 gap-4">
+        {/* Bottom Bar: Copyright & Subtle Brand Sign-Off */}
+        <div className="mt-12 sm:mt-16 pt-6 border-t border-stone-200/60 flex flex-col sm:flex-row items-center justify-between gap-3 text-[11px] font-mono text-stone-400">
           <div>
-            © {new Date().getFullYear()} Outside.vip. All rights reserved. Built for exceptional live experiences.
+            &copy; 2026 Outside.vip
           </div>
-          <div className="flex items-center gap-6">
-            <span className="hover:text-slate-400 cursor-pointer">Terms of Service</span>
-            <span className="hover:text-slate-400 cursor-pointer">Privacy Policy</span>
-            <span className="hover:text-slate-400 cursor-pointer">Security & Scanners</span>
+          <div>
+            Made for going out there.
           </div>
         </div>
       </div>

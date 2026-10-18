@@ -7,7 +7,7 @@ import { NotFoundError } from '../../utils/errors.js';
 export async function listEvents(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const query = listEventsQuerySchema.parse(req.query);
-    const { search, category, city, featuredOnly, timeFilter, page, limit } = query;
+    const { search, category, city, featuredOnly, timeFilter, sortBy = 'date_asc', page, limit } = query;
 
     const where: Prisma.EventWhereInput = {
       status: EventStatus.PUBLISHED,
@@ -60,12 +60,15 @@ export async function listEvents(req: Request, res: Response, next: NextFunction
 
     const skip = (page - 1) * limit;
 
+    const dateOrder: Prisma.EventOrderByWithRelationInput =
+      sortBy === 'date_desc' ? { startAt: 'desc' } : { startAt: 'asc' };
+
     const [events, total] = await Promise.all([
       prisma.event.findMany({
         where,
         skip,
         take: limit,
-        orderBy: [{ isFeatured: 'desc' }, { startAt: 'asc' }],
+        orderBy: [{ isFeatured: 'desc' }, dateOrder],
         include: {
           organizer: {
             select: {
@@ -101,8 +104,7 @@ export async function listEvents(req: Request, res: Response, next: NextFunction
     ]);
 
     // Enhance events with lowest price and availability status
-    const enhancedEvents = events.map((event) => {
-      const activeTiers = event.ticketTiers.filter((t) => t.status === 'ACTIVE');
+    let enhancedEvents = events.map((event) => {
       const minPrice =
         event.ticketTiers.length > 0
           ? Math.min(...event.ticketTiers.map((t) => t.priceInCents))
@@ -121,6 +123,12 @@ export async function listEvents(req: Request, res: Response, next: NextFunction
         tierCount: event.ticketTiers.length,
       };
     });
+
+    if (sortBy === 'price_asc') {
+      enhancedEvents = enhancedEvents.sort((a, b) => (a.minPriceInCents || 0) - (b.minPriceInCents || 0));
+    } else if (sortBy === 'price_desc') {
+      enhancedEvents = enhancedEvents.sort((a, b) => (b.minPriceInCents || 0) - (a.minPriceInCents || 0));
+    }
 
     res.json({
       success: true,

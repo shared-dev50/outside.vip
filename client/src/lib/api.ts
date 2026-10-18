@@ -1,4 +1,4 @@
-import { ApiResponse, EventListResponse, Event, User } from '../types';
+import { ApiResponse, EventListResponse, Event, User, OrganizerDashboardStats, OrganizerEventItem } from '../types';
 
 const API_BASE = '/api';
 
@@ -14,7 +14,10 @@ export class ApiError extends Error {
 }
 
 async function request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
-  const token = localStorage.getItem('outside_token');
+  const token =
+    typeof window !== 'undefined' && typeof window.localStorage !== 'undefined'
+      ? window.localStorage.getItem('outside_token')
+      : null;
   const headers: HeadersInit = {
     'Content-Type': 'application/json',
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
@@ -51,6 +54,7 @@ export const api = {
       city?: string;
       featuredOnly?: boolean;
       timeFilter?: string;
+      sortBy?: string;
       page?: number;
       limit?: number;
     }) => {
@@ -60,6 +64,7 @@ export const api = {
       if (params?.city) query.set('city', params.city);
       if (params?.featuredOnly) query.set('featuredOnly', 'true');
       if (params?.timeFilter) query.set('timeFilter', params.timeFilter);
+      if (params?.sortBy) query.set('sortBy', params.sortBy);
       if (params?.page) query.set('page', params.page.toString());
       if (params?.limit) query.set('limit', params.limit.toString());
       return request<EventListResponse>(`/events?${query.toString()}`);
@@ -67,6 +72,33 @@ export const api = {
     featured: () => request<{ events: Event[] }>('/events/featured'),
     cities: () => request<{ cities: string[] }>('/events/cities'),
     bySlug: (slug: string) => request<{ event: Event }>(`/events/${slug}`),
+  },
+  organizer: {
+    getDashboard: () => request<OrganizerDashboardStats>('/organizer/dashboard'),
+    listEvents: () => request<{ events: OrganizerEventItem[] }>('/organizer/events'),
+    getEvent: (id: string) => request<{ event: Event }>(`/organizer/events/${id}`),
+    createEvent: (payload: any) =>
+      request<{ event: Event }>('/organizer/events', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }),
+    updateEvent: (id: string, payload: any) =>
+      request<{ event: Event }>(`/organizer/events/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify(payload),
+      }),
+    publishEvent: (id: string) =>
+      request<{ event: Event; message: string }>(`/organizer/events/${id}/publish`, {
+        method: 'POST',
+      }),
+    unpublishEvent: (id: string) =>
+      request<{ event: Event; message: string }>(`/organizer/events/${id}/unpublish`, {
+        method: 'POST',
+      }),
+    deleteEvent: (id: string) =>
+      request<{ message: string }>(`/organizer/events/${id}`, {
+        method: 'DELETE',
+      }),
   },
   auth: {
     me: () => request<{ user: User }>('/auth/me'),
@@ -82,3 +114,4 @@ export const api = {
       }),
   },
 };
+

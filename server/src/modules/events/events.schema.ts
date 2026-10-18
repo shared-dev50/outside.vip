@@ -7,6 +7,7 @@ export const listEventsQuerySchema = z.object({
   city: z.string().optional(),
   featuredOnly: z.enum(['true', 'false']).optional().transform((v) => v === 'true'),
   timeFilter: z.enum(['upcoming', 'this_weekend', 'this_month', 'all']).default('upcoming'),
+  sortBy: z.enum(['date_asc', 'date_desc', 'price_asc', 'price_desc']).default('date_asc').optional(),
   page: z.string().optional().default('1').transform((v) => Math.max(1, parseInt(v, 10) || 1)),
   limit: z.string().optional().default('12').transform((v) => Math.min(50, Math.max(1, parseInt(v, 10) || 12))),
 });

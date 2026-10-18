@@ -4,53 +4,58 @@
 
 @layer base {
   :root {
-    color-scheme: dark;
+    color-scheme: light;
   }
-  
+
   body {
-    @apply bg-[#08090C] text-slate-100 antialiased selection:bg-brand-neon selection:text-black;
+    @apply bg-white text-gray-900 antialiased selection:bg-gray-900 selection:text-white;
     font-feature-settings: "cv02", "cv03", "cv04", "cv11";
   }
 }
 
-/* Custom Glassmorphism & Aesthetics */
-.glass-panel {
-  background: rgba(14, 16, 21, 0.75);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-}
-
-.glass-panel-hover {
-  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
-}
-
-.glass-panel-hover:hover {
-  background: rgba(22, 26, 36, 0.85);
-  border-color: rgba(210, 255, 0, 0.3);
-  transform: translateY(-2px);
-  box-shadow: 0 12px 30px -10px rgba(0, 0, 0, 0.5);
-}
-
-.glow-neon {
-  text-shadow: 0 0 20px rgba(210, 255, 0, 0.5);
-}
-
-/* Custom Scrollbar */
+/* Clean Custom Scrollbar */
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 6px;
+  height: 6px;
 }
 
 ::-webkit-scrollbar-track {
-  background: #08090C;
+  background: #FFFFFF;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #1C202B;
-  border-radius: 4px;
+  background: #E5E7EB;
+  border-radius: 3px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #2A3040;
+  background: #D1D5DB;
+}
+
+/* Subtle Marquee Animations for Ribbon Straps */
+@keyframes marquee {
+  0% {
+    transform: translateX(0%);
+  }
+  100% {
+    transform: translateX(-50%);
+  }
+}
+
+@keyframes marquee-reverse {
+  0% {
+    transform: translateX(-50%);
+  }
+  100% {
+    transform: translateX(0%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

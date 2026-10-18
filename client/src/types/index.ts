@@ -76,6 +76,9 @@ export interface Event {
       displayName: string;
       slug: string;
       bio?: string | null;
+      websiteUrl?: string | null;
+      instagramHandle?: string | null;
+      twitterHandle?: string | null;
       logoUrl?: string | null;
     } | null;
   };
@@ -167,3 +170,21 @@ export interface EventListResponse {
     hasMore: boolean;
   };
 }
+
+export interface OrganizerDashboardStats {
+  totalEvents: number;
+  publishedEvents: number;
+  draftEvents: number;
+  ticketsSold: number;
+  grossRevenueInCents: number;
+  grossRevenueFormatted: string;
+  currency: string;
+}
+
+export interface OrganizerEventItem extends Event {
+  totalCapacity: number;
+  ticketsSold: number;
+  revenueInCents: number;
+  revenueFormatted: string;
+}
+
