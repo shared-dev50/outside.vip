@@ -14,11 +14,15 @@ import { OrderConfirmationPage } from './pages/OrderConfirmationPage';
 export const App: React.FC = () => {
   const location = useLocation();
   const isHome = location.pathname === '/';
+  const isEditorial =
+    isHome ||
+    location.pathname.startsWith('/events') ||
+    location.pathname.startsWith('/organizer/events');
 
   return (
     <div
-      className={`min-h-screen flex flex-col font-sans selection:bg-gray-900 selection:text-white ${
-        isHome ? 'bg-[#FAF8F5] text-stone-900' : 'bg-white text-gray-900'
+      className={`min-h-screen flex flex-col font-sans selection:bg-stone-900 selection:text-white ${
+        isEditorial ? 'bg-[#FAF8F5] text-stone-900' : 'bg-white text-gray-900'
       }`}
     >
       <Navbar />

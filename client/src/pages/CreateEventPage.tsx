@@ -409,16 +409,16 @@ export const CreateEventPage: React.FC = () => {
   // Auth gate
   if (!user || (user.role !== 'ORGANIZER' && user.role !== 'ADMIN')) {
     return (
-      <div className="min-h-screen bg-[#08090C] text-white flex items-center justify-center p-4">
-        <div className="max-w-md w-full bg-[#0E1015] border border-white/10 rounded-2xl p-8 space-y-4 text-center">
-          <Lock className="w-10 h-10 text-[#D2FF00] mx-auto" />
-          <h2 className="font-display font-bold text-xl text-white">Organizer Access Required</h2>
-          <p className="text-xs text-gray-400">
-            Sign in as an event organizer to create and edit experiences.
+      <div className="min-h-screen bg-[#FAF8F5] text-stone-900 flex items-center justify-center p-4">
+        <div className="max-w-md w-full bg-white border border-stone-200 rounded-xl p-8 space-y-4 text-center shadow-xs">
+          <Lock className="w-10 h-10 text-stone-700 mx-auto" />
+          <h2 className="font-display font-black text-xl text-stone-900 uppercase tracking-tight">Organizer Access Required</h2>
+          <p className="text-xs text-stone-500 font-sans">
+            Sign in as an event organizer to create, configure, and publish experiences.
           </p>
           <button
             onClick={() => quickLoginAs('organizer')}
-            className="w-full py-2.5 rounded-xl bg-[#D2FF00] hover:bg-[#BEF200] text-black font-semibold text-xs font-mono uppercase tracking-wider"
+            className="w-full py-2.5 rounded-lg bg-stone-900 hover:bg-black text-white font-semibold text-xs font-mono uppercase tracking-wider transition-colors shadow-2xs"
           >
             Sign in as Sol Collective (Demo)
           </button>
@@ -429,9 +429,9 @@ export const CreateEventPage: React.FC = () => {
 
   if (isEditing && isLoadingExisting) {
     return (
-      <div className="min-h-screen bg-[#08090C] text-white flex items-center justify-center p-4">
-        <div className="flex items-center gap-3 text-xs font-mono text-gray-400">
-          <RefreshCw className="w-5 h-5 animate-spin text-[#D2FF00]" />
+      <div className="min-h-screen bg-[#FAF8F5] text-stone-900 flex items-center justify-center p-4">
+        <div className="flex items-center gap-3 text-xs font-mono text-stone-600">
+          <RefreshCw className="w-5 h-5 animate-spin text-stone-900" />
           Loading experience draft...
         </div>
       </div>
@@ -446,39 +446,39 @@ export const CreateEventPage: React.FC = () => {
     : 'event-slug';
 
   return (
-    <div className="min-h-screen bg-[#08090C] text-gray-100 selection:bg-[#D2FF00] selection:text-black pb-36">
+    <div className="min-h-screen bg-[#FAF8F5] text-stone-900 selection:bg-stone-900 selection:text-white pb-36">
       {/* Sticky Editor Command Bar */}
-      <div className="sticky top-0 z-40 bg-[#08090C]/95 backdrop-blur-md border-b border-white/10 shadow-2xl">
+      <div className="sticky top-0 z-40 bg-[#FAF8F5]/90 backdrop-blur-md border-b border-stone-200/90 shadow-2xs">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between gap-4">
           <div className="flex items-center gap-3 sm:gap-4 min-w-0">
             <Link
               to="/organizer"
-              className="p-2 rounded-xl bg-[#14171F] hover:bg-[#1C202B] text-gray-400 hover:text-white border border-white/10 transition-colors shrink-0"
+              className="p-2 rounded-lg bg-white hover:bg-stone-100 text-stone-600 hover:text-stone-900 border border-stone-300 transition-colors shrink-0 shadow-2xs"
               title="Return to Organizer Dashboard"
             >
               <ArrowLeft className="w-4 h-4" />
             </Link>
             <div className="min-w-0">
               <div className="flex items-center gap-2">
-                <span className="font-display font-bold text-sm sm:text-base text-white truncate max-w-[180px] sm:max-w-md">
+                <span className="font-display font-black text-sm sm:text-base text-stone-900 truncate max-w-[180px] sm:max-w-md">
                   {title || 'Untitled Experience'}
                 </span>
                 {currentStatus === 'PUBLISHED' ? (
-                  <span className="px-2 py-0.5 rounded text-[10px] font-mono uppercase bg-[#D2FF00]/10 text-[#D2FF00] border border-[#D2FF00]/30 font-bold shrink-0">
+                  <span className="px-2 py-0.5 rounded text-[10px] font-mono uppercase bg-emerald-50 text-emerald-700 border border-emerald-300 font-bold shrink-0">
                     Live
                   </span>
                 ) : (
-                  <span className="px-2 py-0.5 rounded text-[10px] font-mono uppercase bg-amber-400/10 text-amber-300 border border-amber-400/30 font-bold shrink-0">
+                  <span className="px-2 py-0.5 rounded text-[10px] font-mono uppercase bg-amber-50 text-amber-700 border border-amber-300 font-bold shrink-0">
                     Draft
                   </span>
                 )}
                 {hasUnsavedChanges && (
-                  <span className="text-[10px] font-mono text-gray-400 italic hidden md:inline">
+                  <span className="text-[10px] font-mono text-stone-500 italic hidden md:inline">
                     • Unsaved changes
                   </span>
                 )}
               </div>
-              <span className="text-[11px] text-gray-500 font-mono hidden sm:block truncate">
+              <span className="text-[11px] text-stone-500 font-mono hidden sm:block truncate">
                 outside.vip/events/{generatedSlugPreview}
               </span>
             </div>
@@ -489,10 +489,10 @@ export const CreateEventPage: React.FC = () => {
             {id && (
               <Link
                 to={`/organizer/events/${id}/preview`}
-                className="hidden sm:inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-[#14171F] hover:bg-[#1C202B] text-gray-300 hover:text-white border border-white/10 text-xs font-mono transition-colors"
+                className="hidden sm:inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-white hover:bg-stone-100 text-stone-700 hover:text-stone-900 border border-stone-300 text-xs font-mono font-semibold transition-colors shadow-2xs"
                 title="Preview Event in Public Layout"
               >
-                <Eye className="w-3.5 h-3.5 text-gray-400" />
+                <Eye className="w-3.5 h-3.5 text-stone-500" />
                 <span>Preview</span>
               </Link>
             )}
@@ -502,9 +502,9 @@ export const CreateEventPage: React.FC = () => {
               type="button"
               onClick={() => saveMutation.mutate({ publish: false })}
               disabled={saveMutation.isPending}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#14171F] hover:bg-[#1C202B] text-gray-200 hover:text-white border border-white/10 text-xs font-mono font-semibold transition-colors disabled:opacity-50"
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-white hover:bg-stone-100 text-stone-900 border border-stone-300 text-xs font-mono font-semibold transition-colors disabled:opacity-50 shadow-2xs"
             >
-              <Save className="w-3.5 h-3.5 text-gray-400" />
+              <Save className="w-3.5 h-3.5 text-stone-500" />
               <span>{saveMutation.isPending ? 'Saving...' : 'Save Draft'}</span>
             </button>
 
@@ -515,7 +515,7 @@ export const CreateEventPage: React.FC = () => {
                   type="button"
                   onClick={() => unpublishMutation.mutate()}
                   disabled={unpublishMutation.isPending}
-                  className="px-3 py-2 rounded-xl bg-amber-400/10 hover:bg-amber-400/20 text-amber-300 border border-amber-400/30 text-xs font-mono font-semibold transition-colors disabled:opacity-50"
+                  className="px-3 py-2 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-300 text-xs font-mono font-semibold transition-colors disabled:opacity-50 shadow-2xs"
                 >
                   Unpublish
                 </button>
@@ -523,7 +523,7 @@ export const CreateEventPage: React.FC = () => {
                   type="button"
                   onClick={() => saveMutation.mutate({ publish: false })}
                   disabled={saveMutation.isPending}
-                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-[#D2FF00] hover:bg-[#BEF200] text-black font-semibold text-xs font-mono uppercase tracking-wider transition-all duration-200 shadow-[0_0_15px_rgba(210,255,0,0.2)] disabled:opacity-50"
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-stone-900 hover:bg-black text-white font-semibold text-xs font-mono uppercase tracking-wider transition-all duration-200 shadow-2xs disabled:opacity-50"
                 >
                   Update Live
                 </button>
@@ -533,7 +533,7 @@ export const CreateEventPage: React.FC = () => {
                 type="button"
                 onClick={() => saveMutation.mutate({ publish: true })}
                 disabled={saveMutation.isPending}
-                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-[#D2FF00] hover:bg-[#BEF200] text-black font-semibold text-xs font-mono uppercase tracking-wider transition-all duration-200 shadow-[0_0_20px_rgba(210,255,0,0.25)] disabled:opacity-50"
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-stone-900 hover:bg-black text-white font-semibold text-xs font-mono uppercase tracking-wider transition-all duration-200 shadow-2xs disabled:opacity-50"
               >
                 <Globe className="w-3.5 h-3.5" />
                 <span>{saveMutation.isPending ? 'Publishing...' : 'Publish Live'}</span>
@@ -547,21 +547,21 @@ export const CreateEventPage: React.FC = () => {
       {notification && (
         <div className="max-w-7xl mx-auto px-4 mt-6">
           <div
-            className={`p-4 rounded-xl border text-xs font-medium flex items-center justify-between gap-3 ${
+            className={`p-4 rounded-xl border text-xs font-medium flex items-center justify-between gap-3 shadow-2xs ${
               notification.type === 'success'
-                ? 'bg-[#0E1015] border-[#D2FF00]/40 text-[#D2FF00]'
-                : 'bg-[#0E1015] border-rose-500/40 text-rose-300'
+                ? 'bg-emerald-50 border-emerald-300 text-emerald-800'
+                : 'bg-rose-50 border-rose-300 text-rose-800'
             }`}
           >
             <div className="flex items-center gap-2">
               {notification.type === 'success' ? (
-                <CheckCircle2 className="w-5 h-5 text-[#D2FF00] shrink-0" />
+                <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
               ) : (
-                <AlertCircle className="w-5 h-5 text-rose-400 shrink-0" />
+                <AlertCircle className="w-5 h-5 text-rose-600 shrink-0" />
               )}
               <span>{notification.message}</span>
             </div>
-            <button onClick={() => setNotification(null)} className="text-gray-400 hover:text-white">
+            <button onClick={() => setNotification(null)} className="text-stone-500 hover:text-stone-900">
               <X className="w-4 h-4" />
             </button>
           </div>
@@ -573,7 +573,7 @@ export const CreateEventPage: React.FC = () => {
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
           {/* Section Navigation Tabs Sidebar */}
           <aside className="lg:col-span-3 space-y-1.5 lg:sticky lg:top-24">
-            <div className="text-[11px] font-mono uppercase tracking-wider text-gray-400 font-bold px-3 py-1">
+            <div className="text-[11px] font-mono uppercase tracking-wider text-stone-500 font-bold px-3 py-1">
               Configuration Steps
             </div>
 
@@ -592,33 +592,33 @@ export const CreateEventPage: React.FC = () => {
                 <button
                   key={section.id}
                   onClick={() => setActiveSection(section.id as any)}
-                  className={`w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-xs font-mono transition-colors text-left ${
+                  className={`w-full flex items-center gap-3 px-3.5 py-2.5 rounded-lg text-xs font-mono transition-colors text-left ${
                     isActive
-                      ? 'bg-[#14171F] text-[#D2FF00] font-bold border border-[#D2FF00]/30 shadow-lg'
-                      : 'text-gray-400 hover:text-white hover:bg-white/[0.04] border border-transparent'
+                      ? 'bg-stone-900 text-white font-bold shadow-xs'
+                      : 'text-stone-600 hover:text-stone-900 hover:bg-stone-200/60'
                   }`}
                 >
-                  <Icon className={`w-4 h-4 ${isActive ? 'text-[#D2FF00]' : 'text-gray-500'}`} />
+                  <Icon className={`w-4 h-4 ${isActive ? 'text-white' : 'text-stone-400'}`} />
                   <span>{section.label}</span>
                 </button>
               );
             })}
 
             {/* Quick summary box */}
-            <div className="pt-4 mt-4 border-t border-white/10 px-3 space-y-2 text-[11px] font-mono text-gray-500">
+            <div className="pt-4 mt-4 border-t border-stone-200/80 px-3 space-y-2 text-[11px] font-mono text-stone-500">
               <div className="flex justify-between">
                 <span>Configured Tiers:</span>
-                <span className="text-white font-bold">{ticketTiers.length}</span>
+                <span className="text-stone-900 font-bold">{ticketTiers.length}</span>
               </div>
               <div className="flex justify-between">
                 <span>Total Capacity:</span>
-                <span className="text-white font-bold">
+                <span className="text-stone-900 font-bold">
                   {ticketTiers.reduce((acc, t) => acc + (Number(t.totalCapacity) || 0), 0)}
                 </span>
               </div>
               <div className="flex justify-between">
                 <span>Min Price:</span>
-                <span className="text-emerald-400 font-bold">
+                <span className="text-stone-900 font-bold">
                   ${Math.min(...ticketTiers.map((t) => Number(t.price) || 0))}
                 </span>
               </div>
@@ -629,20 +629,20 @@ export const CreateEventPage: React.FC = () => {
           <main className="lg:col-span-9 space-y-6">
             {/* 1. Basic Information */}
             {activeSection === 'details' && (
-              <div className="bg-[#0E1015] rounded-2xl border border-white/10 p-6 sm:p-8 space-y-6 shadow-2xl">
+              <div className="bg-white rounded-xl border border-stone-200/90 p-6 sm:p-8 space-y-6 shadow-xs">
                 <div>
-                  <h2 className="text-lg sm:text-xl font-display font-bold text-white">
+                  <h2 className="text-lg sm:text-xl font-display font-black text-stone-900 uppercase tracking-tight">
                     Basic Information & Narrative
                   </h2>
-                  <p className="text-xs text-gray-400 mt-0.5">
+                  <p className="text-xs text-stone-500 mt-0.5 font-sans">
                     Establish your event's headline, editorial story, and category for discovery filters.
                   </p>
                 </div>
 
                 <div className="space-y-4">
                   <div>
-                    <label className="block text-xs font-mono uppercase text-gray-300 font-semibold mb-1.5">
-                      Event Title <span className="text-[#D2FF00]">*</span>
+                    <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5">
+                      Event Title <span className="text-stone-900">*</span>
                     </label>
                     <input
                       type="text"
@@ -652,12 +652,12 @@ export const CreateEventPage: React.FC = () => {
                         setTitle(e.target.value);
                         setHasUnsavedChanges(true);
                       }}
-                      className="w-full px-4 py-2.5 rounded-xl bg-[#14171F] border border-white/10 text-white placeholder-gray-500 text-sm focus:outline-none focus:border-[#D2FF00] transition-colors"
+                      className="w-full px-3.5 py-2.5 rounded-lg bg-[#FAF8F5] border border-stone-300 text-stone-900 placeholder-stone-400 text-sm focus:outline-none focus:border-stone-900 focus:bg-white transition-colors"
                     />
                   </div>
 
                   <div>
-                    <label className="block text-xs font-mono uppercase text-gray-300 font-semibold mb-1.5">
+                    <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5">
                       Editorial Tagline
                     </label>
                     <input
@@ -668,13 +668,13 @@ export const CreateEventPage: React.FC = () => {
                         setTagline(e.target.value);
                         setHasUnsavedChanges(true);
                       }}
-                      className="w-full px-4 py-2.5 rounded-xl bg-[#14171F] border border-white/10 text-white placeholder-gray-500 text-sm focus:outline-none focus:border-[#D2FF00] transition-colors"
+                      className="w-full px-3.5 py-2.5 rounded-lg bg-[#FAF8F5] border border-stone-300 text-stone-900 placeholder-stone-400 text-sm focus:outline-none focus:border-stone-900 focus:bg-white transition-colors"
                     />
                   </div>
 
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div>
-                      <label className="block text-xs font-mono uppercase text-gray-300 font-semibold mb-1.5">
+                      <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5">
                         Category
                       </label>
                       <select
@@ -683,7 +683,7 @@ export const CreateEventPage: React.FC = () => {
                           setCategory(e.target.value as EventCategory);
                           setHasUnsavedChanges(true);
                         }}
-                        className="w-full px-4 py-2.5 rounded-xl bg-[#14171F] border border-white/10 text-white text-sm focus:outline-none focus:border-[#D2FF00] transition-colors cursor-pointer"
+                        className="w-full px-3.5 py-2.5 rounded-lg bg-[#FAF8F5] border border-stone-300 text-stone-900 text-sm focus:outline-none focus:border-stone-900 focus:bg-white transition-colors cursor-pointer"
                       >
                         <option value="MUSIC">Live Music</option>
                         <option value="FESTIVAL">Festival</option>
@@ -697,12 +697,12 @@ export const CreateEventPage: React.FC = () => {
                     </div>
 
                     <div>
-                      <label className="block text-xs font-mono uppercase text-gray-300 font-semibold mb-1.5">
+                      <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5">
                         Generated Slug Preview
                       </label>
-                      <div className="w-full px-4 py-2.5 rounded-xl bg-[#14171F]/50 border border-white/5 text-gray-400 font-mono text-xs flex items-center justify-between">
+                      <div className="w-full px-3.5 py-2.5 rounded-lg bg-[#FAF8F5] border border-stone-200 text-stone-500 font-mono text-xs flex items-center justify-between">
                         <span className="truncate">/{generatedSlugPreview}</span>
-                        <span className="text-[10px] uppercase text-[#D2FF00] bg-[#D2FF00]/10 px-1.5 py-0.5 rounded">
+                        <span className="text-[10px] uppercase text-stone-700 bg-stone-200/70 px-1.5 py-0.5 rounded font-bold">
                           Auto-Managed
                         </span>
                       </div>
@@ -710,7 +710,7 @@ export const CreateEventPage: React.FC = () => {
                   </div>
 
                   <div>
-                    <label className="block text-xs font-mono uppercase text-gray-300 font-semibold mb-1.5">
+                    <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5">
                       Full Description & Experience Details
                     </label>
                     <textarea
@@ -721,7 +721,7 @@ export const CreateEventPage: React.FC = () => {
                         setDescription(e.target.value);
                         setHasUnsavedChanges(true);
                       }}
-                      className="w-full px-4 py-2.5 rounded-xl bg-[#14171F] border border-white/10 text-white placeholder-gray-500 text-sm focus:outline-none focus:border-[#D2FF00] transition-colors leading-relaxed"
+                      className="w-full px-3.5 py-2.5 rounded-lg bg-[#FAF8F5] border border-stone-300 text-stone-900 placeholder-stone-400 text-sm focus:outline-none focus:border-stone-900 focus:bg-white transition-colors leading-relaxed font-sans"
                     />
                   </div>
                 </div>
@@ -730,12 +730,12 @@ export const CreateEventPage: React.FC = () => {
 
             {/* 2. Date & Schedule */}
             {activeSection === 'schedule' && (
-              <div className="bg-[#0E1015] rounded-2xl border border-white/10 p-6 sm:p-8 space-y-6 shadow-2xl">
+              <div className="bg-white rounded-xl border border-stone-200/90 p-6 sm:p-8 space-y-6 shadow-xs">
                 <div>
-                  <h2 className="text-lg sm:text-xl font-display font-bold text-white">
+                  <h2 className="text-lg sm:text-xl font-display font-black text-stone-900 uppercase tracking-tight">
                     Date & Schedule
                   </h2>
-                  <p className="text-xs text-gray-400 mt-0.5">
+                  <p className="text-xs text-stone-500 mt-0.5 font-sans">
                     Define start and conclusion times. Nairobi (EAT) is default.
                   </p>
                 </div>
@@ -743,8 +743,8 @@ export const CreateEventPage: React.FC = () => {
                 <div className="space-y-4">
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div>
-                      <label className="block text-xs font-mono uppercase text-gray-300 font-semibold mb-1.5">
-                        Starts At <span className="text-[#D2FF00]">*</span>
+                      <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5">
+                        Starts At <span className="text-stone-900">*</span>
                       </label>
                       <input
                         type="datetime-local"
@@ -753,13 +753,13 @@ export const CreateEventPage: React.FC = () => {
                           setStartAt(e.target.value);
                           setHasUnsavedChanges(true);
                         }}
-                        className="w-full px-4 py-2.5 rounded-xl bg-[#14171F] border border-white/10 text-white text-sm focus:outline-none focus:border-[#D2FF00] transition-colors"
+                        className="w-full px-3.5 py-2.5 rounded-lg bg-[#FAF8F5] border border-stone-300 text-stone-900 text-sm focus:outline-none focus:border-stone-900 focus:bg-white transition-colors font-mono"
                       />
                     </div>
 
                     <div>
-                      <label className="block text-xs font-mono uppercase text-gray-300 font-semibold mb-1.5">
-                        Ends At <span className="text-[#D2FF00]">*</span>
+                      <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5">
+                        Ends At <span className="text-stone-900">*</span>
                       </label>
                       <input
                         type="datetime-local"
@@ -768,13 +768,13 @@ export const CreateEventPage: React.FC = () => {
                           setEndAt(e.target.value);
                           setHasUnsavedChanges(true);
                         }}
-                        className="w-full px-4 py-2.5 rounded-xl bg-[#14171F] border border-white/10 text-white text-sm focus:outline-none focus:border-[#D2FF00] transition-colors"
+                        className="w-full px-3.5 py-2.5 rounded-lg bg-[#FAF8F5] border border-stone-300 text-stone-900 text-sm focus:outline-none focus:border-stone-900 focus:bg-white transition-colors font-mono"
                       />
                     </div>
                   </div>
 
                   <div>
-                    <label className="block text-xs font-mono uppercase text-gray-300 font-semibold mb-1.5">
+                    <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5">
                       Event Timezone
                     </label>
                     <select
@@ -783,7 +783,7 @@ export const CreateEventPage: React.FC = () => {
                         setTimezone(e.target.value);
                         setHasUnsavedChanges(true);
                       }}
-                      className="w-full px-4 py-2.5 rounded-xl bg-[#14171F] border border-white/10 text-white text-sm focus:outline-none focus:border-[#D2FF00] transition-colors cursor-pointer"
+                      className="w-full px-3.5 py-2.5 rounded-lg bg-[#FAF8F5] border border-stone-300 text-stone-900 text-sm focus:outline-none focus:border-stone-900 focus:bg-white transition-colors cursor-pointer"
                     >
                       <option value="Africa/Nairobi">Africa/Nairobi (EAT, UTC+3)</option>
                       <option value="Africa/Cairo">Africa/Cairo (EET, UTC+2)</option>
@@ -798,21 +798,21 @@ export const CreateEventPage: React.FC = () => {
 
             {/* 3. Venue & Location */}
             {activeSection === 'venue' && (
-              <div className="bg-[#0E1015] rounded-2xl border border-white/10 p-6 sm:p-8 space-y-6 shadow-2xl">
+              <div className="bg-white rounded-xl border border-stone-200/90 p-6 sm:p-8 space-y-6 shadow-xs">
                 <div>
-                  <h2 className="text-lg sm:text-xl font-display font-bold text-white">
+                  <h2 className="text-lg sm:text-xl font-display font-black text-stone-900 uppercase tracking-tight">
                     Venue & Location
                   </h2>
-                  <p className="text-xs text-gray-400 mt-0.5">
-                    Physical venue and directions for Kenya navigators.
+                  <p className="text-xs text-stone-500 mt-0.5 font-sans">
+                    Physical venue and directions for event attendees.
                   </p>
                 </div>
 
                 <div className="space-y-4">
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div>
-                      <label className="block text-xs font-mono uppercase text-gray-300 font-semibold mb-1.5">
-                        Venue / Location Name <span className="text-[#D2FF00]">*</span>
+                      <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5">
+                        Venue / Location Name <span className="text-stone-900">*</span>
                       </label>
                       <input
                         type="text"
@@ -822,13 +822,13 @@ export const CreateEventPage: React.FC = () => {
                           setVenueName(e.target.value);
                           setHasUnsavedChanges(true);
                         }}
-                        className="w-full px-4 py-2.5 rounded-xl bg-[#14171F] border border-white/10 text-white placeholder-gray-500 text-sm focus:outline-none focus:border-[#D2FF00] transition-colors"
+                        className="w-full px-3.5 py-2.5 rounded-lg bg-[#FAF8F5] border border-stone-300 text-stone-900 placeholder-stone-400 text-sm focus:outline-none focus:border-stone-900 focus:bg-white transition-colors"
                       />
                     </div>
 
                     <div>
-                      <label className="block text-xs font-mono uppercase text-gray-300 font-semibold mb-1.5">
-                        City / Destination <span className="text-[#D2FF00]">*</span>
+                      <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5">
+                        City / Destination <span className="text-stone-900">*</span>
                       </label>
                       <input
                         type="text"
@@ -838,7 +838,7 @@ export const CreateEventPage: React.FC = () => {
                           setCity(e.target.value);
                           setHasUnsavedChanges(true);
                         }}
-                        className="w-full px-4 py-2.5 rounded-xl bg-[#14171F] border border-white/10 text-white placeholder-gray-500 text-sm focus:outline-none focus:border-[#D2FF00] transition-colors"
+                        className="w-full px-3.5 py-2.5 rounded-lg bg-[#FAF8F5] border border-stone-300 text-stone-900 placeholder-stone-400 text-sm focus:outline-none focus:border-stone-900 focus:bg-white transition-colors"
                       />
                       {/* Kenya Quick Pick Chips */}
                       <div className="flex flex-wrap gap-1.5 mt-2">
@@ -850,10 +850,10 @@ export const CreateEventPage: React.FC = () => {
                               setCity(c);
                               setHasUnsavedChanges(true);
                             }}
-                            className={`px-2 py-0.5 rounded text-[10px] font-mono transition-colors ${
+                            className={`px-2.5 py-1 rounded text-[10px] font-mono transition-colors ${
                               city === c
-                                ? 'bg-[#D2FF00] text-black font-bold'
-                                : 'bg-white/5 hover:bg-white/10 text-gray-400'
+                                ? 'bg-stone-900 text-white font-bold'
+                                : 'bg-stone-100 hover:bg-stone-200 text-stone-600'
                             }`}
                           >
                             {c}
@@ -864,7 +864,7 @@ export const CreateEventPage: React.FC = () => {
                   </div>
 
                   <div>
-                    <label className="block text-xs font-mono uppercase text-gray-300 font-semibold mb-1.5">
+                    <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5">
                       Physical Address & Landmarks
                     </label>
                     <input
@@ -875,7 +875,7 @@ export const CreateEventPage: React.FC = () => {
                         setVenueAddress(e.target.value);
                         setHasUnsavedChanges(true);
                       }}
-                      className="w-full px-4 py-2.5 rounded-xl bg-[#14171F] border border-white/10 text-white placeholder-gray-500 text-sm focus:outline-none focus:border-[#D2FF00] transition-colors"
+                      className="w-full px-3.5 py-2.5 rounded-lg bg-[#FAF8F5] border border-stone-300 text-stone-900 placeholder-stone-400 text-sm focus:outline-none focus:border-stone-900 focus:bg-white transition-colors"
                     />
                   </div>
                 </div>
@@ -884,13 +884,13 @@ export const CreateEventPage: React.FC = () => {
 
             {/* 4. Artwork & Flyer */}
             {activeSection === 'artwork' && (
-              <div className="bg-[#0E1015] rounded-2xl border border-white/10 p-6 sm:p-8 space-y-6 shadow-2xl">
+              <div className="bg-white rounded-xl border border-stone-200/90 p-6 sm:p-8 space-y-6 shadow-xs">
                 <div>
-                  <h2 className="text-lg sm:text-xl font-display font-bold text-white">
+                  <h2 className="text-lg sm:text-xl font-display font-black text-stone-900 uppercase tracking-tight">
                     Artwork & Visual Identity
                   </h2>
-                  <p className="text-xs text-gray-400 mt-0.5">
-                    High resolution cover artwork or event poster (16:9 or 16:10 aspect ratio recommended).
+                  <p className="text-xs text-stone-500 mt-0.5 font-sans">
+                    High resolution cover artwork or event poster (16:10 aspect ratio recommended).
                   </p>
                 </div>
 
@@ -898,7 +898,7 @@ export const CreateEventPage: React.FC = () => {
                   {/* Upload or URL input */}
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div>
-                      <label className="block text-xs font-mono uppercase text-gray-300 font-semibold mb-1.5">
+                      <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5">
                         Direct Cover URL
                       </label>
                       <input
@@ -909,16 +909,16 @@ export const CreateEventPage: React.FC = () => {
                           setCoverImageUrl(e.target.value);
                           setHasUnsavedChanges(true);
                         }}
-                        className="w-full px-4 py-2.5 rounded-xl bg-[#14171F] border border-white/10 text-white placeholder-gray-500 text-xs focus:outline-none focus:border-[#D2FF00] transition-colors font-mono"
+                        className="w-full px-3.5 py-2.5 rounded-lg bg-[#FAF8F5] border border-stone-300 text-stone-900 placeholder-stone-400 text-xs focus:outline-none focus:border-stone-900 focus:bg-white transition-colors font-mono"
                       />
                     </div>
 
                     <div>
-                      <label className="block text-xs font-mono uppercase text-gray-300 font-semibold mb-1.5">
+                      <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5">
                         Upload Flyer File (Max 5MB)
                       </label>
-                      <label className="w-full px-4 py-2.5 rounded-xl bg-[#14171F] border border-dashed border-white/20 hover:border-[#D2FF00] text-gray-300 hover:text-white text-xs font-mono flex items-center justify-center gap-2 cursor-pointer transition-colors">
-                        <Upload className="w-4 h-4 text-[#D2FF00]" />
+                      <label className="w-full px-3.5 py-2.5 rounded-lg bg-[#FAF8F5] border border-dashed border-stone-300 hover:border-stone-900 text-stone-700 hover:text-stone-900 text-xs font-mono flex items-center justify-center gap-2 cursor-pointer transition-colors">
+                        <Upload className="w-4 h-4 text-stone-600" />
                         <span>Choose Local Image File</span>
                         <input
                           type="file"
@@ -932,10 +932,10 @@ export const CreateEventPage: React.FC = () => {
 
                   {/* Preset Quick Select */}
                   <div>
-                    <span className="text-[11px] font-mono text-gray-400 block mb-2">
+                    <span className="text-[11px] font-mono text-stone-500 block mb-2">
                       Or select from curated Outside.vip event aesthetics:
                     </span>
-                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
                       {PRESET_COVERS.map((preset) => (
                         <button
                           key={preset.name}
@@ -944,20 +944,20 @@ export const CreateEventPage: React.FC = () => {
                             setCoverImageUrl(preset.url);
                             setHasUnsavedChanges(true);
                           }}
-                          className={`p-2 rounded-xl border text-left space-y-1.5 transition-all ${
+                          className={`p-2 rounded-lg border text-left space-y-1.5 transition-all ${
                             coverImageUrl === preset.url
-                              ? 'bg-[#14171F] border-[#D2FF00] ring-1 ring-[#D2FF00]'
-                              : 'bg-[#14171F]/50 border-white/10 hover:border-white/20'
+                              ? 'bg-stone-50 border-stone-900 ring-2 ring-stone-900'
+                              : 'bg-white border-stone-200 hover:border-stone-400'
                           }`}
                         >
-                          <div className="aspect-[16/10] rounded-lg overflow-hidden bg-black/40">
+                          <div className="aspect-[16/10] rounded overflow-hidden bg-stone-900">
                             <img
                               src={preset.url}
                               alt={preset.name}
                               className="w-full h-full object-cover"
                             />
                           </div>
-                          <span className="text-[11px] font-mono text-gray-300 block truncate">
+                          <span className="text-[11px] font-mono text-stone-700 font-bold block truncate">
                             {preset.name}
                           </span>
                         </button>
@@ -968,14 +968,14 @@ export const CreateEventPage: React.FC = () => {
                   {/* Artwork Live Preview */}
                   {coverImageUrl && (
                     <div className="space-y-2">
-                      <span className="text-xs font-mono text-gray-400">Current Artwork Preview:</span>
-                      <div className="relative aspect-[16/9] rounded-2xl overflow-hidden bg-[#14171F] border border-white/10 max-w-2xl">
+                      <span className="text-xs font-mono text-stone-500">Current Artwork Preview:</span>
+                      <div className="relative aspect-[16/10] rounded-xl overflow-hidden bg-stone-900 border border-stone-200 max-w-xl">
                         <img
                           src={coverImageUrl}
                           alt="Cover Preview"
                           className="w-full h-full object-cover"
                         />
-                        <div className="absolute bottom-3 right-3 px-3 py-1 rounded-lg bg-black/80 backdrop-blur-md text-[11px] font-mono text-[#D2FF00] border border-white/10">
+                        <div className="absolute bottom-3 right-3 px-3 py-1 rounded bg-black/80 backdrop-blur-md text-[11px] font-mono text-white border border-white/20">
                           Active Flyer Preview
                         </div>
                       </div>
@@ -987,20 +987,20 @@ export const CreateEventPage: React.FC = () => {
 
             {/* 5. Ticket Tiers & Capacity */}
             {activeSection === 'tickets' && (
-              <div className="bg-[#0E1015] rounded-2xl border border-white/10 p-6 sm:p-8 space-y-6 shadow-2xl">
+              <div className="bg-white rounded-xl border border-stone-200/90 p-6 sm:p-8 space-y-6 shadow-xs">
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                   <div>
-                    <h2 className="text-lg sm:text-xl font-display font-bold text-white">
+                    <h2 className="text-lg sm:text-xl font-display font-black text-stone-900 uppercase tracking-tight">
                       Ticket Tiers & Inventory Management
                     </h2>
-                    <p className="text-xs text-gray-400 mt-0.5">
+                    <p className="text-xs text-stone-500 mt-0.5 font-sans">
                       Configure prices, capacity, per-order limits, and sales windows. Free tickets ($0) supported.
                     </p>
                   </div>
                   <button
                     type="button"
                     onClick={addTicketTier}
-                    className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#D2FF00] hover:bg-[#BEF200] text-black font-semibold text-xs font-mono uppercase tracking-wider transition-all duration-200 shadow-[0_0_15px_rgba(210,255,0,0.2)] shrink-0"
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-stone-900 hover:bg-black text-white font-semibold text-xs font-mono uppercase tracking-wider transition-all duration-200 shadow-2xs shrink-0"
                   >
                     <Plus className="w-4 h-4" />
                     Add Tier
@@ -1013,18 +1013,18 @@ export const CreateEventPage: React.FC = () => {
                     return (
                       <div
                         key={tier.tempId}
-                        className="p-5 rounded-2xl bg-[#14171F] border border-white/10 space-y-4"
+                        className="p-5 rounded-xl bg-[#FAF8F5] border border-stone-200 space-y-4"
                       >
                         <div className="flex items-center justify-between">
                           <div className="flex items-center gap-2">
-                            <span className="w-5 h-5 rounded-full bg-[#D2FF00]/10 border border-[#D2FF00]/30 flex items-center justify-center text-[10px] font-mono font-bold text-[#D2FF00]">
+                            <span className="w-5 h-5 rounded-full bg-stone-900 text-white flex items-center justify-center text-[10px] font-mono font-bold">
                               {index + 1}
                             </span>
-                            <span className="text-xs font-mono text-white font-bold uppercase tracking-wider">
+                            <span className="text-xs font-mono text-stone-900 font-bold uppercase tracking-wider">
                               {tier.name || `Tier #${index + 1}`}
                             </span>
                             {hasSales && (
-                              <span className="px-2 py-0.5 rounded bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-[10px] font-mono">
+                              <span className="px-2 py-0.5 rounded bg-emerald-50 border border-emerald-300 text-emerald-700 text-[10px] font-mono font-bold">
                                 {tier.soldQuantity} Sold
                               </span>
                             )}
@@ -1037,7 +1037,7 @@ export const CreateEventPage: React.FC = () => {
                               onChange={(e) =>
                                 updateTier(tier.tempId, 'status', e.target.value as TicketTierStatus)
                               }
-                              className="px-2 py-1 rounded-lg bg-[#0E1015] border border-white/10 text-[11px] font-mono text-gray-300 focus:outline-none"
+                              className="px-2.5 py-1 rounded bg-white border border-stone-300 text-[11px] font-mono text-stone-700 focus:outline-none"
                             >
                               <option value="ACTIVE">ACTIVE</option>
                               <option value="PAUSED">PAUSED</option>
@@ -1049,7 +1049,7 @@ export const CreateEventPage: React.FC = () => {
                               <button
                                 type="button"
                                 onClick={() => removeTicketTier(tier.tempId)}
-                                className={`p-1.5 rounded-lg text-gray-400 hover:text-rose-400 hover:bg-rose-950/30 transition-colors ${
+                                className={`p-1.5 rounded-lg text-stone-400 hover:text-rose-600 hover:bg-rose-50 transition-colors ${
                                   hasSales ? 'opacity-40 cursor-not-allowed' : ''
                                 }`}
                                 title={
@@ -1067,24 +1067,24 @@ export const CreateEventPage: React.FC = () => {
                         {/* Fields Row 1: Name & Price */}
                         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                           <div className="sm:col-span-2">
-                            <label className="block text-[11px] font-mono uppercase text-gray-400 mb-1">
-                              Tier Name <span className="text-[#D2FF00]">*</span>
+                            <label className="block text-[11px] font-mono uppercase text-stone-600 font-semibold mb-1">
+                              Tier Name <span className="text-stone-900">*</span>
                             </label>
                             <input
                               type="text"
                               value={tier.name}
                               onChange={(e) => updateTier(tier.tempId, 'name', e.target.value)}
                               placeholder="e.g. VIP Backstage Pass"
-                              className="w-full px-3 py-2 rounded-xl bg-[#0E1015] border border-white/10 text-white text-xs focus:outline-none focus:border-[#D2FF00]"
+                              className="w-full px-3 py-2 rounded-lg bg-white border border-stone-300 text-stone-900 text-xs focus:outline-none focus:border-stone-900"
                             />
                           </div>
 
                           <div>
-                            <label className="block text-[11px] font-mono uppercase text-gray-400 mb-1">
-                              Price (USD) <span className="text-[#D2FF00]">*</span>
+                            <label className="block text-[11px] font-mono uppercase text-stone-600 font-semibold mb-1">
+                              Price (USD) <span className="text-stone-900">*</span>
                             </label>
                             <div className="relative">
-                              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 font-mono text-xs">
+                              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-stone-400 font-mono text-xs">
                                 $
                               </span>
                               <input
@@ -1099,7 +1099,7 @@ export const CreateEventPage: React.FC = () => {
                                     Math.max(0, parseFloat(e.target.value) || 0)
                                   )
                                 }
-                                className="w-full pl-7 pr-3 py-2 rounded-xl bg-[#0E1015] border border-white/10 text-white text-xs font-mono focus:outline-none focus:border-[#D2FF00]"
+                                className="w-full pl-7 pr-3 py-2 rounded-lg bg-white border border-stone-300 text-stone-900 text-xs font-mono focus:outline-none focus:border-stone-900"
                               />
                             </div>
                           </div>
@@ -1108,8 +1108,8 @@ export const CreateEventPage: React.FC = () => {
                         {/* Fields Row 2: Capacity, Min, Max */}
                         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                           <div>
-                            <label className="block text-[11px] font-mono uppercase text-gray-400 mb-1">
-                              Total Capacity <span className="text-[#D2FF00]">*</span>
+                            <label className="block text-[11px] font-mono uppercase text-stone-600 font-semibold mb-1">
+                              Total Capacity <span className="text-stone-900">*</span>
                             </label>
                             <input
                               type="number"
@@ -1122,12 +1122,12 @@ export const CreateEventPage: React.FC = () => {
                                   Math.max(1, parseInt(e.target.value, 10) || 1)
                                 )
                               }
-                              className="w-full px-3 py-2 rounded-xl bg-[#0E1015] border border-white/10 text-white text-xs font-mono focus:outline-none focus:border-[#D2FF00]"
+                              className="w-full px-3 py-2 rounded-lg bg-white border border-stone-300 text-stone-900 text-xs font-mono focus:outline-none focus:border-stone-900"
                             />
                           </div>
 
                           <div>
-                            <label className="block text-[11px] font-mono uppercase text-gray-400 mb-1">
+                            <label className="block text-[11px] font-mono uppercase text-stone-600 font-semibold mb-1">
                               Min Per Order
                             </label>
                             <input
@@ -1141,12 +1141,12 @@ export const CreateEventPage: React.FC = () => {
                                   Math.max(1, parseInt(e.target.value, 10) || 1)
                                 )
                               }
-                              className="w-full px-3 py-2 rounded-xl bg-[#0E1015] border border-white/10 text-white text-xs font-mono focus:outline-none focus:border-[#D2FF00]"
+                              className="w-full px-3 py-2 rounded-lg bg-white border border-stone-300 text-stone-900 text-xs font-mono focus:outline-none focus:border-stone-900"
                             />
                           </div>
 
                           <div>
-                            <label className="block text-[11px] font-mono uppercase text-gray-400 mb-1">
+                            <label className="block text-[11px] font-mono uppercase text-stone-600 font-semibold mb-1">
                               Max Per Order
                             </label>
                             <input
@@ -1160,14 +1160,14 @@ export const CreateEventPage: React.FC = () => {
                                   Math.max(1, parseInt(e.target.value, 10) || 1)
                                 )
                               }
-                              className="w-full px-3 py-2 rounded-xl bg-[#0E1015] border border-white/10 text-white text-xs font-mono focus:outline-none focus:border-[#D2FF00]"
+                              className="w-full px-3 py-2 rounded-lg bg-white border border-stone-300 text-stone-900 text-xs font-mono focus:outline-none focus:border-stone-900"
                             />
                           </div>
                         </div>
 
                         {/* Description / Perks */}
                         <div>
-                          <label className="block text-[11px] font-mono uppercase text-gray-400 mb-1">
+                          <label className="block text-[11px] font-mono uppercase text-stone-600 font-semibold mb-1">
                             Perks & Description
                           </label>
                           <input
@@ -1177,7 +1177,7 @@ export const CreateEventPage: React.FC = () => {
                             onChange={(e) =>
                               updateTier(tier.tempId, 'description', e.target.value)
                             }
-                            className="w-full px-3 py-2 rounded-xl bg-[#0E1015] border border-white/10 text-white text-xs focus:outline-none focus:border-[#D2FF00]"
+                            className="w-full px-3 py-2 rounded-lg bg-white border border-stone-300 text-stone-900 text-xs focus:outline-none focus:border-stone-900"
                           />
                         </div>
                       </div>
@@ -1189,12 +1189,12 @@ export const CreateEventPage: React.FC = () => {
 
             {/* 6. Policies & Guidelines */}
             {activeSection === 'policies' && (
-              <div className="bg-[#0E1015] rounded-2xl border border-white/10 p-6 sm:p-8 space-y-6 shadow-2xl">
+              <div className="bg-white rounded-xl border border-stone-200/90 p-6 sm:p-8 space-y-6 shadow-xs">
                 <div>
-                  <h2 className="text-lg sm:text-xl font-display font-bold text-white">
+                  <h2 className="text-lg sm:text-xl font-display font-black text-stone-900 uppercase tracking-tight">
                     Event Policies & Attendee Guidelines
                   </h2>
-                  <p className="text-xs text-gray-400 mt-0.5">
+                  <p className="text-xs text-stone-500 mt-0.5 font-sans">
                     Clear admission rules displayed to attendees on the event page.
                   </p>
                 </div>
@@ -1202,7 +1202,7 @@ export const CreateEventPage: React.FC = () => {
                 <div className="space-y-4">
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div>
-                      <label className="block text-xs font-mono uppercase text-gray-300 font-semibold mb-1.5">
+                      <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5">
                         Age Restriction
                       </label>
                       <select
@@ -1211,7 +1211,7 @@ export const CreateEventPage: React.FC = () => {
                           setAgeRestriction(e.target.value);
                           setHasUnsavedChanges(true);
                         }}
-                        className="w-full px-4 py-2.5 rounded-xl bg-[#14171F] border border-white/10 text-white text-sm focus:outline-none focus:border-[#D2FF00] cursor-pointer"
+                        className="w-full px-3.5 py-2.5 rounded-lg bg-[#FAF8F5] border border-stone-300 text-stone-900 text-sm focus:outline-none focus:border-stone-900 cursor-pointer"
                       >
                         <option value="All Ages">All Ages</option>
                         <option value="18+">18+ (Valid Photo ID Required)</option>
@@ -1220,7 +1220,7 @@ export const CreateEventPage: React.FC = () => {
                     </div>
 
                     <div>
-                      <label className="block text-xs font-mono uppercase text-gray-300 font-semibold mb-1.5">
+                      <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5">
                         Dress Code Guideline
                       </label>
                       <input
@@ -1231,13 +1231,13 @@ export const CreateEventPage: React.FC = () => {
                           setDressCode(e.target.value);
                           setHasUnsavedChanges(true);
                         }}
-                        className="w-full px-4 py-2.5 rounded-xl bg-[#14171F] border border-white/10 text-white placeholder-gray-500 text-sm focus:outline-none focus:border-[#D2FF00]"
+                        className="w-full px-3.5 py-2.5 rounded-lg bg-[#FAF8F5] border border-stone-300 text-stone-900 placeholder-stone-400 text-sm focus:outline-none focus:border-stone-900"
                       />
                     </div>
                   </div>
 
                   <div>
-                    <label className="block text-xs font-mono uppercase text-gray-300 font-semibold mb-1.5">
+                    <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5">
                       Door Policy & Entry Rules
                     </label>
                     <input
@@ -1248,7 +1248,7 @@ export const CreateEventPage: React.FC = () => {
                         setDoorPolicy(e.target.value);
                         setHasUnsavedChanges(true);
                       }}
-                      className="w-full px-4 py-2.5 rounded-xl bg-[#14171F] border border-white/10 text-white placeholder-gray-500 text-sm focus:outline-none focus:border-[#D2FF00]"
+                      className="w-full px-3.5 py-2.5 rounded-lg bg-[#FAF8F5] border border-stone-300 text-stone-900 placeholder-stone-400 text-sm focus:outline-none focus:border-stone-900"
                     />
                   </div>
                 </div>
@@ -1257,19 +1257,19 @@ export const CreateEventPage: React.FC = () => {
 
             {/* 7. Live Card Preview */}
             {activeSection === 'preview' && (
-              <div className="bg-[#0E1015] rounded-2xl border border-white/10 p-6 sm:p-8 space-y-6 shadow-2xl">
+              <div className="bg-white rounded-xl border border-stone-200/90 p-6 sm:p-8 space-y-6 shadow-xs">
                 <div>
-                  <h2 className="text-lg sm:text-xl font-display font-bold text-white">
+                  <h2 className="text-lg sm:text-xl font-display font-black text-stone-900 uppercase tracking-tight">
                     Live Discovery Card Preview
                   </h2>
-                  <p className="text-xs text-gray-400 mt-0.5">
-                    This is how your event will appear on the Outside.vip public catalogue.
+                  <p className="text-xs text-stone-500 mt-0.5 font-sans">
+                    This is how your event will appear in the Outside.vip public discovery catalogue.
                   </p>
                 </div>
 
                 <div className="max-w-sm mx-auto">
-                  <div className="rounded-xl overflow-hidden border border-gray-200 bg-white text-gray-900 shadow-md space-y-0">
-                    <div className="aspect-[16/10] relative overflow-hidden bg-gray-100">
+                  <div className="rounded-lg overflow-hidden border border-stone-200 bg-white text-stone-900 shadow-md p-3 space-y-3">
+                    <div className="aspect-[16/10] relative overflow-hidden rounded-md bg-stone-900">
                       <img
                         src={coverImageUrl}
                         alt="Cover"
@@ -1280,22 +1280,22 @@ export const CreateEventPage: React.FC = () => {
                       </div>
                     </div>
 
-                    <div className="p-4 space-y-1.5">
-                      <div className="text-[11px] font-mono uppercase tracking-wider text-gray-500 font-medium">
+                    <div className="space-y-1.5">
+                      <div className="text-[11px] font-mono uppercase tracking-wider text-stone-500 font-bold">
                         {new Date(startAt).toLocaleDateString('en-US', {
                           weekday: 'short',
                           month: 'short',
                           day: 'numeric',
-                        })}
+                        }).toUpperCase()}
                       </div>
-                      <h3 className="font-bold text-gray-900 text-base leading-snug line-clamp-1">
+                      <h3 className="font-display font-black text-stone-900 text-base uppercase leading-snug line-clamp-1">
                         {title || 'Your Event Title'}
                       </h3>
-                      <div className="text-xs text-gray-500 flex items-center justify-between pt-1">
-                        <span className="truncate max-w-[150px]">
+                      <div className="text-xs text-stone-500 flex items-center justify-between pt-1">
+                        <span className="truncate max-w-[150px] font-mono text-[11px]">
                           {venueName || city || 'Kenya'}
                         </span>
-                        <span className="font-bold text-gray-900 font-mono">
+                        <span className="font-bold text-stone-900 font-mono text-xs">
                           From ${Math.min(...ticketTiers.map((t) => Number(t.price) || 0))}
                         </span>
                       </div>

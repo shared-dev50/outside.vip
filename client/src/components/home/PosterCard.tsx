@@ -86,7 +86,7 @@ export const PosterCard: React.FC<PosterCardProps> = ({
         </div>
 
         {/* 2. Structured Information Below Poster (Mirroring Reference) */}
-        <div className="pt-3 pb-1 space-y-1">
+        <div className="pt-3 pb-3 sm:pb-3.5 space-y-1">
           {/* Date: "12 NOVEMBER || 2026" */}
           <div className="font-display font-black text-xs sm:text-sm tracking-wider text-stone-900 uppercase">
             {formatPosterDate(event.startAt)}
@@ -103,7 +103,7 @@ export const PosterCard: React.FC<PosterCardProps> = ({
 
         {/* 3. Four-point sparkle icon (✦) on elevated hero card (as in reference Card 2) */}
         {isElevated && (
-          <div className="absolute bottom-2.5 right-2.5 text-[#96846D] pointer-events-none select-none text-xs">
+          <div className="absolute bottom-1.5 sm:bottom-2 right-2.5 sm:right-3 text-[#96846D] pointer-events-none select-none text-[11px] leading-none">
             ✦
           </div>
         )}

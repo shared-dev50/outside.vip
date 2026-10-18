@@ -36,6 +36,8 @@ export const Navbar: React.FC = () => {
     ? isScrolled
       ? 'bg-[#FAF8F5]/90 backdrop-blur-md border-b border-stone-200/80 shadow-xs'
       : 'bg-transparent border-b border-transparent'
+    : isDiscover
+    ? 'bg-[#FAF8F5]/95 backdrop-blur-md border-b border-stone-200/80 shadow-2xs'
     : 'bg-white/95 backdrop-blur-md border-b border-gray-200';
 
   return (
