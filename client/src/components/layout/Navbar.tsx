@@ -183,6 +183,17 @@ export const Navbar: React.FC = () => {
                     <div className="font-semibold text-stone-900">Attendee Profile</div>
                     <div className="text-[10px] text-stone-500">Alex Mwangi</div>
                   </button>
+                  <button
+                    onClick={async () => {
+                      await quickLoginAs('admin');
+                      setShowAccountMenu(false);
+                      navigate('/organizer');
+                    }}
+                    className="w-full text-left px-2.5 py-1.5 rounded hover:bg-stone-50 text-stone-700 block"
+                  >
+                    <div className="font-semibold text-stone-900">Admin Profile</div>
+                    <div className="text-[10px] text-stone-500">Outside Admin</div>
+                  </button>
                   <div className="pt-1 border-t border-stone-100">
                     <Link
                       to="/scanner"
@@ -268,15 +279,29 @@ export const Navbar: React.FC = () => {
                 Sign out ({user.name})
               </button>
             ) : (
-              <button
-                onClick={async () => {
-                  await quickLoginAs('organizer');
-                  setMobileMenuOpen(false);
-                }}
-                className="text-xs text-stone-700 font-semibold hover:underline"
-              >
-                Sign in (Demo)
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={async () => {
+                    await quickLoginAs('organizer');
+                    setMobileMenuOpen(false);
+                    navigate('/organizer');
+                  }}
+                  className="text-xs text-stone-700 font-semibold hover:underline"
+                >
+                  Organizer
+                </button>
+                <span className="text-stone-300">•</span>
+                <button
+                  onClick={async () => {
+                    await quickLoginAs('admin');
+                    setMobileMenuOpen(false);
+                    navigate('/organizer');
+                  }}
+                  className="text-xs text-stone-700 font-semibold hover:underline"
+                >
+                  Admin
+                </button>
+              </div>
             )}
           </div>
         </div>
