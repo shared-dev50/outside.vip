@@ -1,126 +1,227 @@
 # Outside.vip — Live Experiences, Curated
 
-A secure, high-velocity event discovery and ticketing platform built with modern TypeScript, Express, Prisma, PostgreSQL, React, Vite, and Tailwind CSS.
+**Discover events. Book tickets. Experience more.**
 
----
+Outside.vip is an event discovery and ticketing platform built with React, TypeScript, Express, and PostgreSQL. It helps attendees discover events and purchase tickets, while organizers can manage events, track sales, and validate tickets at the gate.
 
-## ⚡ Tech Stack
+## Features
 
-- **Backend**: Node.js 20+, Express, TypeScript, Zod, Prisma ORM, PostgreSQL
-- **Frontend**: React 18, Vite, TypeScript, React Router 6, TanStack Query, Tailwind CSS, Lucide Icons
-- **Database**: PostgreSQL (Prisma migrations + seeds)
-- **Security & Payments**: Stripe Checkout (M-Pesa ready adapter), unguessable cryptographic tokens, atomic check-in transactions
-- **Testing**: Vitest, Supertest
+- **Event discovery:** Browse, search, filter, and sort events by category, city, and date.
+- **Ticket booking:** Select ticket tiers and quantities with server-side pricing and availability checks.
+- **Secure checkout:** Stripe Checkout integration with payment verification through webhooks.
+- **Digital tickets:** Unique ticket credentials and QR-code-based attendee passes.
+- **Event management:** Create, edit, publish, and manage events through the organizer dashboard.
+- **QR check-in:** Validate tickets and prevent duplicate check-ins.
+- **Cloudinary uploads:** Store and optimize event cover images.
+- **Security:** Authentication, role-based access, input validation, and protected order access.
+- **Marketplace-ready financials:** Track platform commission and organizer net amounts, with payouts planned for a future phase.
 
----
+## Tech Stack
 
-## 🛠️ Project Structure
+| Area | Technologies |
+|---|---|
+| Frontend | React 18, Vite, TypeScript, React Router |
+| Styling | Tailwind CSS, Lucide Icons |
+| Data fetching | TanStack Query |
+| Backend | Node.js, Express, TypeScript |
+| Validation | Zod |
+| Database | PostgreSQL, Prisma ORM |
+| Payments | Stripe Checkout |
+| Image storage | Cloudinary |
+| Testing | Vitest, Supertest |
 
-```
+## Project Structure
+
+```text
 outside.vip/
-├── package.json              # Monorepo workspaces config (server, client)
-├── .env.example              # Environment variables template
+├── client/
+│   └── src/
+│       ├── components/
+│       ├── context/
+│       ├── lib/
+│       ├── pages/
+│       ├── types/
+│       ├── App.tsx
+│       └── main.tsx
 ├── server/
 │   ├── prisma/
-│   │   ├── schema.prisma     # Normalized PostgreSQL schema
-│   │   ├── migrations/       # Versioned Prisma migration history
-│   │   └── seed.ts           # Realistic seed data (events, tiers, users)
-│   ├── src/
-│   │   ├── config/           # Validated env via Zod
-│   │   ├── db/               # Prisma client singleton
-│   │   ├── middleware/       # Auth (JWT/roles), error handler
-│   │   ├── modules/
-│   │   │   ├── auth/         # Register, Login, Me
-│   │   │   ├── events/       # Discovery, search, filters, slug lookup
-│   │   │   └── health/       # Health check with live DB probe
-│   │   ├── app.ts            # Express application setup
-│   │   ├── index.ts          # Server bootstrap & graceful shutdown
-│   │   └── tests/            # Vitest integration test suite
-│   └── tsconfig.json
-├── client/
-│   ├── src/
-│   │   ├── components/layout/# Navbar with demo login, Footer
-│   │   ├── context/          # AuthContext with token persistence
-│   │   ├── lib/              # Typed API client
-│   │   ├── pages/
-│   │   │   ├── HomePage.tsx               # Discovery, hero spotlight, filters
-│   │   │   ├── EventDetailPage.tsx        # Tier selector, interactive subtotal
-│   │   │   ├── OrganizerDashboardPage.tsx # Sales metrics, managed events
-│   │   │   ├── CreateEventPage.tsx        # 6-section dedicated event editor
-│   │   │   ├── ScannerPage.tsx            # Browser QR check-in & token validator
-│   │   │   └── OrderConfirmationPage.tsx  # Attendee digital pass with QR code
-│   │   ├── types/            # Shared TypeScript contracts
-│   │   ├── App.tsx           # React Router route tree
-│   │   └── main.tsx          # React mount & QueryClientProvider
-│   ├── tailwind.config.js    # Outside.vip dark editorial theme
-│   └── vite.config.ts        # Vite config with /api proxy
+│   │   ├── migrations/
+│   │   ├── schema.prisma
+│   │   └── seed.ts
+│   └── src/
+│       ├── config/
+│       ├── db/
+│       ├── middleware/
+│       ├── modules/
+│       ├── lib/
+│       ├── app.ts
+│       └── index.ts
+├── .env.example
+├── package.json
+└── README.md
 ```
 
----
-
-## 🚀 Quickstart
+## Getting Started
 
 ### 1. Prerequisites
-- Node.js v20+
-- PostgreSQL running locally or remotely
 
-### 2. Environment Setup
+Install the following:
+
+- Node.js 20 or later
+- PostgreSQL
+- npm
+- Stripe CLI (for local payment webhook testing)
+
+### 2. Install dependencies
+
+Clone the repository and enter the project directory:
+
 ```bash
-# Copy environment files
+git clone <repository-url>
+cd outside.vip
+npm install
+```
+
+Replace `<repository-url>` with your repository URL.
+
+### 3. Configure environment variables
+
+Create the environment files from their templates if they do not already exist:
+
+```bash
 cp .env.example .env
 cp server/.env.example server/.env
 cp client/.env.example client/.env
 ```
 
-Ensure `DATABASE_URL` in `.env` and `server/.env` points to your PostgreSQL instance:
-```bash
+Configure the required variables using the example files as a guide. At minimum, ensure the backend has the correct database connection and Stripe test credentials.
+
+Example database URL:
+
+```env
 DATABASE_URL="postgresql://username:password@localhost:5432/outside_vip?schema=public"
 ```
 
-### 3. Install Dependencies
+Use your own credentials and keep `.env` files out of version control. Never commit API keys, database passwords, or webhook signing secrets.
+
+### 4. Set up the database
+
+Apply the project's Prisma migrations:
+
 ```bash
-npm install
+npm run db:migrate
 ```
 
-### 4. Database Setup & Seed
-```bash
-# Push schema & generate Prisma client
-npm run db:migrate
+To populate the database with sample data, run:
 
-# Seed with rich sample events, ticket tiers, organizers, and sample orders
+```bash
 npm run db:seed
 ```
 
-### 5. Running the Application
+**Note:** Seeding may create or modify sample records. Use a development database and check the seed script before running it against a database containing data you need to preserve.
+
+### 5. Start the application
+
+From the project root, run:
+
 ```bash
-# Start both backend (port 4000) and frontend (port 5173) concurrently:
 npm run dev
 ```
-- Public Platform: `http://localhost:5173`
-- Organizer Portal: `http://localhost:5173/organizer`
-- Dedicated Event Editor: `http://localhost:5173/organizer/events/new`
-- Browser Door Scanner: `http://localhost:5173/scanner`
-- Health Endpoint: `http://localhost:4000/api/health`
 
----
+The frontend and backend should be available at:
 
-## 🧪 Testing & Verification
+| Service | URL |
+|---|---|
+| Public website | http://localhost:5173 |
+| Organizer dashboard | http://localhost:5173/organizer |
+| Create event | http://localhost:5173/organizer/events/new |
+| QR scanner | http://localhost:5173/scanner |
+| Backend health check | http://localhost:4000/api/health |
+| API documentation | http://localhost:4000/docs |
+
+The API documentation URL is available only if the project has an API documentation route configured.
+
+## Stripe Checkout Testing
+
+Outside.vip uses Stripe Checkout for test payments. No real money should be charged when using Stripe test credentials and test card details.
+
+### 1. Start the webhook listener
+
+Make sure the Stripe CLI is authenticated to the **Outside.vip sandbox**, then run:
 
 ```bash
-# Run all test suites across workspaces:
+stripe listen \
+  --events checkout.session.completed,checkout.session.expired,checkout.session.async_payment_succeeded,checkout.session.async_payment_failed \
+  --forward-to localhost:4000/api/webhooks/stripe
+```
+
+Keep this terminal running. The CLI will print a webhook signing secret beginning with `whsec_`.
+
+### 2. Configure the webhook secret
+
+Set the generated secret as `STRIPE_WEBHOOK_SECRET` in `server/.env`, then restart the backend.
+
+Use the secret generated by your current listener. Do not commit it to Git.
+
+### 3. Complete a test purchase
+
+1. Open a published event on the local website.
+2. Select a ticket tier and quantity.
+3. Enter the required attendee details.
+4. Continue to Stripe Checkout.
+5. Use the following test card:
+
+| Field | Test value |
+|---|---|
+| Card number | `4242 4242 4242 4242` |
+| Expiry | Any future date |
+| CVC | Any three digits |
+
+6. Complete the payment and check that the browser returns to the order confirmation page.
+7. Verify that the order and tickets appear correctly and that the Stripe CLI reports successful webhook delivery.
+
+Also test cancelled checkout, insufficient ticket availability, refreshing the confirmation page, and duplicate webhook delivery before using the platform for a real event.
+
+## Testing and Build
+
+Run the automated tests:
+
+```bash
 npm run test
+```
 
-# Run type check:
+Check TypeScript types:
+
+```bash
 npm run typecheck
+```
 
-# Build for production:
+Create production builds:
+
+```bash
 npm run build
 ```
 
----
+Run these checks after making changes.
 
-## 🔑 Demo Accounts (from Seed)
+## Demo Accounts
 
-- **Organizer Account**: `sol@outside.vip` (Password: `Outside2026!`)
-- **Attendee Account**: `alex@outside.vip` (Password: `Outside2026!`)
-- **Admin Account**: `admin@outside.vip` (Password: `Outside2026!`)
+The following accounts are available when the development database has been seeded successfully.
+
+| Role | Email | Password |
+|---|---|---|
+| Organizer | `sol@outside.vip` | `Outside2026!` |
+| Attendee | `alex@outside.vip` | `Outside2026!` |
+| Admin | `admin@outside.vip` | `Outside2026!` |
+
+These are development credentials only. Never use the demo passwords for production accounts.
+
+## Project Status
+
+Outside.vip is being developed toward a pilot with small events. Current work focuses on validating checkout, payment confirmation, ticket issuance, QR scanning, and reliable check-in.
+
+Future improvements include marketplace payouts through Stripe Connect, M-Pesa integration, and production deployment hardening.
+
+## License
+
+Add your chosen license here before distributing the project publicly.

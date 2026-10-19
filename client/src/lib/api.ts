@@ -1,4 +1,14 @@
-import { ApiResponse, EventListResponse, Event, User, OrganizerDashboardStats, OrganizerEventItem } from '../types';
+import {
+  ApiResponse,
+  EventListResponse,
+  Event,
+  User,
+  OrganizerDashboardStats,
+  OrganizerEventItem,
+  Order,
+  CheckoutSessionInput,
+  CheckoutSessionResult,
+} from '../types';
 
 const API_BASE = '/api';
 
@@ -99,6 +109,79 @@ export const api = {
       request<{ message: string }>(`/organizer/events/${id}`, {
         method: 'DELETE',
       }),
+    uploadCoverImage: async (file: File): Promise<{
+      secure_url: string;
+      public_id: string;
+      thumbnailUrl?: string;
+    }> => {
+      const token =
+        typeof window !== 'undefined' && typeof window.localStorage !== 'undefined'
+          ? window.localStorage.getItem('outside_token')
+          : null;
+
+      // 1. Attempt signed direct-upload to Cloudinary from browser
+      try {
+        const signData = await request<{
+          cloudName: string;
+          apiKey: string;
+          timestamp: number;
+          folder: string;
+          signature: string;
+          uploadUrl: string;
+        }>('/organizer/upload/sign', {
+          method: 'POST',
+        });
+
+        const formData = new FormData();
+        formData.append('file', file);
+        formData.append('api_key', signData.apiKey);
+        formData.append('timestamp', signData.timestamp.toString());
+        formData.append('signature', signData.signature);
+        formData.append('folder', signData.folder);
+
+        const cldRes = await fetch(signData.uploadUrl, {
+          method: 'POST',
+          body: formData,
+        });
+
+        if (!cldRes.ok) {
+          const errJson = await cldRes.json().catch(() => null);
+          throw new Error(errJson?.error?.message || `Cloudinary direct upload failed (${cldRes.status})`);
+        }
+
+        const cldJson = await cldRes.json();
+        const secure_url = cldJson.secure_url;
+        const public_id = cldJson.public_id;
+        const thumbnailUrl = secure_url.includes('/upload/')
+          ? secure_url.replace('/upload/', '/upload/c_fill,g_auto,w_600,h_400,q_auto,f_auto/')
+          : secure_url;
+
+        return { secure_url, public_id, thumbnailUrl };
+      } catch (directUploadErr: any) {
+        // 2. Fall back to secure server-authorized upload endpoint
+        const serverFormData = new FormData();
+        serverFormData.append('image', file);
+
+        const serverRes = await fetch(`${API_BASE}/organizer/upload`, {
+          method: 'POST',
+          headers: {
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+          body: serverFormData,
+        });
+
+        const serverJson = await serverRes.json().catch(() => null);
+
+        if (!serverRes.ok || !serverJson?.success) {
+          throw new ApiError(
+            serverJson?.error?.message || directUploadErr?.message || 'Failed to upload cover image',
+            serverJson?.error?.statusCode || serverRes.status
+          );
+        }
+
+        return serverJson.data;
+      }
+    },
   },
   auth: {
     me: () => request<{ user: User }>('/auth/me'),
@@ -112,6 +195,19 @@ export const api = {
         method: 'POST',
         body: JSON.stringify(data),
       }),
+  },
+  checkout: {
+    createSession: (payload: CheckoutSessionInput) =>
+      request<CheckoutSessionResult>('/checkout/create-session', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }),
+  },
+  orders: {
+    getByOrderNumber: (orderNumber: string, token?: string | null) => {
+      const query = token ? `?token=${encodeURIComponent(token)}` : '';
+      return request<{ order: Order }>(`/orders/${orderNumber}${query}`);
+    },
   },
 };
 

@@ -98,6 +98,9 @@ export const CreateEventPage: React.FC = () => {
   const [description, setDescription] = useState('');
   const [category, setCategory] = useState<EventCategory>('MUSIC');
   const [coverImageUrl, setCoverImageUrl] = useState(PRESET_COVERS[0].url);
+  const [coverImagePublicId, setCoverImagePublicId] = useState<string | null>(null);
+  const [isUploadingImage, setIsUploadingImage] = useState(false);
+  const [imageUploadError, setImageUploadError] = useState<string | null>(null);
 
   const [startAt, setStartAt] = useState('2026-11-20T20:00');
   const [endAt, setEndAt] = useState('2026-11-21T04:00');
@@ -167,6 +170,7 @@ export const CreateEventPage: React.FC = () => {
       setDescription(evt.description || '');
       setCategory(evt.category);
       setCoverImageUrl(evt.coverImageUrl);
+      setCoverImagePublicId(evt.coverImagePublicId || null);
       setStartAt(toInputValue(evt.startAt));
       setEndAt(toInputValue(evt.endAt));
       setTimezone(evt.timezone || 'Africa/Nairobi');
@@ -244,33 +248,47 @@ export const CreateEventPage: React.FC = () => {
     setHasUnsavedChanges(true);
   };
 
-  // Image Upload handler (File Reader Data URL)
-  const handleImageFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  // Image Upload handler (Cloudinary Direct & Server Upload Flow)
+  const handleImageFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    if (!file.type.startsWith('image/')) {
-      showNotification('error', 'Please upload a valid image file (JPEG, PNG, WebP).');
+    // Reset input value so the user can re-select the same file if needed
+    e.target.value = '';
+
+    const allowedMimeTypes = ['image/jpeg', 'image/png', 'image/webp'];
+    if (!allowedMimeTypes.includes(file.type)) {
+      const msg = 'Please upload a valid image file (JPEG, PNG, or WebP).';
+      setImageUploadError(msg);
+      showNotification('error', msg);
       return;
     }
 
     if (file.size > 5 * 1024 * 1024) {
-      showNotification('error', 'Image size must be under 5MB.');
+      const msg = 'Image size exceeds maximum allowed size of 5MB.';
+      setImageUploadError(msg);
+      showNotification('error', msg);
       return;
     }
 
-    const reader = new FileReader();
-    reader.onload = () => {
-      if (typeof reader.result === 'string') {
-        setCoverImageUrl(reader.result);
-        setHasUnsavedChanges(true);
-        showNotification('success', 'Artwork uploaded successfully and ready for preview.');
-      }
-    };
-    reader.onerror = () => {
-      showNotification('error', 'Failed to read image file.');
-    };
-    reader.readAsDataURL(file);
+    try {
+      setIsUploadingImage(true);
+      setImageUploadError(null);
+      showNotification('success', 'Uploading image to Cloudinary...');
+
+      const result = await api.organizer.uploadCoverImage(file);
+
+      setCoverImageUrl(result.secure_url);
+      setCoverImagePublicId(result.public_id);
+      setHasUnsavedChanges(true);
+      showNotification('success', 'Artwork uploaded to Cloudinary successfully.');
+    } catch (err: any) {
+      const msg = err.message || 'Failed to upload image to Cloudinary.';
+      setImageUploadError(msg);
+      showNotification('error', msg);
+    } finally {
+      setIsUploadingImage(false);
+    }
   };
 
   // Build Payload
@@ -302,6 +320,7 @@ export const CreateEventPage: React.FC = () => {
       description: fullDescription,
       category,
       coverImageUrl: coverImageUrl.trim(),
+      coverImagePublicId: coverImagePublicId || null,
       venueName: venueName.trim() || '',
       venueAddress: venueAddress.trim() || '',
       city: city.trim() || 'Nairobi',
@@ -319,6 +338,19 @@ export const CreateEventPage: React.FC = () => {
   // Mutations
   const saveMutation = useMutation({
     mutationFn: async ({ publish }: { publish: boolean }) => {
+      if (isUploadingImage) {
+        throw new Error('Please wait for the image upload to complete before saving.');
+      }
+
+      if (!coverImageUrl || !coverImageUrl.trim()) {
+        throw new Error('A cover artwork image is required for the event.');
+      }
+
+      // Disallow new Base64 uploads while allowing existing legacy Base64 for existing events
+      if (coverImageUrl.startsWith('data:image/') && coverImageUrl !== existingData?.event?.coverImageUrl) {
+        throw new Error('Base64 image data cannot be newly uploaded. Please use the image upload option.');
+      }
+
       // Validate date times
       const startMs = new Date(startAt).getTime();
       const endMs = new Date(endAt).getTime();
@@ -501,7 +533,7 @@ export const CreateEventPage: React.FC = () => {
             <button
               type="button"
               onClick={() => saveMutation.mutate({ publish: false })}
-              disabled={saveMutation.isPending}
+              disabled={saveMutation.isPending || isUploadingImage}
               className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-white hover:bg-stone-100 text-stone-900 border border-stone-300 text-xs font-mono font-semibold transition-colors disabled:opacity-50 shadow-2xs"
             >
               <Save className="w-3.5 h-3.5 text-stone-500" />
@@ -514,7 +546,7 @@ export const CreateEventPage: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => unpublishMutation.mutate()}
-                  disabled={unpublishMutation.isPending}
+                  disabled={unpublishMutation.isPending || isUploadingImage}
                   className="px-3 py-2 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-300 text-xs font-mono font-semibold transition-colors disabled:opacity-50 shadow-2xs"
                 >
                   Unpublish
@@ -522,7 +554,7 @@ export const CreateEventPage: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => saveMutation.mutate({ publish: false })}
-                  disabled={saveMutation.isPending}
+                  disabled={saveMutation.isPending || isUploadingImage}
                   className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-stone-900 hover:bg-black text-white font-semibold text-xs font-mono uppercase tracking-wider transition-all duration-200 shadow-2xs disabled:opacity-50"
                 >
                   Update Live
@@ -532,7 +564,7 @@ export const CreateEventPage: React.FC = () => {
               <button
                 type="button"
                 onClick={() => saveMutation.mutate({ publish: true })}
-                disabled={saveMutation.isPending}
+                disabled={saveMutation.isPending || isUploadingImage}
                 className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-stone-900 hover:bg-black text-white font-semibold text-xs font-mono uppercase tracking-wider transition-all duration-200 shadow-2xs disabled:opacity-50"
               >
                 <Globe className="w-3.5 h-3.5" />
@@ -907,6 +939,8 @@ export const CreateEventPage: React.FC = () => {
                         value={coverImageUrl}
                         onChange={(e) => {
                           setCoverImageUrl(e.target.value);
+                          setCoverImagePublicId(null);
+                          setImageUploadError(null);
                           setHasUnsavedChanges(true);
                         }}
                         className="w-full px-3.5 py-2.5 rounded-lg bg-[#FAF8F5] border border-stone-300 text-stone-900 placeholder-stone-400 text-xs focus:outline-none focus:border-stone-900 focus:bg-white transition-colors font-mono"
@@ -917,16 +951,38 @@ export const CreateEventPage: React.FC = () => {
                       <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5">
                         Upload Flyer File (Max 5MB)
                       </label>
-                      <label className="w-full px-3.5 py-2.5 rounded-lg bg-[#FAF8F5] border border-dashed border-stone-300 hover:border-stone-900 text-stone-700 hover:text-stone-900 text-xs font-mono flex items-center justify-center gap-2 cursor-pointer transition-colors">
-                        <Upload className="w-4 h-4 text-stone-600" />
-                        <span>Choose Local Image File</span>
+                      <label
+                        className={`w-full px-3.5 py-2.5 rounded-lg bg-[#FAF8F5] border border-dashed text-xs font-mono flex items-center justify-center gap-2 transition-colors ${
+                          isUploadingImage
+                            ? 'border-stone-400 text-stone-400 cursor-not-allowed'
+                            : 'border-stone-300 hover:border-stone-900 text-stone-700 hover:text-stone-900 cursor-pointer'
+                        }`}
+                      >
+                        {isUploadingImage ? (
+                          <>
+                            <RefreshCw className="w-4 h-4 text-stone-600 animate-spin" />
+                            <span>Uploading to Cloudinary...</span>
+                          </>
+                        ) : (
+                          <>
+                            <Upload className="w-4 h-4 text-stone-600" />
+                            <span>Choose Local Image File (JPEG, PNG, WebP)</span>
+                          </>
+                        )}
                         <input
                           type="file"
-                          accept="image/*"
+                          accept="image/jpeg,image/png,image/webp"
+                          disabled={isUploadingImage}
                           onChange={handleImageFileChange}
                           className="hidden"
                         />
                       </label>
+                      {imageUploadError && (
+                        <p className="mt-1.5 text-[11px] font-mono text-red-600 flex items-center gap-1">
+                          <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                          <span>{imageUploadError}</span>
+                        </p>
+                      )}
                     </div>
                   </div>
 
@@ -942,6 +998,8 @@ export const CreateEventPage: React.FC = () => {
                           type="button"
                           onClick={() => {
                             setCoverImageUrl(preset.url);
+                            setCoverImagePublicId(null);
+                            setImageUploadError(null);
                             setHasUnsavedChanges(true);
                           }}
                           className={`p-2 rounded-lg border text-left space-y-1.5 transition-all ${
@@ -975,8 +1033,9 @@ export const CreateEventPage: React.FC = () => {
                           alt="Cover Preview"
                           className="w-full h-full object-cover"
                         />
-                        <div className="absolute bottom-3 right-3 px-3 py-1 rounded bg-black/80 backdrop-blur-md text-[11px] font-mono text-white border border-white/20">
-                          Active Flyer Preview
+                        <div className="absolute bottom-3 right-3 px-3 py-1 rounded bg-black/80 backdrop-blur-md text-[11px] font-mono text-white border border-white/20 flex items-center gap-1.5">
+                          {coverImagePublicId && <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>}
+                          {coverImagePublicId ? 'Cloudinary Hosted Flyer' : 'Active Flyer Preview'}
                         </div>
                       </div>
                     </div>

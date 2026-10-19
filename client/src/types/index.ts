@@ -88,6 +88,7 @@ export interface Event {
   category: EventCategory;
   status: EventStatus;
   coverImageUrl: string;
+  coverImagePublicId?: string | null;
   thumbnailUrl?: string | null;
   venueName: string;
   venueAddress: string;
@@ -144,10 +145,34 @@ export interface Order {
   customerPhone?: string | null;
   totalInCents: number;
   currency: string;
+  platformFeeInCents?: number;
+  organizerNetInCents?: number;
+  orderAccessToken?: string | null;
   items: OrderItem[];
   tickets: Ticket[];
   expiresAt: string;
   createdAt: string;
+}
+
+export interface CheckoutSessionInput {
+  eventId: string;
+  items: Array<{
+    ticketTierId: string;
+    quantity: number;
+  }>;
+  customerEmail: string;
+  customerName: string;
+  customerPhone?: string;
+  idempotencyKey?: string;
+}
+
+export interface CheckoutSessionResult {
+  orderNumber: string;
+  orderAccessToken: string;
+  checkoutUrl: string;
+  totalInCents: number;
+  currency: string;
+  expiresAt: string;
 }
 
 export interface ApiResponse<T> {

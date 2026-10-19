@@ -3,6 +3,7 @@ import path from 'path';
 import { z } from 'zod';
 
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
+dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
 
 const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
@@ -13,7 +14,14 @@ const envSchema = z.object({
   CLIENT_URL: z.string().default('http://localhost:5173'),
   STRIPE_SECRET_KEY: z.string().default('sk_test_placeholder'),
   STRIPE_WEBHOOK_SECRET: z.string().default('whsec_placeholder'),
+  PLATFORM_COMMISSION_PERCENT: z
+    .string()
+    .default('5')
+    .transform((val) => parseFloat(val)),
   EMAIL_FROM: z.string().default('tickets@outside.vip'),
+  CLOUDINARY_CLOUD_NAME: z.string().default(''),
+  CLOUDINARY_API_KEY: z.string().default(''),
+  CLOUDINARY_API_SECRET: z.string().default(''),
 });
 
 const parsed = envSchema.safeParse(process.env);

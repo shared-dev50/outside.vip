@@ -10,13 +10,19 @@ import {
   publishEvent,
   unpublishEvent,
   deleteOrganizerEvent,
+  getUploadSignature,
+  handleDirectUpload,
 } from './organizer.controller.js';
+import { uploadCoverMiddleware } from '../../middleware/upload.js';
 
 export const organizerRouter = Router();
 
 // Protect all organizer endpoints with auth & role middleware
 organizerRouter.use(requireAuth);
 organizerRouter.use(requireRole(Role.ORGANIZER, Role.ADMIN));
+
+organizerRouter.post('/upload/sign', getUploadSignature);
+organizerRouter.post('/upload', uploadCoverMiddleware.single('image'), handleDirectUpload);
 
 organizerRouter.get('/dashboard', getDashboardStats);
 organizerRouter.get('/events', listOrganizerEvents);

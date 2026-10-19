@@ -129,6 +129,7 @@ model Event {
   status         EventStatus   @default(DRAFT)
   
   coverImageUrl  String
+  coverImagePublicId String?
   thumbnailUrl   String?
   
   venueName      String
@@ -219,6 +220,10 @@ model Order {
   totalInCents     Int
   currency         String            @default("USD")
   
+  platformFeeInCents  Int            @default(0)
+  organizerNetInCents Int            @default(0)
+  orderAccessToken    String?        @unique
+  
   idempotencyKey   String            @unique
   paymentProvider  PaymentProvider   @default(STRIPE)
   paymentReference String?           // e.g. Stripe Checkout Session ID or M-Pesa CheckoutRequestID
@@ -236,6 +241,7 @@ model Order {
   @@index([customerEmail])
   @@index([eventId, status])
   @@index([expiresAt, status])
+  @@index([orderAccessToken])
 }
 
 model OrderItem {

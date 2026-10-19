@@ -3,6 +3,13 @@ import { EventStatus, TicketTierStatus, OrderStatus, TicketStatus } from '@prism
 import { prisma } from '../../db/prisma.js';
 import { createEventSchema, updateEventSchema } from './organizer.schema.js';
 import { NotFoundError, ForbiddenError, BadRequestError } from '../../utils/errors.js';
+import {
+  isCloudinaryConfigured,
+  generateSignedUploadParams,
+  uploadImageBuffer,
+  deleteCloudinaryAsset,
+  generateThumbnailUrl,
+} from '../../lib/cloudinary.js';
 
 function slugify(text: string): string {
   return text
@@ -150,6 +157,54 @@ export async function getOrganizerEventById(req: Request, res: Response, next: N
   }
 }
 
+export async function getUploadSignature(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    if (!isCloudinaryConfigured()) {
+      throw new BadRequestError(
+        'Cloudinary is not configured on the server. Please configure CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, and CLOUDINARY_API_SECRET.'
+      );
+    }
+
+    const signParams = generateSignedUploadParams();
+    res.json({
+      success: true,
+      data: signParams,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function handleDirectUpload(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    if (!req.file || !req.file.buffer) {
+      throw new BadRequestError('No image file uploaded.');
+    }
+
+    if (!isCloudinaryConfigured()) {
+      throw new BadRequestError(
+        'Cloudinary is not configured on the server. Please configure CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, and CLOUDINARY_API_SECRET.'
+      );
+    }
+
+    const uploadResult = await uploadImageBuffer(req.file.buffer);
+
+    res.json({
+      success: true,
+      data: {
+        secure_url: uploadResult.secure_url,
+        public_id: uploadResult.public_id,
+        thumbnailUrl: uploadResult.thumbnailUrl,
+        format: uploadResult.format,
+        width: uploadResult.width,
+        height: uploadResult.height,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
 export async function createOrganizerEvent(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const organizerId = req.user!.userId;
@@ -175,7 +230,10 @@ export async function createOrganizerEvent(req: Request, res: Response, next: Ne
           category: input.category,
           status: input.status,
           coverImageUrl: input.coverImageUrl,
-          thumbnailUrl: input.thumbnailUrl,
+          coverImagePublicId: input.coverImagePublicId || null,
+          thumbnailUrl:
+            input.thumbnailUrl ||
+            (input.coverImagePublicId ? generateThumbnailUrl(input.coverImageUrl) : null),
           venueName: input.venueName,
           venueAddress: input.venueAddress,
           city: input.city,
@@ -211,17 +269,23 @@ export async function createOrganizerEvent(req: Request, res: Response, next: Ne
       data: { event },
     });
   } catch (error) {
+    if (req.body?.coverImagePublicId) {
+      deleteCloudinaryAsset(req.body.coverImagePublicId).catch((err) =>
+        console.error('Failed to cleanup orphan Cloudinary asset on event creation failure:', err)
+      );
+    }
     next(error);
   }
 }
 
 export async function updateOrganizerEvent(req: Request, res: Response, next: NextFunction): Promise<void> {
+  let existingEvent: any = null;
   try {
     const organizerId = req.user!.userId;
     const { id } = req.params;
     const input = updateEventSchema.parse(req.body);
 
-    const existingEvent = await prisma.event.findUnique({
+    existingEvent = await prisma.event.findUnique({
       where: { id },
       include: { ticketTiers: true },
     });
@@ -234,12 +298,26 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
       throw new ForbiddenError('You do not have permission to edit this event');
     }
 
+    // Preserve existing legacy Base64 if untouched, but reject newly uploaded Base64 strings
+    if (input.coverImageUrl && input.coverImageUrl.startsWith('data:image/')) {
+      if (input.coverImageUrl !== existingEvent.coverImageUrl) {
+        throw new BadRequestError(
+          'Base64 image data cannot be newly uploaded. Please use the Cloudinary upload flow.'
+        );
+      }
+    }
+
     // Validate date order if both or either updated
     const startAtDate = input.startAt ? new Date(input.startAt) : existingEvent.startAt;
     const endAtDate = input.endAt ? new Date(input.endAt) : existingEvent.endAt;
     if (endAtDate.getTime() <= startAtDate.getTime()) {
       throw new BadRequestError('Event end time must be after the start time');
     }
+
+    const oldPublicId = existingEvent.coverImagePublicId;
+    const isImageReplaced =
+      (input.coverImagePublicId !== undefined && input.coverImagePublicId !== oldPublicId) ||
+      (input.coverImageUrl !== undefined && input.coverImageUrl !== existingEvent.coverImageUrl && oldPublicId);
 
     const updatedEvent = await prisma.$transaction(async (tx) => {
       // 1. Update event details
@@ -251,7 +329,14 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
           ...(input.description !== undefined && { description: input.description }),
           ...(input.category !== undefined && { category: input.category }),
           ...(input.coverImageUrl !== undefined && { coverImageUrl: input.coverImageUrl }),
-          ...(input.thumbnailUrl !== undefined && { thumbnailUrl: input.thumbnailUrl }),
+          ...(input.coverImagePublicId !== undefined && { coverImagePublicId: input.coverImagePublicId }),
+          ...(input.thumbnailUrl !== undefined && {
+            thumbnailUrl:
+              input.thumbnailUrl ||
+              (input.coverImagePublicId
+                ? generateThumbnailUrl(input.coverImageUrl || existingEvent.coverImageUrl)
+                : null),
+          }),
           ...(input.venueName !== undefined && { venueName: input.venueName }),
           ...(input.venueAddress !== undefined && { venueAddress: input.venueAddress }),
           ...(input.city !== undefined && { city: input.city }),
@@ -335,11 +420,31 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
       });
     });
 
+    // Safely delete replaced Cloudinary asset only if DB commit succeeded and no other event uses it
+    if (isImageReplaced && oldPublicId) {
+      const referenceCount = await prisma.event.count({
+        where: {
+          coverImagePublicId: oldPublicId,
+          id: { not: id },
+        },
+      });
+      if (referenceCount === 0) {
+        deleteCloudinaryAsset(oldPublicId).catch((err) =>
+          console.error(`Failed to delete replaced Cloudinary asset "${oldPublicId}":`, err)
+        );
+      }
+    }
+
     res.json({
       success: true,
       data: { event: updatedEvent },
     });
   } catch (error) {
+    if (req.body?.coverImagePublicId && req.body.coverImagePublicId !== existingEvent?.coverImagePublicId) {
+      deleteCloudinaryAsset(req.body.coverImagePublicId).catch((err) =>
+        console.error('Failed to cleanup orphan Cloudinary asset on update failure:', err)
+      );
+    }
     next(error);
   }
 }
@@ -471,7 +576,21 @@ export async function deleteOrganizerEvent(req: Request, res: Response, next: Ne
       );
     }
 
+    const assetToDelete = event.coverImagePublicId;
+
     await prisma.event.delete({ where: { id } });
+
+    // Safely delete Cloudinary asset only after DB deletion succeeded and if no other event uses it
+    if (assetToDelete) {
+      const remainingReferences = await prisma.event.count({
+        where: { coverImagePublicId: assetToDelete },
+      });
+      if (remainingReferences === 0) {
+        deleteCloudinaryAsset(assetToDelete).catch((err) =>
+          console.error(`Failed to delete Cloudinary asset "${assetToDelete}" after event deletion:`, err)
+        );
+      }
+    }
 
     res.json({
       success: true,

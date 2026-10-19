@@ -11,8 +11,7 @@ import {
   ArrowLeft,
   ExternalLink,
   Share2,
-  Check,
-  CheckCircle2
+  Check
 } from 'lucide-react';
 
 export const EventDetailPage: React.FC = () => {
@@ -22,7 +21,7 @@ export const EventDetailPage: React.FC = () => {
   const [attendeeEmail, setAttendeeEmail] = useState('');
   const [isReserving, setIsReserving] = useState(false);
   const [copiedLink, setCopiedLink] = useState(false);
-  const [reservationNotice, setReservationNotice] = useState<string | null>(null);
+  const [checkoutError, setCheckoutError] = useState<string | null>(null);
 
   // Fetch event details by slug
   const { data, isLoading, error, refetch } = useQuery({
@@ -82,17 +81,34 @@ export const EventDetailPage: React.FC = () => {
     }
   };
 
-  const handleProceedToCheckout = (e: React.FormEvent) => {
+  const handleProceedToCheckout = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (totalTickets === 0 || !attendeeEmail || !attendeeName) return;
+    if (totalTickets === 0 || !attendeeEmail || !attendeeName || !event) return;
 
+    setCheckoutError(null);
     setIsReserving(true);
-    setTimeout(() => {
+
+    try {
+      const items = Object.entries(selectedQuantities)
+        .filter(([_, qty]) => qty > 0)
+        .map(([ticketTierId, quantity]) => ({ ticketTierId, quantity }));
+
+      const res = await api.checkout.createSession({
+        eventId: event.id,
+        items,
+        customerEmail: attendeeEmail,
+        customerName: attendeeName,
+      });
+
+      if (res.checkoutUrl) {
+        window.location.href = res.checkoutUrl;
+      } else {
+        throw new Error('Unable to redirect to Stripe checkout');
+      }
+    } catch (err: any) {
       setIsReserving(false);
-      setReservationNotice(
-        `Reservation confirmed for ${attendeeName} (${totalTickets} ticket${totalTickets > 1 ? 's' : ''}). Stripe checkout integration will be finalized in Phase 4.`
-      );
-    }, 750);
+      setCheckoutError(err.message || 'Failed to initiate checkout. Please try again.');
+    }
   };
 
   // 1. Loading State
@@ -445,13 +461,10 @@ export const EventDetailPage: React.FC = () => {
               </div>
             )}
 
-            {reservationNotice && (
-              <div className="p-3 rounded-md bg-green-50 border border-green-200 text-green-800 text-xs space-y-1">
-                <div className="font-semibold flex items-center gap-1.5">
-                  <CheckCircle2 className="w-3.5 h-3.5 text-green-600" />
-                  Reservation Hold Created
-                </div>
-                <div className="text-[11px] leading-relaxed">{reservationNotice}</div>
+            {checkoutError && (
+              <div className="p-3 rounded-md bg-rose-50 border border-rose-200 text-rose-800 text-xs space-y-1">
+                <div className="font-semibold">Checkout Unavailable</div>
+                <div className="text-[11px] leading-relaxed">{checkoutError}</div>
               </div>
             )}
           </div>

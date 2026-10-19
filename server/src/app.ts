@@ -9,6 +9,9 @@ import { healthRouter } from './modules/health/health.routes.js';
 import { authRouter } from './modules/auth/auth.routes.js';
 import { eventsRouter } from './modules/events/events.routes.js';
 import { organizerRouter } from './modules/organizer/organizer.routes.js';
+import { checkoutRouter } from './modules/checkout/checkout.routes.js';
+import { webhookRouter } from './modules/webhooks/webhook.routes.js';
+import { ordersRouter } from './modules/orders/orders.routes.js';
 
 export const app = express();
 
@@ -43,6 +46,9 @@ app.use('/api/health', healthRouter);
 app.use('/api/auth', authRouter);
 app.use('/api/events', eventsRouter);
 app.use('/api/organizer', organizerRouter);
+app.use('/api/checkout', checkoutRouter);
+app.use('/api/webhooks', webhookRouter);
+app.use('/api/orders', ordersRouter);
 
 // Fallback 404 handler
 app.use('/api/*', (_req, res) => {

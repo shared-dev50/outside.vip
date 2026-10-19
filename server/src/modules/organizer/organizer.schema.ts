@@ -23,7 +23,13 @@ export const createEventSchema = z.object({
   tagline: z.string().max(300).optional().nullable(),
   description: z.string().default(''),
   category: z.nativeEnum(EventCategory).default(EventCategory.MUSIC),
-  coverImageUrl: z.string().min(1, 'Cover image URL is required'),
+  coverImageUrl: z
+    .string()
+    .min(1, 'Cover image URL is required')
+    .refine((url) => !url.startsWith('data:image/'), {
+      message: 'Base64 image data is not permitted. Please upload your image to obtain a Cloudinary URL.',
+    }),
+  coverImagePublicId: z.string().optional().nullable(),
   thumbnailUrl: z.string().optional().nullable(),
   venueName: z.string().default(''),
   venueAddress: z.string().default(''),
@@ -50,6 +56,7 @@ export const updateEventSchema = z.object({
   description: z.string().optional(),
   category: z.nativeEnum(EventCategory).optional(),
   coverImageUrl: z.string().optional(),
+  coverImagePublicId: z.string().optional().nullable(),
   thumbnailUrl: z.string().optional().nullable(),
   venueName: z.string().optional(),
   venueAddress: z.string().optional(),
