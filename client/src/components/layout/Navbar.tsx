@@ -19,6 +19,7 @@ export const Navbar: React.FC = () => {
 
   const isHome = location.pathname === '/';
   const isDiscover = location.pathname.startsWith('/events');
+  const isOrganizer = location.pathname.startsWith('/organizer');
 
   // Track window scroll on the homepage to transition from transparent to subtle opaque
   useEffect(() => {
@@ -36,13 +37,13 @@ export const Navbar: React.FC = () => {
     ? isScrolled
       ? 'bg-[#FAF8F5]/90 backdrop-blur-md border-b border-stone-200/80 shadow-xs'
       : 'bg-transparent border-b border-transparent'
-    : isDiscover
+    : isDiscover || isOrganizer
     ? 'bg-[#FAF8F5]/95 backdrop-blur-md border-b border-stone-200/80 shadow-2xs'
     : 'bg-white/95 backdrop-blur-md border-b border-gray-200';
 
   return (
     <header className={`sticky top-0 z-50 w-full transition-all duration-300 ease-out ${headerClass}`}>
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between gap-4">
+      <div className="max-w-7xl xl:max-w-[1536px] mx-auto px-4 sm:px-6 lg:px-8 xl:px-10 h-16 flex items-center justify-between gap-4">
         {/* Left: Brand Wordmark & Nav Links */}
         <div className="flex items-center gap-8">
           <Link to="/" className="flex items-center gap-1.5 group focus:outline-none focus-visible:ring-2 focus-visible:ring-stone-900 rounded">

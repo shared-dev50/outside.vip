@@ -4,7 +4,7 @@ import { Link } from 'react-router-dom';
 export const Footer: React.FC = () => {
   return (
     <footer className="border-t border-stone-200/80 bg-[#FAF9F6] text-stone-600">
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12 sm:py-16">
+      <div className="max-w-7xl xl:max-w-[1536px] mx-auto px-4 sm:px-6 lg:px-8 xl:px-10 py-12 sm:py-16">
         {/* Main Footer Grid: Editorial Brand Area & Structured Navigation */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-10 lg:gap-16 items-start">
           {/* Brand Area (Spans 6 cols on desktop) */}

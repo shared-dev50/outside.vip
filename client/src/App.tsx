@@ -17,7 +17,7 @@ export const App: React.FC = () => {
   const isEditorial =
     isHome ||
     location.pathname.startsWith('/events') ||
-    location.pathname.startsWith('/organizer/events');
+    location.pathname.startsWith('/organizer');
 
   return (
     <div
