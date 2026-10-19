@@ -93,13 +93,13 @@ export async function getOrderByOrderNumber(
     }
 
     // Resilient reconciliation fallback:
-    // If order is still PENDING and has a Stripe Checkout session ID,
+    // If order is still PENDING and has a Stripe PaymentIntent ID,
     // verify with Stripe whether payment completed and fulfill idempotently.
     if (order.status === 'PENDING' && order.paymentReference) {
       try {
-        const session = await stripe.checkout.sessions.retrieve(order.paymentReference);
-        if (session.payment_status === 'paid') {
-          await fulfillPaidOrder(session);
+        const paymentIntent = await stripe.paymentIntents.retrieve(order.paymentReference);
+        if (paymentIntent.status === 'succeeded') {
+          await fulfillPaidOrder(paymentIntent);
           const refreshed = await prisma.order.findUnique({
             where: { orderNumber },
             include: orderInclude,

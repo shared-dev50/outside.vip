@@ -13,6 +13,7 @@ const envSchema = z.object({
   JWT_EXPIRES_IN: z.string().default('7d'),
   CLIENT_URL: z.string().default('http://localhost:5173'),
   STRIPE_SECRET_KEY: z.string().default('sk_test_placeholder'),
+  STRIPE_PUBLISHABLE_KEY: z.string().default(''),
   STRIPE_WEBHOOK_SECRET: z.string().default('whsec_placeholder'),
   PLATFORM_COMMISSION_PERCENT: z
     .string()

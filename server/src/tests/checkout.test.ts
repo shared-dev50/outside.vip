@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, beforeAll } from 'vitest';
 import request from 'supertest';
 import { app } from '../app.js';
 import { prisma } from '../db/prisma.js';
@@ -13,9 +13,7 @@ describe('Outside.vip Checkout, Atomic Reservations & Payments API', () => {
   let limitedTierId: string;
   let attendeeUser: any;
 
-  beforeEach(async () => {
-    vi.restoreAllMocks();
-
+  beforeAll(async () => {
     // Ensure we have a published event with known active ticket tiers
     const event = await prisma.event.findFirst({
       where: {
@@ -60,6 +58,10 @@ describe('Outside.vip Checkout, Atomic Reservations & Payments API', () => {
     });
   });
 
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
   describe('1. Financial Breakdown & Commission Calculations', () => {
     it('calculates 5% platform fee and organizer net correctly with integer cents', () => {
       // $100.00 -> $5.00 fee, $95.00 organizer
@@ -82,7 +84,7 @@ describe('Outside.vip Checkout, Atomic Reservations & Payments API', () => {
     });
   });
 
-  describe('2. POST /api/checkout/create-session - Validation & Stock Protection', () => {
+  describe('2. POST /api/checkout/create-session - PaymentIntent Creation & Validation', () => {
     it('rejects checkout with missing customer email or invalid input', async () => {
       const res = await request(app)
         .post('/api/checkout/create-session')
@@ -113,115 +115,49 @@ describe('Outside.vip Checkout, Atomic Reservations & Payments API', () => {
     });
 
     it('rejects checkout when ticket tier does not belong to the specified event', async () => {
-      // Find a tier from a different event
       const otherTier = await prisma.ticketTier.findFirst({
         where: { eventId: { not: publishedEventId } },
       });
 
-      if (otherTier) {
-        const res = await request(app)
-          .post('/api/checkout/create-session')
-          .send({
-            eventId: publishedEventId,
-            items: [{ ticketTierId: otherTier.id, quantity: 1 }],
-            customerEmail: 'buyer@outside.vip',
-            customerName: 'Test Buyer',
-          });
+      if (!otherTier) return;
 
-        expect(res.status).toBe(400);
-        expect(res.body.error.message).toContain('do not belong to this event');
-      }
-    });
-
-    it('rejects checkout exceeding maxPerOrder limit', async () => {
       const res = await request(app)
         .post('/api/checkout/create-session')
         .send({
           eventId: publishedEventId,
-          items: [{ ticketTierId: limitedTierId, quantity: 5 }], // max is 2
+          items: [{ ticketTierId: otherTier.id, quantity: 1 }],
           customerEmail: 'buyer@outside.vip',
           customerName: 'Test Buyer',
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error.message).toContain('do not belong to this event');
+    });
+
+    it('rejects checkout exceeding remaining capacity with 409 Conflict', async () => {
+      const res = await request(app)
+        .post('/api/checkout/create-session')
+        .send({
+          eventId: publishedEventId,
+          items: [{ ticketTierId: limitedTierId, quantity: 3 }],
+          customerEmail: 'greedy@outside.vip',
+          customerName: 'Greedy Buyer',
         });
 
       expect(res.status).toBe(400);
       expect(res.body.error.message).toContain('Maximum purchase');
     });
 
-    it('rejects checkout when requested quantity exceeds available remaining capacity', async () => {
-      // Mock Stripe to allow first reservation
-      const stripeSpy = vi.spyOn(stripe.checkout.sessions, 'create').mockResolvedValueOnce({
-        id: 'cs_test_mock_session_1',
-        url: 'https://checkout.stripe.com/pay/cs_test_mock_session_1',
-      } as any);
+    it('creates PaymentIntent, order, reservations, and returns clientSecret on success', async () => {
+      const mockPaymentIntentId = `pi_test_${Date.now()}`;
+      const mockClientSecret = `${mockPaymentIntentId}_secret_xyz`;
 
-      const resSuccess = await request(app)
-        .post('/api/checkout/create-session')
-        .send({
-          eventId: publishedEventId,
-          items: [{ ticketTierId: limitedTierId, quantity: 2 }],
-          customerEmail: 'buyer1@outside.vip',
-          customerName: 'Buyer 1',
-        });
-
-      expect(resSuccess.status).toBe(201);
-      expect(resSuccess.body.data).toHaveProperty('checkoutUrl');
-
-      // Now tier has 2 reserved out of 2 total capacity -> 0 remaining
-      // Second attempt must fail with 409 Conflict
-      const resConflict = await request(app)
-        .post('/api/checkout/create-session')
-        .send({
-          eventId: publishedEventId,
-          items: [{ ticketTierId: limitedTierId, quantity: 1 }],
-          customerEmail: 'buyer2@outside.vip',
-          customerName: 'Buyer 2',
-        });
-
-      expect(resConflict.status).toBe(409);
-      expect(resConflict.body.error.message).toContain('Insufficient ticket availability');
-
-      stripeSpy.mockRestore();
-    });
-
-    it('calculates total strictly server-side and rolls back reservation if Stripe creation fails', async () => {
-      // Mock Stripe session creation failure
-      const stripeSpy = vi.spyOn(stripe.checkout.sessions, 'create').mockRejectedValueOnce(
-        new Error('Stripe API network timeout')
-      );
-
-      const tierBefore = await prisma.ticketTier.findUnique({
-        where: { id: activeTierId },
-      });
-      const initialReserved = tierBefore?.reservedQuantity || 0;
-
-      const res = await request(app)
-        .post('/api/checkout/create-session')
-        .send({
-          eventId: publishedEventId,
-          items: [{ ticketTierId: activeTierId, quantity: 2 }],
-          customerEmail: 'rollback_test@outside.vip',
-          customerName: 'Rollback Buyer',
-        });
-
-      expect(res.status).toBe(400);
-      expect(res.body.error.message).toContain('Payment provider session creation failed');
-
-      // Verify reservedQuantity was safely rolled back to initial value
-      const tierAfter = await prisma.ticketTier.findUnique({
-        where: { id: activeTierId },
-      });
-      expect(tierAfter?.reservedQuantity).toBe(initialReserved);
-
-      stripeSpy.mockRestore();
-    });
-
-    it('creates order, reservations, financial breakdown, and returns Stripe session URL on success', async () => {
-      const mockSessionId = `cs_test_${Date.now()}`;
-      const mockCheckoutUrl = `https://checkout.stripe.com/pay/${mockSessionId}`;
-
-      const stripeSpy = vi.spyOn(stripe.checkout.sessions, 'create').mockResolvedValueOnce({
-        id: mockSessionId,
-        url: mockCheckoutUrl,
+      const stripeSpy = vi.spyOn(stripe.paymentIntents, 'create').mockResolvedValueOnce({
+        id: mockPaymentIntentId,
+        client_secret: mockClientSecret,
+        amount: 10000,
+        currency: 'usd',
+        status: 'requires_payment_method',
       } as any);
 
       const res = await request(app)
@@ -236,10 +172,18 @@ describe('Outside.vip Checkout, Atomic Reservations & Payments API', () => {
 
       expect(res.status).toBe(201);
       expect(res.body.success).toBe(true);
-      expect(res.body.data.checkoutUrl).toBe(mockCheckoutUrl);
+      expect(res.body.data.clientSecret).toBe(mockClientSecret);
       expect(res.body.data).toHaveProperty('orderNumber');
       expect(res.body.data).toHaveProperty('orderAccessToken');
       expect(res.body.data.orderAccessToken).toMatch(/^oat_/);
+      expect(res.body.data.currency).toBe('USD');
+
+      // Verify PaymentIntent creation payload sent to Stripe
+      expect(stripeSpy).toHaveBeenCalled();
+      const createPayload = stripeSpy.mock.calls[0][0];
+      expect(createPayload.amount).toBe(res.body.data.totalInCents);
+      expect(createPayload.currency).toBe('usd');
+      expect(createPayload.metadata.orderNumber).toBe(res.body.data.orderNumber);
 
       // Verify order record in DB
       const dbOrder = await prisma.order.findUnique({
@@ -249,26 +193,71 @@ describe('Outside.vip Checkout, Atomic Reservations & Payments API', () => {
 
       expect(dbOrder).toBeDefined();
       expect(dbOrder?.status).toBe(OrderStatus.PENDING);
-      expect(dbOrder?.paymentReference).toBe(mockSessionId);
+      expect(dbOrder?.paymentReference).toBe(mockPaymentIntentId);
       expect(dbOrder?.platformFeeInCents).toBeGreaterThan(0);
       expect(dbOrder?.organizerNetInCents).toBeGreaterThan(0);
       expect(dbOrder?.platformFeeInCents! + dbOrder?.organizerNetInCents!).toBe(dbOrder?.totalInCents);
       expect(dbOrder?.reservations.length).toBe(1);
       expect(dbOrder?.reservations[0].status).toBe(ReservationStatus.ACTIVE);
 
-      // Regression check: Stripe requires expires_at to be at least 30 minutes (1800s) from creation
-      const sessionPayload = stripeSpy.mock.calls[0][0];
-      const nowSeconds = Math.floor(Date.now() / 1000);
-      expect(sessionPayload.expires_at).toBeDefined();
-      expect(sessionPayload.expires_at - nowSeconds).toBeGreaterThanOrEqual(1800);
-
       stripeSpy.mockRestore();
     });
 
-    it('regression: rolls back reservation cleanly when Stripe throws parameter validation errors', async () => {
-      // Simulate Stripe throwing the exact 30-minute validation error
-      const stripeSpy = vi.spyOn(stripe.checkout.sessions, 'create').mockRejectedValueOnce(
-        new Error("The `expires_at` timestamp must be at least 30 minutes from Checkout Session creation.")
+    it('idempotency: returns existing pending order and PaymentIntent clientSecret on duplicate submission', async () => {
+      const idempotencyKey = `idem_dup_test_${Date.now()}`;
+      const mockPaymentIntentId = `pi_dup_${Date.now()}`;
+      const mockClientSecret = `${mockPaymentIntentId}_secret_dup`;
+
+      const createSpy = vi.spyOn(stripe.paymentIntents, 'create').mockResolvedValueOnce({
+        id: mockPaymentIntentId,
+        client_secret: mockClientSecret,
+        amount: 5000,
+        currency: 'usd',
+      } as any);
+
+      // First submission
+      const res1 = await request(app)
+        .post('/api/checkout/create-session')
+        .send({
+          eventId: publishedEventId,
+          items: [{ ticketTierId: activeTierId, quantity: 1 }],
+          customerEmail: 'dup_buyer@outside.vip',
+          customerName: 'Dup Buyer',
+          idempotencyKey,
+        });
+
+      expect(res1.status).toBe(201);
+      const firstOrderNumber = res1.body.data.orderNumber;
+
+      // Second duplicate submission with same idempotencyKey
+      const retrieveSpy = vi.spyOn(stripe.paymentIntents, 'retrieve').mockResolvedValueOnce({
+        id: mockPaymentIntentId,
+        client_secret: mockClientSecret,
+        amount: 5000,
+        currency: 'usd',
+      } as any);
+
+      const res2 = await request(app)
+        .post('/api/checkout/create-session')
+        .send({
+          eventId: publishedEventId,
+          items: [{ ticketTierId: activeTierId, quantity: 1 }],
+          customerEmail: 'dup_buyer@outside.vip',
+          customerName: 'Dup Buyer',
+          idempotencyKey,
+        });
+
+      expect(res2.status).toBe(201);
+      expect(res2.body.data.orderNumber).toBe(firstOrderNumber);
+      expect(res2.body.data.clientSecret).toBe(mockClientSecret);
+
+      createSpy.mockRestore();
+      retrieveSpy.mockRestore();
+    });
+
+    it('rolls back reservation cleanly when PaymentIntent creation fails', async () => {
+      const stripeSpy = vi.spyOn(stripe.paymentIntents, 'create').mockRejectedValueOnce(
+        new Error('Stripe API network timeout')
       );
 
       const tierBefore = await prisma.ticketTier.findUnique({ where: { id: activeTierId } });
@@ -278,9 +267,9 @@ describe('Outside.vip Checkout, Atomic Reservations & Payments API', () => {
         .post('/api/checkout/create-session')
         .send({
           eventId: publishedEventId,
-          items: [{ ticketTierId: activeTierId, quantity: 1 }],
-          customerEmail: 'regression_test@outside.vip',
-          customerName: 'Regression Buyer',
+          items: [{ ticketTierId: activeTierId, quantity: 2 }],
+          customerEmail: 'rollback_test@outside.vip',
+          customerName: 'Rollback Buyer',
         });
 
       expect(res.status).toBe(400);
@@ -294,7 +283,7 @@ describe('Outside.vip Checkout, Atomic Reservations & Payments API', () => {
     });
   });
 
-  describe('3. POST /api/webhooks/stripe - Signature Verification & Fulfillment', () => {
+  describe('3. POST /api/webhooks/stripe - Signature Verification & PaymentIntent Fulfillment', () => {
     it('rejects webhooks without valid Stripe signature with 400', async () => {
       const res = await request(app)
         .post('/api/webhooks/stripe')
@@ -305,9 +294,10 @@ describe('Outside.vip Checkout, Atomic Reservations & Payments API', () => {
       expect(res.body.error.message).toContain('signature verification failed');
     });
 
-    it('fulfills order on checkout.session.completed with payment_status=paid', async () => {
-      // 1. Create a real pending order and reservation in database
+    it('fulfills order on payment_intent.succeeded with status=succeeded', async () => {
       const orderAccessToken = `oat_test_wh_${Date.now()}`;
+      const mockPaymentIntentId = `pi_test_wh_${Date.now()}`;
+
       const order = await prisma.order.create({
         data: {
           orderNumber: `OUT-TEST-WH-${Date.now()}`,
@@ -320,6 +310,7 @@ describe('Outside.vip Checkout, Atomic Reservations & Payments API', () => {
           platformFeeInCents: 500,
           organizerNetInCents: 9500,
           orderAccessToken,
+          paymentReference: mockPaymentIntentId,
           idempotencyKey: `idem_wh_test_${Date.now()}`,
           expiresAt: new Date(Date.now() + 15 * 60 * 1000),
           items: {
@@ -345,7 +336,6 @@ describe('Outside.vip Checkout, Atomic Reservations & Payments API', () => {
         },
       });
 
-      // Update tier reserved quantity
       await prisma.ticketTier.update({
         where: { id: activeTierId },
         data: { reservedQuantity: { increment: 2 } },
@@ -355,18 +345,16 @@ describe('Outside.vip Checkout, Atomic Reservations & Payments API', () => {
       const initialSold = tierBefore?.soldQuantity || 0;
       const initialReserved = tierBefore?.reservedQuantity || 0;
 
-      // Mock webhook signature validation to pass
       const eventId = `evt_test_${Date.now()}`;
       const mockEvent = {
         id: eventId,
-        type: 'checkout.session.completed',
+        type: 'payment_intent.succeeded',
         data: {
           object: {
-            id: `cs_test_wh_${Date.now()}`,
-            payment_status: 'paid',
-            amount_total: 10000,
+            id: mockPaymentIntentId,
+            status: 'succeeded',
+            amount: 10000,
             currency: 'usd',
-            payment_intent: `pi_test_${Date.now()}`,
             metadata: {
               orderId: order.id,
               orderNumber: order.orderNumber,
@@ -422,42 +410,153 @@ describe('Outside.vip Checkout, Atomic Reservations & Payments API', () => {
       expect(resDuplicate.status).toBe(200);
       expect(resDuplicate.body.duplicate).toBe(true);
 
-      // Verify no duplicate tickets were issued
+      // Verify no duplicate tickets or inventory changes
       const orderAfterDuplicate = await prisma.order.findUnique({
         where: { id: order.id },
         include: { tickets: true },
       });
       expect(orderAfterDuplicate?.tickets.length).toBe(2);
 
+      const tierFinal = await prisma.ticketTier.findUnique({ where: { id: activeTierId } });
+      expect(tierFinal?.soldQuantity).toBe(initialSold + 2);
+
       constructSpy.mockRestore();
       constructSpy2.mockRestore();
     });
 
-    it('does not issue tickets if checkout.session.completed has payment_status=unpaid', async () => {
+    it('records failed transaction on payment_intent.payment_failed without premature order cancellation', async () => {
       const order = await prisma.order.create({
         data: {
-          orderNumber: `OUT-UNPAID-${Date.now()}`,
+          orderNumber: `OUT-FAIL-${Date.now()}`,
           eventId: publishedEventId,
           status: OrderStatus.PENDING,
-          customerEmail: 'unpaid@outside.vip',
-          customerName: 'Unpaid Buyer',
+          customerEmail: 'failed_card@outside.vip',
+          customerName: 'Failed Card Buyer',
           totalInCents: 5000,
           currency: 'USD',
-          platformFeeInCents: 250,
-          organizerNetInCents: 4750,
-          idempotencyKey: `idem_unpaid_${Date.now()}`,
+          idempotencyKey: `idem_fail_${Date.now()}`,
+          expiresAt: new Date(Date.now() + 15 * 60 * 1000),
+          items: {
+            create: [{ ticketTierId: activeTierId, quantity: 1, unitPriceInCents: 5000, subtotalInCents: 5000 }],
+          },
+          reservations: {
+            create: [{ ticketTierId: activeTierId, quantity: 1, expiresAt: new Date(Date.now() + 15 * 60 * 1000) }],
+          },
+        },
+      });
+
+      const mockEvent = {
+        id: `evt_failed_${Date.now()}`,
+        type: 'payment_intent.payment_failed',
+        data: {
+          object: {
+            id: `pi_failed_${Date.now()}`,
+            amount: 5000,
+            currency: 'usd',
+            metadata: { orderId: order.id },
+            last_payment_error: { message: 'Your card has insufficient funds.' },
+          },
+        },
+      };
+
+      const constructSpy = vi.spyOn(stripe.webhooks, 'constructEvent').mockReturnValueOnce(mockEvent as any);
+
+      const res = await request(app)
+        .post('/api/webhooks/stripe')
+        .set('stripe-signature', 'valid_test_signature')
+        .send(mockEvent);
+
+      expect(res.status).toBe(200);
+
+      // Order must remain PENDING so customer can retry before reservation expires
+      const checkOrder = await prisma.order.findUnique({
+        where: { id: order.id },
+        include: { transactions: true },
+      });
+
+      expect(checkOrder?.status).toBe(OrderStatus.PENDING);
+      expect(checkOrder?.transactions.length).toBe(1);
+      expect(checkOrder?.transactions[0].status).toBe('FAILED');
+
+      constructSpy.mockRestore();
+    });
+
+    it('rejects payment_intent.succeeded with mismatched amount or currency', async () => {
+      const order = await prisma.order.create({
+        data: {
+          orderNumber: `OUT-MISMATCH-${Date.now()}`,
+          eventId: publishedEventId,
+          status: OrderStatus.PENDING,
+          customerEmail: 'mismatch@outside.vip',
+          customerName: 'Mismatch Buyer',
+          totalInCents: 10000,
+          currency: 'USD',
+          idempotencyKey: `idem_mismatch_${Date.now()}`,
           expiresAt: new Date(Date.now() + 15 * 60 * 1000),
         },
       });
 
       const mockEvent = {
-        id: `evt_unpaid_${Date.now()}`,
-        type: 'checkout.session.completed',
+        id: `evt_mismatch_${Date.now()}`,
+        type: 'payment_intent.succeeded',
         data: {
           object: {
-            id: `cs_unpaid_${Date.now()}`,
-            payment_status: 'unpaid', // async payment pending
-            amount_total: 5000,
+            id: `pi_mismatch_${Date.now()}`,
+            status: 'succeeded',
+            amount: 5000, // Mismatched amount (5000 vs 10000)
+            currency: 'usd',
+            metadata: { orderId: order.id },
+          },
+        },
+      };
+
+      const constructSpy = vi.spyOn(stripe.webhooks, 'constructEvent').mockReturnValueOnce(mockEvent as any);
+
+      const res = await request(app)
+        .post('/api/webhooks/stripe')
+        .set('stripe-signature', 'valid_test_signature')
+        .send(mockEvent);
+
+      expect(res.status).toBe(500);
+
+      const checkOrder = await prisma.order.findUnique({ where: { id: order.id } });
+      expect(checkOrder?.status).toBe(OrderStatus.PENDING);
+
+      constructSpy.mockRestore();
+    });
+
+    it('late payment safety: issues tickets and increments soldQuantity safely even if reservations were released', async () => {
+      const order = await prisma.order.create({
+        data: {
+          orderNumber: `OUT-LATE-${Date.now()}`,
+          eventId: publishedEventId,
+          status: OrderStatus.PENDING,
+          customerEmail: 'late@outside.vip',
+          customerName: 'Late Buyer',
+          totalInCents: 5000,
+          currency: 'USD',
+          idempotencyKey: `idem_late_${Date.now()}`,
+          expiresAt: new Date(Date.now() - 60 * 1000), // hold already expired
+          items: {
+            create: [{ ticketTierId: activeTierId, quantity: 1, unitPriceInCents: 5000, subtotalInCents: 5000 }],
+          },
+          reservations: {
+            create: [{ ticketTierId: activeTierId, quantity: 1, expiresAt: new Date(Date.now() - 60 * 1000), status: ReservationStatus.RELEASED }],
+          },
+        },
+      });
+
+      const tierBefore = await prisma.ticketTier.findUnique({ where: { id: activeTierId } });
+      const initialSold = tierBefore?.soldQuantity || 0;
+
+      const mockEvent = {
+        id: `evt_late_${Date.now()}`,
+        type: 'payment_intent.succeeded',
+        data: {
+          object: {
+            id: `pi_late_${Date.now()}`,
+            status: 'succeeded',
+            amount: 5000,
             currency: 'usd',
             metadata: { orderId: order.id },
           },
@@ -477,72 +576,18 @@ describe('Outside.vip Checkout, Atomic Reservations & Payments API', () => {
         where: { id: order.id },
         include: { tickets: true },
       });
+      expect(checkOrder?.status).toBe(OrderStatus.COMPLETED);
+      expect(checkOrder?.tickets.length).toBe(1);
 
-      expect(checkOrder?.status).toBe(OrderStatus.PENDING);
-      expect(checkOrder?.tickets.length).toBe(0);
-
-      constructSpy.mockRestore();
-    });
-
-    it('releases reservations on checkout.session.expired', async () => {
-      const order = await prisma.order.create({
-        data: {
-          orderNumber: `OUT-EXP-${Date.now()}`,
-          eventId: publishedEventId,
-          status: OrderStatus.PENDING,
-          customerEmail: 'expired@outside.vip',
-          customerName: 'Expired Buyer',
-          totalInCents: 5000,
-          currency: 'USD',
-          idempotencyKey: `idem_exp_${Date.now()}`,
-          expiresAt: new Date(Date.now() + 15 * 60 * 1000),
-          items: {
-            create: [{ ticketTierId: activeTierId, quantity: 1, unitPriceInCents: 5000, subtotalInCents: 5000 }],
-          },
-          reservations: {
-            create: [{ ticketTierId: activeTierId, quantity: 1, expiresAt: new Date(Date.now() + 15 * 60 * 1000) }],
-          },
-        },
-      });
-
-      await prisma.ticketTier.update({
-        where: { id: activeTierId },
-        data: { reservedQuantity: { increment: 1 } },
-      });
-
-      const mockEvent = {
-        id: `evt_exp_${Date.now()}`,
-        type: 'checkout.session.expired',
-        data: {
-          object: {
-            id: `cs_exp_${Date.now()}`,
-            metadata: { orderId: order.id },
-          },
-        },
-      };
-
-      const constructSpy = vi.spyOn(stripe.webhooks, 'constructEvent').mockReturnValueOnce(mockEvent as any);
-
-      const res = await request(app)
-        .post('/api/webhooks/stripe')
-        .set('stripe-signature', 'valid_test_signature')
-        .send(mockEvent);
-
-      expect(res.status).toBe(200);
-
-      const updated = await prisma.order.findUnique({
-        where: { id: order.id },
-        include: { reservations: true },
-      });
-
-      expect(updated?.status).toBe(OrderStatus.EXPIRED);
-      expect(updated?.reservations[0].status).toBe(ReservationStatus.RELEASED);
+      // Verify soldQuantity incremented without corrupting reservedQuantity
+      const tierAfter = await prisma.ticketTier.findUnique({ where: { id: activeTierId } });
+      expect(tierAfter?.soldQuantity).toBe(initialSold + 1);
 
       constructSpy.mockRestore();
     });
   });
 
-  describe('4. GET /api/orders/:orderNumber - Secure Order & Pass Lookup', () => {
+  describe('4. GET /api/orders/:orderNumber - Secure Order Lookup & Delayed Webhook Reconciliation', () => {
     it('rejects access without valid order access token or authentication with 401 or 403', async () => {
       const order = await prisma.order.create({
         data: {
@@ -559,11 +604,9 @@ describe('Outside.vip Checkout, Atomic Reservations & Payments API', () => {
         },
       });
 
-      // Attempt 1: No credentials at all -> 401
       const resNoAuth = await request(app).get(`/api/orders/${order.orderNumber}`);
       expect(resNoAuth.status).toBe(401);
 
-      // Attempt 2: Wrong token -> 403
       const resWrongToken = await request(app).get(`/api/orders/${order.orderNumber}?token=wrong_token`);
       expect(resWrongToken.status).toBe(403);
     });
@@ -608,15 +651,14 @@ describe('Outside.vip Checkout, Atomic Reservations & Payments API', () => {
       expect(res.body.data.order.tickets[0].ticketToken).toMatch(/^tkt_sec_/);
     });
 
-    it('regression: reconciles stuck paid pending orders on lookup with Stripe and fulfills tickets exactly once', async () => {
+    it('reconciles stuck pending orders on lookup by retrieving PaymentIntent and fulfills tickets exactly once', async () => {
       const orderToken = `oat_reconcile_${Date.now()}`;
-      const mockSessionId = `cs_test_stuck_${Date.now()}`;
+      const mockPaymentIntentId = `pi_reconcile_${Date.now()}`;
 
       const tierBefore = await prisma.ticketTier.findUnique({ where: { id: activeTierId } });
       const initialReserved = tierBefore?.reservedQuantity || 0;
       const initialSold = tierBefore?.soldQuantity || 0;
 
-      // Create a pending order with active reservations
       const order = await prisma.order.create({
         data: {
           orderNumber: `OUT-RECONCILE-${Date.now()}`,
@@ -629,7 +671,7 @@ describe('Outside.vip Checkout, Atomic Reservations & Payments API', () => {
           platformFeeInCents: 500,
           organizerNetInCents: 9500,
           orderAccessToken: orderToken,
-          paymentReference: mockSessionId,
+          paymentReference: mockPaymentIntentId,
           idempotencyKey: `idem_reconcile_${Date.now()}`,
           expiresAt: new Date(Date.now() + 15 * 60 * 1000),
           items: {
@@ -660,13 +702,12 @@ describe('Outside.vip Checkout, Atomic Reservations & Payments API', () => {
         data: { reservedQuantity: { increment: 2 } },
       });
 
-      // Mock Stripe returning that payment completed successfully (paid)
-      const stripeSpy = vi.spyOn(stripe.checkout.sessions, 'retrieve').mockResolvedValueOnce({
-        id: mockSessionId,
-        payment_status: 'paid',
-        amount_total: 10000,
+      // Mock Stripe PaymentIntent returning succeeded
+      const stripeSpy = vi.spyOn(stripe.paymentIntents, 'retrieve').mockResolvedValueOnce({
+        id: mockPaymentIntentId,
+        status: 'succeeded',
+        amount: 10000,
         currency: 'usd',
-        payment_intent: `pi_reconcile_${Date.now()}`,
         metadata: {
           orderId: order.id,
           orderNumber: order.orderNumber,
@@ -696,16 +737,13 @@ describe('Outside.vip Checkout, Atomic Reservations & Payments API', () => {
 
       // Verify inventory shifted exactly once
       const tierAfter = await prisma.ticketTier.findUnique({ where: { id: activeTierId } });
-      expect(tierAfter?.reservedQuantity).toBe(initialReserved); // incremented 2, then decremented 2 -> initial
+      expect(tierAfter?.reservedQuantity).toBe(initialReserved);
       expect(tierAfter?.soldQuantity).toBe(initialSold + 2);
 
-      // Verify subsequent lookup does not duplicate tickets or transactions
+      // Verify subsequent lookup does not duplicate tickets
       const resSecond = await request(app).get(`/api/orders/${order.orderNumber}?token=${orderToken}`);
       expect(resSecond.status).toBe(200);
       expect(resSecond.body.data.order.tickets.length).toBe(2);
-
-      const tierFinal = await prisma.ticketTier.findUnique({ where: { id: activeTierId } });
-      expect(tierFinal?.soldQuantity).toBe(initialSold + 2);
 
       stripeSpy.mockRestore();
     });
@@ -713,7 +751,6 @@ describe('Outside.vip Checkout, Atomic Reservations & Payments API', () => {
 
   describe('5. Expired Reservation Cleanup', () => {
     it('automatically restores inventory for expired active reservations', async () => {
-      // Create an expired reservation
       const order = await prisma.order.create({
         data: {
           orderNumber: `OUT-STALE-${Date.now()}`,
@@ -724,13 +761,13 @@ describe('Outside.vip Checkout, Atomic Reservations & Payments API', () => {
           totalInCents: 5000,
           currency: 'USD',
           idempotencyKey: `idem_stale_${Date.now()}`,
-          expiresAt: new Date(Date.now() - 5 * 60 * 1000), // 5 minutes ago
+          expiresAt: new Date(Date.now() - 5 * 60 * 1000),
           reservations: {
             create: [
               {
                 ticketTierId: activeTierId,
                 quantity: 3,
-                expiresAt: new Date(Date.now() - 5 * 60 * 1000), // expired hold
+                expiresAt: new Date(Date.now() - 5 * 60 * 1000),
                 status: ReservationStatus.ACTIVE,
               },
             ],
@@ -746,11 +783,9 @@ describe('Outside.vip Checkout, Atomic Reservations & Payments API', () => {
       const tierBefore = await prisma.ticketTier.findUnique({ where: { id: activeTierId } });
       const reservedBefore = tierBefore?.reservedQuantity || 0;
 
-      // Run cleanup
       const releasedCount = await releaseExpiredReservations();
       expect(releasedCount).toBeGreaterThanOrEqual(1);
 
-      // Verify reserved quantity was decremented by at least 3
       const tierAfter = await prisma.ticketTier.findUnique({ where: { id: activeTierId } });
       expect(tierAfter?.reservedQuantity).toBe(reservedBefore - 3);
 

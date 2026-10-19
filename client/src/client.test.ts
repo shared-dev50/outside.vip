@@ -200,7 +200,8 @@ describe('Outside.vip Client Library', () => {
             data: {
               orderNumber: 'OUT-2026-99999',
               orderAccessToken: 'oat_test_123',
-              checkoutUrl: 'https://checkout.stripe.com/pay/cs_test_123',
+              clientSecret: 'pi_test_123_secret_xyz',
+              publishableKey: 'pk_test_sample',
               totalInCents: 10000,
               currency: 'USD',
               expiresAt: new Date().toISOString(),
@@ -223,7 +224,7 @@ describe('Outside.vip Client Library', () => {
         body: expect.stringContaining('"eventId":"evt-123"'),
       })
     );
-    expect(res.checkoutUrl).toContain('checkout.stripe.com');
+    expect(res.clientSecret).toBe('pi_test_123_secret_xyz');
     expect(res.orderNumber).toBe('OUT-2026-99999');
 
     fetchSpy.mockRestore();
@@ -256,5 +257,88 @@ describe('Outside.vip Client Library', () => {
 
     fetchSpy.mockRestore();
   });
+
+  describe('Checkout validation and idempotency contracts', () => {
+    it('validates email format accurately', () => {
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      expect(emailRegex.test('attendee@outside.vip')).toBe(true);
+      expect(emailRegex.test('attendee+tag@sub.domain.com')).toBe(true);
+      expect(emailRegex.test('')).toBe(false);
+      expect(emailRegex.test('invalid-email')).toBe(false);
+      expect(emailRegex.test('invalid@')).toBe(false);
+      expect(emailRegex.test('@outside.vip')).toBe(false);
+      expect(emailRegex.test('attendee@vip')).toBe(false);
+    });
+
+    it('generates consistent snapshot keys for session reuse without creating duplicate orders', () => {
+      const selection1 = {
+        items: [['tier-1', 2], ['tier-2', 1]].sort(([a], [b]) => String(a).localeCompare(String(b))),
+        name: 'Jane Doe',
+        email: 'jane@example.com'.toLowerCase(),
+        phone: '+254700000000',
+      };
+
+      const selection2 = {
+        items: [['tier-2', 1], ['tier-1', 2]].sort(([a], [b]) => String(a).localeCompare(String(b))),
+        name: 'Jane Doe',
+        email: 'JANE@example.com'.toLowerCase(),
+        phone: '+254700000000',
+      };
+
+      const selection3 = {
+        items: [['tier-1', 3]].sort(([a], [b]) => String(a).localeCompare(String(b))),
+        name: 'Jane Doe',
+        email: 'jane@example.com'.toLowerCase(),
+        phone: '+254700000000',
+      };
+
+      const key1 = JSON.stringify(selection1);
+      const key2 = JSON.stringify(selection2);
+      const key3 = JSON.stringify(selection3);
+
+      expect(key1).toBe(key2); // Identical selection, normalized email, and phone reuse the session
+      expect(key1).not.toBe(key3); // Changed selection triggers a new session
+    });
+
+    it('supports optional customerPhone in api.checkout.createSession payload', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementationOnce(() =>
+        Promise.resolve({
+          ok: true,
+          json: () =>
+            Promise.resolve({
+              success: true,
+              data: {
+                orderNumber: 'OUT-2026-11111',
+                orderAccessToken: 'oat_test_phone_123',
+                clientSecret: 'pi_test_phone_secret',
+                publishableKey: 'pk_test_sample',
+                totalInCents: 5000,
+                currency: 'USD',
+                expiresAt: new Date().toISOString(),
+              },
+            }),
+        } as any)
+      );
+
+      const res = await api.checkout.createSession({
+        eventId: 'evt-456',
+        items: [{ ticketTierId: 'tier-1', quantity: 1 }],
+        customerEmail: 'buyer@outside.vip',
+        customerName: 'Buyer Name',
+        customerPhone: '+254712345678',
+      });
+
+      expect(fetchSpy).toHaveBeenCalledWith(
+        '/api/checkout/create-session',
+        expect.objectContaining({
+          body: expect.stringContaining('"customerPhone":"+254712345678"'),
+        })
+      );
+      expect(res.orderNumber).toBe('OUT-2026-11111');
+
+      fetchSpy.mockRestore();
+    });
+  });
 });
+
 

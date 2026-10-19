@@ -169,7 +169,8 @@ export interface CheckoutSessionInput {
 export interface CheckoutSessionResult {
   orderNumber: string;
   orderAccessToken: string;
-  checkoutUrl: string;
+  clientSecret: string;
+  publishableKey?: string;
   totalInCents: number;
   currency: string;
   expiresAt: string;

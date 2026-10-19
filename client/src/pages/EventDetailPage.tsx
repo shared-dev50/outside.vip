@@ -2,7 +2,8 @@ import React, { useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../lib/api';
-import { TicketTier } from '../types';
+import { TicketTier, CheckoutSessionResult } from '../types';
+import { CheckoutDialog } from '../components/events/CheckoutDialog';
 import { 
   Calendar, 
   MapPin, 
@@ -11,7 +12,8 @@ import {
   ArrowLeft,
   ExternalLink,
   Share2,
-  Check
+  Check,
+  AlertCircle
 } from 'lucide-react';
 
 export const EventDetailPage: React.FC = () => {
@@ -19,9 +21,16 @@ export const EventDetailPage: React.FC = () => {
   const [selectedQuantities, setSelectedQuantities] = useState<Record<string, number>>({});
   const [attendeeName, setAttendeeName] = useState('');
   const [attendeeEmail, setAttendeeEmail] = useState('');
+  const [attendeePhone, setAttendeePhone] = useState('');
   const [isReserving, setIsReserving] = useState(false);
   const [copiedLink, setCopiedLink] = useState(false);
+  const [ticketsError, setTicketsError] = useState<string | null>(null);
+  const [nameError, setNameError] = useState<string | null>(null);
+  const [emailError, setEmailError] = useState<string | null>(null);
   const [checkoutError, setCheckoutError] = useState<string | null>(null);
+  const [isCheckoutOpen, setIsCheckoutOpen] = useState(false);
+  const [paymentSession, setPaymentSession] = useState<CheckoutSessionResult | null>(null);
+  const [sessionSnapshotKey, setSessionSnapshotKey] = useState<string | null>(null);
 
   // Fetch event details by slug
   const { data, isLoading, error, refetch } = useQuery({
@@ -33,11 +42,14 @@ export const EventDetailPage: React.FC = () => {
   const event = data?.event;
 
   const updateQuantity = (tierId: string, delta: number, max: number) => {
+    if (isReserving) return;
     setSelectedQuantities((prev) => {
       const current = prev[tierId] || 0;
       const next = Math.max(0, Math.min(max, current + delta));
       return { ...prev, [tierId]: next };
     });
+    if (ticketsError) setTicketsError(null);
+    if (checkoutError) setCheckoutError(null);
   };
 
   const totalTickets = Object.values(selectedQuantities).reduce((a, b) => a + b, 0);
@@ -48,6 +60,13 @@ export const EventDetailPage: React.FC = () => {
         return acc + qty * tier.priceInCents;
       }, 0)
     : 0;
+
+  const selectedItems = (event?.ticketTiers || [])
+    .filter((tier) => (selectedQuantities[tier.id] || 0) > 0)
+    .map((tier) => ({
+      tier,
+      quantity: selectedQuantities[tier.id],
+    }));
 
   const formatPrice = (cents?: number, currency = 'USD') => {
     if (cents === undefined || cents === 0) return 'Free';
@@ -83,9 +102,66 @@ export const EventDetailPage: React.FC = () => {
 
   const handleProceedToCheckout = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (totalTickets === 0 || !attendeeEmail || !attendeeName || !event) return;
-
     setCheckoutError(null);
+
+    let hasError = false;
+
+    if (totalTickets === 0) {
+      setTicketsError('Please select at least 1 ticket to continue.');
+      hasError = true;
+    } else {
+      setTicketsError(null);
+    }
+
+    const trimmedName = attendeeName.trim();
+    if (!trimmedName) {
+      setNameError('Please enter your full name.');
+      hasError = true;
+    } else {
+      setNameError(null);
+    }
+
+    const trimmedEmail = attendeeEmail.trim();
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!trimmedEmail) {
+      setEmailError('Please enter your email address.');
+      hasError = true;
+    } else if (!emailRegex.test(trimmedEmail)) {
+      setEmailError('Please enter a valid email address.');
+      hasError = true;
+    } else {
+      setEmailError(null);
+    }
+
+    if (hasError || !event) {
+      return;
+    }
+
+    if (isReserving) {
+      return;
+    }
+
+    // Build snapshot key to check if current selection matches active paymentSession
+    const currentSnapshotKey = JSON.stringify({
+      items: Object.entries(selectedQuantities)
+        .filter(([_, qty]) => qty > 0)
+        .sort(([a], [b]) => a.localeCompare(b)),
+      name: trimmedName,
+      email: trimmedEmail.toLowerCase(),
+      phone: attendeePhone.trim(),
+    });
+
+    const now = Date.now();
+    const isSessionValid =
+      paymentSession &&
+      sessionSnapshotKey === currentSnapshotKey &&
+      new Date(paymentSession.expiresAt).getTime() > now + 15000;
+
+    if (isSessionValid) {
+      setIsCheckoutOpen(true);
+      return;
+    }
+
     setIsReserving(true);
 
     try {
@@ -96,19 +172,41 @@ export const EventDetailPage: React.FC = () => {
       const res = await api.checkout.createSession({
         eventId: event.id,
         items,
-        customerEmail: attendeeEmail,
-        customerName: attendeeName,
+        customerEmail: trimmedEmail,
+        customerName: trimmedName,
+        customerPhone: attendeePhone.trim() || undefined,
       });
 
-      if (res.checkoutUrl) {
-        window.location.href = res.checkoutUrl;
+      if (res.clientSecret) {
+        setPaymentSession(res);
+        setSessionSnapshotKey(currentSnapshotKey);
+        setIsCheckoutOpen(true);
       } else {
-        throw new Error('Unable to redirect to Stripe checkout');
+        throw new Error('Unable to initialize payment session.');
       }
     } catch (err: any) {
-      setIsReserving(false);
       setCheckoutError(err.message || 'Failed to initiate checkout. Please try again.');
+    } finally {
+      setIsReserving(false);
     }
+  };
+
+  const handleUpdateAttendee = (updated: { name: string; email: string; phone: string }) => {
+    setAttendeeName(updated.name);
+    setAttendeeEmail(updated.email);
+    setAttendeePhone(updated.phone);
+  };
+
+  const handleCloseCheckout = () => {
+    setIsCheckoutOpen(false);
+    if (paymentSession && new Date(paymentSession.expiresAt).getTime() <= Date.now()) {
+      setPaymentSession(null);
+      setSessionSnapshotKey(null);
+    }
+  };
+
+  const handleSessionExpired = () => {
+    setSessionSnapshotKey(null);
   };
 
   // 1. Loading State
@@ -389,7 +487,7 @@ export const EventDetailPage: React.FC = () => {
                           <button
                             type="button"
                             onClick={() => updateQuantity(tier.id, -1, tier.maxPerOrder)}
-                            disabled={qty === 0}
+                            disabled={qty === 0 || isReserving}
                             className="w-6 h-6 rounded flex items-center justify-center text-gray-600 hover:text-black hover:bg-gray-200 disabled:opacity-20"
                             aria-label={`Decrease ${tier.name}`}
                           >
@@ -401,7 +499,7 @@ export const EventDetailPage: React.FC = () => {
                           <button
                             type="button"
                             onClick={() => updateQuantity(tier.id, 1, Math.min(tier.maxPerOrder, tier.remainingCapacity || 10))}
-                            disabled={qty >= (tier.remainingCapacity || tier.maxPerOrder)}
+                            disabled={isReserving || qty >= (tier.remainingCapacity || tier.maxPerOrder)}
                             className="w-6 h-6 rounded flex items-center justify-center text-gray-600 hover:text-black hover:bg-gray-200 disabled:opacity-20"
                             aria-label={`Increase ${tier.name}`}
                           >
@@ -415,51 +513,89 @@ export const EventDetailPage: React.FC = () => {
               })}
             </div>
 
-            {/* Attendee Form & Action */}
-            {totalTickets > 0 ? (
-              <form onSubmit={handleProceedToCheckout} className="space-y-3 pt-3 border-t border-gray-100 text-xs">
-                <div className="space-y-2">
-                  <span className="font-semibold text-gray-900 block text-xs">
-                    Attendee details
-                  </span>
-                  <input
-                    type="text"
-                    required
-                    placeholder="Full name"
-                    value={attendeeName}
-                    onChange={(e) => setAttendeeName(e.target.value)}
-                    className="w-full px-3 py-2 rounded-md bg-white border border-gray-300 text-gray-900 placeholder-gray-400 text-xs focus:outline-none focus:border-gray-900"
-                  />
-                  <input
-                    type="email"
-                    required
-                    placeholder="Email address"
-                    value={attendeeEmail}
-                    onChange={(e) => setAttendeeEmail(e.target.value)}
-                    className="w-full px-3 py-2 rounded-md bg-white border border-gray-300 text-gray-900 placeholder-gray-400 text-xs focus:outline-none focus:border-gray-900"
-                  />
-                </div>
-
-                <div className="pt-2 flex items-center justify-between text-sm font-bold text-gray-900 border-t border-gray-100">
-                  <span>Total ({totalTickets} ticket{totalTickets > 1 ? 's' : ''})</span>
-                  <span className="text-base">
-                    {formatPrice(totalInCents, event.currency)}
-                  </span>
-                </div>
-
-                <button
-                  type="submit"
-                  disabled={isReserving}
-                  className="w-full py-2.5 rounded-md bg-gray-900 hover:bg-black text-white font-semibold text-xs transition-colors disabled:opacity-50"
-                >
-                  {isReserving ? 'Reserving...' : `Continue to checkout · ${formatPrice(totalInCents, event.currency)}`}
-                </button>
-              </form>
-            ) : (
-              <div className="p-3 text-center text-xs text-gray-400 border border-dashed border-gray-200 rounded-md">
-                Select tickets above to continue
+            {ticketsError && (
+              <div className="p-2.5 rounded-md bg-rose-50 border border-rose-200 text-rose-700 text-xs flex items-center gap-1.5">
+                <AlertCircle className="w-3.5 h-3.5 shrink-0 text-rose-600" />
+                <span>{ticketsError}</span>
               </div>
             )}
+
+            {/* Attendee Details Form & Continue Button */}
+            <form onSubmit={handleProceedToCheckout} className="space-y-3 pt-3 border-t border-gray-100 text-xs" noValidate>
+              <div className="space-y-2">
+                <div>
+                  <label htmlFor="attendee-name" className="font-semibold text-gray-900 block text-xs mb-1">
+                    Full name
+                  </label>
+                  <input
+                    id="attendee-name"
+                    type="text"
+                    placeholder="e.g. Jane Doe"
+                    value={attendeeName}
+                    onChange={(e) => {
+                      setAttendeeName(e.target.value);
+                      if (nameError) setNameError(null);
+                      if (checkoutError) setCheckoutError(null);
+                    }}
+                    className={`w-full px-3 py-2 rounded-md bg-white border text-gray-900 placeholder-gray-400 text-xs focus:outline-none transition-colors ${
+                      nameError
+                        ? 'border-rose-400 focus:border-rose-500 bg-rose-50/20'
+                        : 'border-gray-300 focus:border-gray-900'
+                    }`}
+                  />
+                  {nameError && (
+                    <p className="text-[11px] text-rose-600 font-medium mt-1">{nameError}</p>
+                  )}
+                </div>
+
+                <div>
+                  <label htmlFor="attendee-email" className="font-semibold text-gray-900 block text-xs mb-1">
+                    Email address
+                  </label>
+                  <input
+                    id="attendee-email"
+                    type="email"
+                    placeholder="e.g. jane@example.com"
+                    value={attendeeEmail}
+                    onChange={(e) => {
+                      setAttendeeEmail(e.target.value);
+                      if (emailError) setEmailError(null);
+                      if (checkoutError) setCheckoutError(null);
+                    }}
+                    className={`w-full px-3 py-2 rounded-md bg-white border text-gray-900 placeholder-gray-400 text-xs focus:outline-none transition-colors ${
+                      emailError
+                        ? 'border-rose-400 focus:border-rose-500 bg-rose-50/20'
+                        : 'border-gray-300 focus:border-gray-900'
+                    }`}
+                  />
+                  {emailError && (
+                    <p className="text-[11px] text-rose-600 font-medium mt-1">{emailError}</p>
+                  )}
+                </div>
+              </div>
+
+              <div className="pt-2 flex items-center justify-between text-sm font-bold text-gray-900 border-t border-gray-100">
+                <span>Total ({totalTickets} ticket{totalTickets === 1 ? '' : 's'})</span>
+                <span className="text-base">
+                  {formatPrice(totalInCents, event.currency)}
+                </span>
+              </div>
+
+              <button
+                type="submit"
+                disabled={isReserving}
+                className="w-full py-2.5 rounded-md bg-gray-900 hover:bg-black text-white font-semibold text-xs transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
+              >
+                {isReserving ? (
+                  <>
+                    <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                    <span>Preparing checkout...</span>
+                  </>
+                ) : (
+                  <span>Continue to payment · {formatPrice(totalInCents, event.currency)}</span>
+                )}
+              </button>
+            </form>
 
             {checkoutError && (
               <div className="p-3 rounded-md bg-rose-50 border border-rose-200 text-rose-800 text-xs space-y-1">
@@ -493,10 +629,29 @@ export const EventDetailPage: React.FC = () => {
             }}
             className="px-4 py-2 rounded-md bg-gray-900 text-white font-semibold text-xs hover:bg-black"
           >
-            {totalTickets > 0 ? 'Checkout' : 'Select Tickets'}
+            {totalTickets > 0 ? `Continue · ${formatPrice(totalInCents, event.currency)}` : 'Select Tickets'}
           </button>
         </div>
       </div>
+
+      {/* Checkout Dialog Modal */}
+      {event && (
+        <CheckoutDialog
+          isOpen={isCheckoutOpen}
+          onClose={handleCloseCheckout}
+          event={event}
+          selectedItems={selectedItems}
+          attendeeName={attendeeName}
+          attendeeEmail={attendeeEmail}
+          attendeePhone={attendeePhone}
+          onUpdateAttendee={handleUpdateAttendee}
+          totalInCents={totalInCents}
+          currency={event.currency || 'USD'}
+          paymentSession={paymentSession}
+          formatPrice={formatPrice}
+          onSessionExpired={handleSessionExpired}
+        />
+      )}
     </div>
   );
 };

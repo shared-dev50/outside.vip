@@ -18,22 +18,15 @@ export async function processStripeWebhookEvent(
       }
 
       switch (event.type) {
-        case 'checkout.session.completed':
-        case 'checkout.session.async_payment_succeeded': {
-          const session = event.data.object as Stripe.Checkout.Session;
-          await handlePaymentSuccess(tx, session);
+        case 'payment_intent.succeeded': {
+          const paymentIntent = event.data.object as Stripe.PaymentIntent;
+          await handlePaymentIntentSucceeded(tx, paymentIntent);
           break;
         }
 
-        case 'checkout.session.async_payment_failed': {
-          const session = event.data.object as Stripe.Checkout.Session;
-          await handlePaymentFailed(tx, session);
-          break;
-        }
-
-        case 'checkout.session.expired': {
-          const session = event.data.object as Stripe.Checkout.Session;
-          await handleSessionExpired(tx, session);
+        case 'payment_intent.payment_failed': {
+          const paymentIntent = event.data.object as Stripe.PaymentIntent;
+          await handlePaymentIntentFailed(tx, paymentIntent);
           break;
         }
 
@@ -59,11 +52,11 @@ export async function processStripeWebhookEvent(
 }
 
 export async function fulfillPaidOrder(
-  session: Stripe.Checkout.Session
+  paymentIntent: Stripe.PaymentIntent
 ): Promise<boolean> {
   return await prisma.$transaction(
     async (tx) => {
-      await handlePaymentSuccess(tx, session);
+      await handlePaymentIntentSucceeded(tx, paymentIntent);
       return true;
     },
     {
@@ -73,51 +66,60 @@ export async function fulfillPaidOrder(
   );
 }
 
-export async function handlePaymentSuccess(
+export async function handlePaymentIntentSucceeded(
   tx: Prisma.TransactionClient,
-  session: Stripe.Checkout.Session
+  paymentIntent: Stripe.PaymentIntent
 ): Promise<void> {
-  const orderId = (session.metadata?.orderId as string) || (session.client_reference_id as string);
-  if (!orderId) {
-    console.warn('Stripe checkout session completed without orderId in metadata:', session.id);
-    return;
-  }
+  const orderId = paymentIntent.metadata?.orderId as string | undefined;
 
-  // Fulfill ONLY when payment is verified as paid
-  if (session.payment_status !== 'paid') {
-    console.info(`Stripe session ${session.id} payment_status is '${session.payment_status}', deferring fulfillment.`);
-    return;
-  }
+  let order = orderId
+    ? await tx.order.findUnique({
+        where: { id: orderId },
+        include: {
+          items: { include: { ticketTier: true } },
+          reservations: true,
+          tickets: true,
+        },
+      })
+    : null;
 
-  const order = await tx.order.findUnique({
-    where: { id: orderId },
-    include: {
-      items: { include: { ticketTier: true } },
-      reservations: true,
-      tickets: true,
-    },
-  });
+  if (!order && paymentIntent.id) {
+    order = await tx.order.findFirst({
+      where: { paymentReference: paymentIntent.id },
+      include: {
+        items: { include: { ticketTier: true } },
+        reservations: true,
+        tickets: true,
+      },
+    });
+  }
 
   if (!order) {
-    console.warn(`Order ${orderId} referenced by Stripe session ${session.id} not found.`);
+    console.warn(`Order referenced by Stripe PaymentIntent ${paymentIntent.id} not found.`);
     return;
   }
 
-  // Already fulfilled? Safe return
+  // Fulfill ONLY when payment is verified as succeeded
+  if (paymentIntent.status !== 'succeeded') {
+    console.info(`Stripe PaymentIntent ${paymentIntent.id} status is '${paymentIntent.status}', deferring fulfillment.`);
+    return;
+  }
+
+  // Already fulfilled? Safe idempotent return
   if (order.status === OrderStatus.COMPLETED) {
     return;
   }
 
   // Verify amounts and currency match
-  if (session.amount_total !== null && session.amount_total !== order.totalInCents) {
+  if (paymentIntent.amount !== null && paymentIntent.amount !== order.totalInCents) {
     throw new Error(
-      `Amount mismatch for order ${order.orderNumber}: expected ${order.totalInCents}, received ${session.amount_total}`
+      `Amount mismatch for order ${order.orderNumber}: expected ${order.totalInCents}, received ${paymentIntent.amount}`
     );
   }
 
-  if (session.currency && session.currency.toUpperCase() !== order.currency.toUpperCase()) {
+  if (paymentIntent.currency && paymentIntent.currency.toUpperCase() !== order.currency.toUpperCase()) {
     throw new Error(
-      `Currency mismatch for order ${order.orderNumber}: expected ${order.currency}, received ${session.currency}`
+      `Currency mismatch for order ${order.orderNumber}: expected ${order.currency}, received ${paymentIntent.currency}`
     );
   }
 
@@ -126,7 +128,7 @@ export async function handlePaymentSuccess(
     where: { id: order.id },
     data: {
       status: OrderStatus.COMPLETED,
-      paymentReference: session.id,
+      paymentReference: paymentIntent.id,
     },
   });
 
@@ -137,9 +139,6 @@ export async function handlePaymentSuccess(
   });
 
   // 3. Shift reserved quantity to sold quantity
-  // Only decrement reservedQuantity if the reservation was still ACTIVE.
-  // If the reservation had already been released by cleanup before webhook arrived,
-  // do not decrement reservedQuantity again (which would drive it below zero).
   const hasActiveReservations = order.reservations.some(
     (r) => r.status === ReservationStatus.ACTIVE
   );
@@ -183,97 +182,54 @@ export async function handlePaymentSuccess(
       data: {
         orderId: order.id,
         provider: PaymentProvider.STRIPE,
-        providerTransactionId: (session.payment_intent as string) || session.id,
+        providerTransactionId: paymentIntent.id,
         status: PaymentStatus.SUCCEEDED,
-        amountInCents: session.amount_total || order.totalInCents,
+        amountInCents: paymentIntent.amount || order.totalInCents,
         currency: order.currency,
-        rawResponse: session as any,
+        rawResponse: paymentIntent as any,
       },
     });
   }
 }
 
-async function handlePaymentFailed(
+export async function handlePaymentIntentFailed(
   tx: Prisma.TransactionClient,
-  session: Stripe.Checkout.Session
+  paymentIntent: Stripe.PaymentIntent
 ): Promise<void> {
-  const orderId = (session.metadata?.orderId as string) || (session.client_reference_id as string);
-  if (!orderId) return;
+  const orderId = paymentIntent.metadata?.orderId as string | undefined;
 
-  const order = await tx.order.findUnique({
-    where: { id: orderId },
-    include: { items: true },
-  });
+  let order = orderId
+    ? await tx.order.findUnique({
+        where: { id: orderId },
+        include: { items: true },
+      })
+    : null;
+
+  if (!order && paymentIntent.id) {
+    order = await tx.order.findFirst({
+      where: { paymentReference: paymentIntent.id },
+      include: { items: true },
+    });
+  }
 
   if (!order || order.status === OrderStatus.COMPLETED) {
     return;
   }
 
-  // Release reservation hold
-  for (const item of order.items) {
-    await tx.ticketTier.update({
-      where: { id: item.ticketTierId },
-      data: {
-        reservedQuantity: { decrement: item.quantity },
-      },
-    });
-  }
-
-  await tx.ticketReservation.updateMany({
-    where: { orderId: order.id },
-    data: { status: ReservationStatus.RELEASED },
-  });
-
-  await tx.order.update({
-    where: { id: order.id },
-    data: { status: OrderStatus.CANCELLED },
-  });
-
+  // Record failed transaction for auditing while allowing the attendee to retry
+  const failureReason = paymentIntent.last_payment_error?.message || 'Payment attempt failed';
   await tx.paymentTransaction.create({
     data: {
       orderId: order.id,
       provider: PaymentProvider.STRIPE,
-      providerTransactionId: (session.payment_intent as string) || session.id,
+      providerTransactionId: paymentIntent.id,
       status: PaymentStatus.FAILED,
-      amountInCents: session.amount_total || order.totalInCents,
+      amountInCents: paymentIntent.amount || order.totalInCents,
       currency: order.currency,
-      rawResponse: session as any,
-    },
-  });
-}
-
-async function handleSessionExpired(
-  tx: Prisma.TransactionClient,
-  session: Stripe.Checkout.Session
-): Promise<void> {
-  const orderId = (session.metadata?.orderId as string) || (session.client_reference_id as string);
-  if (!orderId) return;
-
-  const order = await tx.order.findUnique({
-    where: { id: orderId },
-    include: { items: true },
-  });
-
-  if (!order || order.status !== OrderStatus.PENDING) {
-    return;
-  }
-
-  for (const item of order.items) {
-    await tx.ticketTier.update({
-      where: { id: item.ticketTierId },
-      data: {
-        reservedQuantity: { decrement: item.quantity },
+      rawResponse: {
+        ...(paymentIntent as any),
+        failureReason,
       },
-    });
-  }
-
-  await tx.ticketReservation.updateMany({
-    where: { orderId: order.id },
-    data: { status: ReservationStatus.RELEASED },
-  });
-
-  await tx.order.update({
-    where: { id: order.id },
-    data: { status: OrderStatus.EXPIRED },
+    },
   });
 }

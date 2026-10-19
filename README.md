@@ -154,7 +154,7 @@ stripe listen \
   --events checkout.session.completed,checkout.session.expired,checkout.session.async_payment_succeeded,checkout.session.async_payment_failed \
   --forward-to localhost:4000/api/webhooks/stripe
 ```
-
+strip
 Keep this terminal running. The CLI will print a webhook signing secret beginning with `whsec_`.
 
 ### 2. Configure the webhook secret

@@ -10,7 +10,8 @@ import { CreateCheckoutSessionInput } from './checkout.schema.js';
 export interface CheckoutResult {
   orderNumber: string;
   orderAccessToken: string;
-  checkoutUrl: string;
+  clientSecret: string;
+  publishableKey?: string;
   totalInCents: number;
   currency: string;
   expiresAt: string;
@@ -123,22 +124,23 @@ export async function createCheckoutSession(
   });
 
   if (existingOrder && existingOrder.status === OrderStatus.PENDING && existingOrder.expiresAt > now) {
-    // If a session was already created, retrieve it or return its URL
+    // If a PaymentIntent was already created, retrieve it and return its client secret
     if (existingOrder.paymentReference) {
       try {
-        const session = await stripe.checkout.sessions.retrieve(existingOrder.paymentReference);
-        if (session && session.url) {
+        const paymentIntent = await stripe.paymentIntents.retrieve(existingOrder.paymentReference);
+        if (paymentIntent && paymentIntent.client_secret) {
           return {
             orderNumber: existingOrder.orderNumber,
             orderAccessToken: existingOrder.orderAccessToken || '',
-            checkoutUrl: session.url,
+            clientSecret: paymentIntent.client_secret,
+            publishableKey: env.STRIPE_PUBLISHABLE_KEY,
             totalInCents: existingOrder.totalInCents,
             currency: existingOrder.currency,
             expiresAt: existingOrder.expiresAt.toISOString(),
           };
         }
       } catch {
-        // If retrieve fails, proceed to generate new session
+        // If retrieve fails, proceed to generate new payment intent
       }
     }
   }
@@ -320,64 +322,50 @@ export async function createCheckoutSession(
     throw new BadRequestError('Could not secure ticket reservation. Please try again.');
   }
 
-  // 5. Create Stripe Checkout Session
+  // 5. Create Stripe PaymentIntent
   try {
-    const lineItems = createdOrder.items.map((item: any) => ({
-      price_data: {
-        currency: createdOrder.currency.toLowerCase(),
-        unit_amount: item.unitPriceInCents,
-        product_data: {
-          name: `${event.title} · ${item.ticketTier.name}`,
-          description: item.ticketTier.description || `Ticket pass for ${event.title}`,
-        },
-      },
-      quantity: item.quantity,
-    }));
-
-    // Expire Stripe session when database reservation expires
-    const stripeExpiresAt = Math.floor(expiresAt.getTime() / 1000);
-
-    const session = await stripe.checkout.sessions.create(
+    const paymentIntent = await stripe.paymentIntents.create(
       {
-        mode: 'payment',
-        customer_email: customerEmail,
-        client_reference_id: createdOrder.id,
-        line_items: lineItems,
+        amount: createdOrder.totalInCents,
+        currency: createdOrder.currency.toLowerCase(),
+        description: `Outside.vip Passes - ${event.title} (${createdOrder.orderNumber})`,
         metadata: {
           orderId: createdOrder.id,
           orderNumber: createdOrder.orderNumber,
           eventId: event.id,
           orderAccessToken,
         },
-        success_url: `${env.CLIENT_URL}/orders/${createdOrder.orderNumber}?token=${orderAccessToken}&session_id={CHECKOUT_SESSION_ID}`,
-        cancel_url: `${env.CLIENT_URL}/events/${event.slug}?checkout=cancelled&orderNumber=${createdOrder.orderNumber}`,
-        expires_at: stripeExpiresAt,
+        receipt_email: customerEmail,
+        automatic_payment_methods: {
+          enabled: true,
+        },
       },
       {
-        idempotencyKey: `stripe_sess_${finalIdempotencyKey}`,
+        idempotencyKey: `stripe_pi_${finalIdempotencyKey}`,
       }
     );
 
-    if (!session.url) {
-      throw new Error('Stripe Checkout session URL missing in provider response');
+    if (!paymentIntent.client_secret) {
+      throw new Error('Stripe PaymentIntent client secret missing in provider response');
     }
 
-    // Attach Stripe session ID to order
+    // Attach Stripe PaymentIntent ID to order
     await prisma.order.update({
       where: { id: createdOrder.id },
-      data: { paymentReference: session.id },
+      data: { paymentReference: paymentIntent.id },
     });
 
     return {
       orderNumber: createdOrder.orderNumber,
       orderAccessToken,
-      checkoutUrl: session.url,
+      clientSecret: paymentIntent.client_secret,
+      publishableKey: env.STRIPE_PUBLISHABLE_KEY,
       totalInCents: createdOrder.totalInCents,
       currency: createdOrder.currency,
       expiresAt: expiresAt.toISOString(),
     };
   } catch (stripeError) {
-    console.error('Stripe session creation failed; initiating reservation rollback:', stripeError);
+    console.error('Stripe PaymentIntent creation failed; initiating reservation rollback:', stripeError);
 
     // Rollback reservation atomically so stock is not locked up
     await prisma.$transaction(async (tx) => {
