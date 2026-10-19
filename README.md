@@ -204,6 +204,61 @@ npm run build
 
 Run these checks after making changes.
 
+### 4. Set up PostgreSQL and Prisma
+
+Make sure PostgreSQL is installed and running. Create a database for Outside.vip using your preferred PostgreSQL client or the `psql` command-line tool.
+
+For example, using `psql`:
+
+```sql
+CREATE DATABASE outside_vip;
+```
+
+Configure `DATABASE_URL` in `server/.env` to match your local PostgreSQL username, password, host, port, and database name:
+
+```env
+DATABASE_URL="postgresql://username:password@localhost:5432/outside_vip?schema=public"
+```
+
+Replace `username` and `password` with your actual PostgreSQL credentials.
+
+From the project root, install dependencies and apply the Prisma migrations:
+
+```bash
+npm install
+npm run db:migrate
+```
+
+To populate the database with sample data, run:
+
+```bash
+npm run db:seed
+```
+
+**Note:** Seeding may create or modify sample records. Review `server/prisma/seed.ts` and use a development database to avoid changing data you need to preserve.
+
+### 5. Inspect the database with Prisma Studio
+
+Prisma Studio provides a browser-based interface for viewing and editing database records.
+
+From the project root, run:
+
+```bash
+npx prisma studio --schema server/prisma/schema.prisma
+```
+
+Open the URL printed in the terminal, usually:
+
+```text
+http://localhost:5555
+```
+
+You can use Prisma Studio to inspect events, users, ticket types, orders, tickets, and other records defined in your Prisma schema.
+
+Keep the terminal running while using Prisma Studio. Stop it with `Ctrl+C` when finished.
+
+**Important:** Prisma Studio can modify database records directly. Use it carefully, especially with orders, payments, tickets, and check-in statuses. Do not expose it publicly or use it to simulate successful payments by manually changing payment records.
+
 ## Demo Accounts
 
 The following accounts are available when the development database has been seeded successfully.
@@ -220,8 +275,4 @@ These are development credentials only. Never use the demo passwords for product
 
 Outside.vip is being developed toward a pilot with small events. Current work focuses on validating checkout, payment confirmation, ticket issuance, QR scanning, and reliable check-in.
 
-Future improvements include marketplace payouts through Stripe Connect, M-Pesa integration, and production deployment hardening.
 
-## License
-
-Add your chosen license here before distributing the project publicly.

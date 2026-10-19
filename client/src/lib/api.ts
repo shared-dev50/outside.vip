@@ -8,6 +8,8 @@ import {
   Order,
   CheckoutSessionInput,
   CheckoutSessionResult,
+  OrganizerPayoutDetails,
+  PayoutDetailsInput,
 } from '../types';
 
 const API_BASE = '/api';
@@ -87,6 +89,13 @@ export const api = {
     getDashboard: () => request<OrganizerDashboardStats>('/organizer/dashboard'),
     listEvents: () => request<{ events: OrganizerEventItem[] }>('/organizer/events'),
     getEvent: (id: string) => request<{ event: Event }>(`/organizer/events/${id}`),
+    getPayoutDetails: () =>
+      request<{ payoutDetails: OrganizerPayoutDetails | null }>('/organizer/payout-details'),
+    updatePayoutDetails: (payload: PayoutDetailsInput) =>
+      request<{ payoutDetails: OrganizerPayoutDetails }>('/organizer/payout-details', {
+        method: 'PUT',
+        body: JSON.stringify(payload),
+      }),
     createEvent: (payload: any) =>
       request<{ event: Event }>('/organizer/events', {
         method: 'POST',

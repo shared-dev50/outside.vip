@@ -94,6 +94,7 @@ model User {
   updatedAt    DateTime          @updatedAt
 
   organizer    OrganizerProfile?
+  payoutDetails OrganizerPayoutDetails?
   events       Event[]           @relation("OrganizerEvents")
   orders       Order[]
   checkIns     CheckInLog[]      @relation("ScannerLogs")
@@ -154,6 +155,8 @@ model Event {
   orders         Order[]
   tickets        Ticket[]
   checkInLogs    CheckInLog[]
+  payoutDetailsId String?
+  payoutDetails   OrganizerPayoutDetails? @relation(fields: [payoutDetailsId], references: [id], onDelete: SetNull)
 
   @@index([slug])
   @@index([category, status])
@@ -326,3 +329,39 @@ model ProcessedWebhookEvent {
 
   @@index([eventId])
 }
+
+model OrganizerPayoutDetails {
+  id                     String    @id @default(uuid())
+  userId                 String    @unique
+  user                   User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  // Organisation Details
+  orgType                String    // Company, Partnership, NGO/Non-profit, Other
+  orgTypeOther           String?
+  registeredName         String
+  registrationNumber     String?
+  country                String
+  address                String?   @db.Text
+  contactPersonName      String
+  contactEmail           String
+
+  // Payout Bank Details
+  accountHolderName      String
+  bankName               String
+  bankCountry            String
+  accountCurrency        String    @default("USD")
+  accountNumberMasked    String    // e.g. "•••• •••• •••• 1234"
+  accountNumberLast4     String    // e.g. "1234"
+  accountNumberEncrypted String?   @db.Text
+  bankBranch             String?
+  swiftBic               String?
+  routingCode            String?   // Routing number, Sort code, or local clearing code
+
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
+
+  events                 Event[]
+
+  @@index([userId])
+}
+

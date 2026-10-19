@@ -18,6 +18,60 @@ export const ticketTierInputSchema = z.object({
   path: ['maxPerOrder'],
 });
 
+export const payoutDetailsInputSchema = z
+  .object({
+    // Organisation details
+    orgType: z.enum(['Company', 'Partnership', 'NGO/Non-profit', 'Other'], {
+      errorMap: () => ({ message: 'Please select a valid organisation type' }),
+    }),
+    orgTypeOther: z.string().optional().nullable(),
+    registeredName: z.string().min(2, 'Registered organisation name must be at least 2 characters').max(200),
+    registrationNumber: z.string().max(100).optional().nullable(),
+    country: z.string().min(2, 'Country of registration is required').max(100),
+    address: z.string().max(500).optional().nullable(),
+    contactPersonName: z.string().min(2, "Authorised contact person's full name is required").max(150),
+    contactEmail: z.string().email('Please enter a valid contact email').max(255),
+
+    // Payout bank details
+    accountHolderName: z.string().min(2, 'Account holder name is required').max(150),
+    bankName: z.string().min(2, 'Bank name is required').max(150),
+    bankCountry: z.string().min(2, 'Bank country is required').max(100),
+    accountCurrency: z.string().min(3).max(10).default('USD'),
+    accountNumber: z.string().min(4, 'Account number must be at least 4 digits').max(50).optional().nullable(),
+    confirmAccountNumber: z.string().optional().nullable(),
+    bankBranch: z.string().max(150).optional().nullable(),
+    swiftBic: z.string().max(50).optional().nullable(),
+    routingCode: z.string().max(50).optional().nullable(),
+  })
+  .superRefine((data, ctx) => {
+    if (data.orgType === 'Other' && (!data.orgTypeOther || !data.orgTypeOther.trim())) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Please specify the organisation type',
+        path: ['orgTypeOther'],
+      });
+    }
+
+    if (data.accountNumber && !data.accountNumber.startsWith('••••')) {
+      if (data.accountNumber.trim().length < 4) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'Account number must be at least 4 characters',
+          path: ['accountNumber'],
+        });
+      }
+      if (data.accountNumber !== data.confirmAccountNumber) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'Account number and confirmation do not match',
+          path: ['confirmAccountNumber'],
+        });
+      }
+    }
+  });
+
+export type PayoutDetailsInput = z.infer<typeof payoutDetailsInputSchema>;
+
 export const createEventSchema = z.object({
   title: z.string().min(2, 'Title must be at least 2 characters').max(200),
   tagline: z.string().max(300).optional().nullable(),
@@ -42,6 +96,7 @@ export const createEventSchema = z.object({
   dressCode: z.string().optional().nullable(),
   status: z.nativeEnum(EventStatus).default(EventStatus.DRAFT),
   ticketTiers: z.array(ticketTierInputSchema).default([]),
+  payoutDetails: payoutDetailsInputSchema.optional().nullable(),
 }).refine(
   (data) => new Date(data.endAt).getTime() > new Date(data.startAt).getTime(),
   {
@@ -69,4 +124,5 @@ export const updateEventSchema = z.object({
   dressCode: z.string().optional().nullable(),
   status: z.nativeEnum(EventStatus).optional(),
   ticketTiers: z.array(ticketTierInputSchema).optional(),
+  payoutDetails: payoutDetailsInputSchema.optional().nullable(),
 });

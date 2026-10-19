@@ -103,9 +103,56 @@ export interface Event {
   dressCode?: string | null;
   isFeatured: boolean;
   ticketTiers: TicketTier[];
+  payoutDetails?: OrganizerPayoutDetails | null;
   minPriceInCents?: number;
   currency?: string;
   isSoldOut?: boolean;
+}
+
+export type OrgType = 'Company' | 'Partnership' | 'NGO/Non-profit' | 'Other';
+
+export interface OrganizerPayoutDetails {
+  id: string;
+  userId: string;
+  orgType: OrgType;
+  orgTypeOther?: string | null;
+  registeredName: string;
+  registrationNumber?: string | null;
+  country: string;
+  address?: string | null;
+  contactPersonName: string;
+  contactEmail: string;
+  accountHolderName: string;
+  bankName: string;
+  bankCountry: string;
+  accountCurrency: string;
+  accountNumberMasked: string;
+  accountNumberLast4: string;
+  bankBranch?: string | null;
+  swiftBic?: string | null;
+  routingCode?: string | null;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface PayoutDetailsInput {
+  orgType: OrgType;
+  orgTypeOther?: string | null;
+  registeredName: string;
+  registrationNumber?: string | null;
+  country: string;
+  address?: string | null;
+  contactPersonName: string;
+  contactEmail: string;
+  accountHolderName: string;
+  bankName: string;
+  bankCountry: string;
+  accountCurrency: string;
+  accountNumber?: string | null;
+  confirmAccountNumber?: string | null;
+  bankBranch?: string | null;
+  swiftBic?: string | null;
+  routingCode?: string | null;
 }
 
 export interface OrderItem {

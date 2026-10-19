@@ -3,7 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../lib/api';
 import { useAuth } from '../context/AuthContext';
-import { EventCategory, TicketTierStatus } from '../types';
+import { EventCategory, TicketTierStatus, OrgType, PayoutDetailsInput } from '../types';
 import {
   ArrowLeft,
   Save,
@@ -23,6 +23,10 @@ import {
   X,
   MapPin,
   Lock,
+  Building2,
+  Info,
+  Landmark,
+  ShieldCheck,
 } from 'lucide-react';
 
 interface FormTicketTier {
@@ -61,6 +65,85 @@ const PRESET_COVERS = [
 
 const KENYA_CITIES = ['Nairobi', 'Kilifi', 'Mombasa', 'Diani', 'Naivasha', 'Kisumu', 'Nakuru'];
 
+const COMMON_COUNTRIES = [
+  'Kenya',
+  'United States',
+  'United Kingdom',
+  'European Union (SEPA)',
+  'South Africa',
+  'Nigeria',
+  'Uganda',
+  'Tanzania',
+  'Rwanda',
+  'Ghana',
+  'Canada',
+  'Australia',
+  'United Arab Emirates',
+  'Other',
+];
+
+const CURRENCIES = ['USD', 'KES', 'GBP', 'EUR', 'CAD', 'AUD', 'ZAR', 'NGN', 'UGX', 'TZS', 'RWF', 'GHS'];
+
+const getBankFieldConfig = (country: string) => {
+  const c = country.toLowerCase();
+  if (c.includes('kenya')) {
+    return {
+      routingLabel: 'Bank / Clearing Code (Optional)',
+      routingPlaceholder: 'e.g. 01 (KCB), 11 (Barclays/Absa), 68 (Equity) or 5-digit code',
+      branchLabel: 'Bank Branch Name or Branch Code (Optional)',
+      branchPlaceholder: 'e.g. Westlands Branch / 042',
+      accountPlaceholder: 'e.g. 0100123456789',
+      helperText: 'Kenya commercial banks use a 2 to 5-digit central bank code and local branch code.',
+    };
+  }
+  if (c.includes('united states') || c === 'us' || c === 'usa') {
+    return {
+      routingLabel: 'Routing Number (ABA / 9 Digits, Optional)',
+      routingPlaceholder: 'e.g. 021000021',
+      branchLabel: 'Bank Branch (Optional)',
+      branchPlaceholder: 'e.g. Downtown Financial Center',
+      accountPlaceholder: 'e.g. 1234567890',
+      helperText: 'US accounts require a 9-digit Fedwire / ACH routing transit number.',
+    };
+  }
+  if (c.includes('united kingdom') || c === 'uk' || c === 'gb') {
+    return {
+      routingLabel: 'Sort Code (6 Digits, Optional)',
+      routingPlaceholder: 'e.g. 20-00-00 or 200000',
+      branchLabel: 'Bank Branch (Optional)',
+      branchPlaceholder: 'e.g. London City Branch',
+      accountPlaceholder: 'e.g. 12345678 or IBAN',
+      helperText: 'UK domestic transfers use 6-digit sort codes and 8-digit account numbers.',
+    };
+  }
+  if (
+    c.includes('euro') ||
+    c.includes('germany') ||
+    c.includes('france') ||
+    c.includes('netherlands') ||
+    c.includes('spain') ||
+    c.includes('ireland') ||
+    c.includes('italy')
+  ) {
+    return {
+      routingLabel: 'National Clearing / Branch Code (Optional)',
+      routingPlaceholder: 'e.g. BLZ or National Sort Code',
+      branchLabel: 'Bank Branch (Optional)',
+      branchPlaceholder: 'e.g. Central Branch',
+      accountPlaceholder: 'e.g. DE89 3704 0044 0532 0130 00 (IBAN)',
+      helperText: 'SEPA European transfers use international IBAN account format and BIC.',
+    };
+  }
+  return {
+    routingLabel: 'Routing / Sort / Clearing Code (Optional)',
+    routingPlaceholder: 'Local clearing or transit code where applicable',
+    branchLabel: 'Bank Branch (Optional)',
+    branchPlaceholder: 'Branch name or branch transit code',
+    accountPlaceholder: 'e.g. Bank account number or IBAN',
+    helperText: 'Enter account and clearing information according to your local banking system.',
+  };
+};
+
 const toInputValue = (dateString?: string | null) => {
   if (!dateString) return '';
   const d = new Date(dateString);
@@ -89,7 +172,7 @@ export const CreateEventPage: React.FC = () => {
   const { user, quickLoginAs } = useAuth();
 
   const [activeSection, setActiveSection] = useState<
-    'details' | 'schedule' | 'venue' | 'artwork' | 'tickets' | 'policies' | 'preview'
+    'details' | 'schedule' | 'venue' | 'artwork' | 'tickets' | 'policies' | 'preview' | 'payout'
   >('details');
 
   // Form State
@@ -114,6 +197,29 @@ export const CreateEventPage: React.FC = () => {
   const [ageRestriction, setAgeRestriction] = useState('18+');
   const [dressCode, setDressCode] = useState('');
   const [doorPolicy, setDoorPolicy] = useState('');
+
+  // Organisation Details Form State
+  const [orgType, setOrgType] = useState<OrgType>('Company');
+  const [orgTypeOther, setOrgTypeOther] = useState('');
+  const [registeredName, setRegisteredName] = useState('');
+  const [registrationNumber, setRegistrationNumber] = useState('');
+  const [orgCountry, setOrgCountry] = useState('Kenya');
+  const [orgAddress, setOrgAddress] = useState('');
+  const [contactPersonName, setContactPersonName] = useState('');
+  const [contactEmail, setContactEmail] = useState('');
+
+  // Payout Bank Details Form State
+  const [accountHolderName, setAccountHolderName] = useState('');
+  const [bankName, setBankName] = useState('');
+  const [bankCountry, setBankCountry] = useState('Kenya');
+  const [accountCurrency, setAccountCurrency] = useState('USD');
+  const [accountNumber, setAccountNumber] = useState('');
+  const [confirmAccountNumber, setConfirmAccountNumber] = useState('');
+  const [bankBranch, setBankBranch] = useState('');
+  const [swiftBic, setSwiftBic] = useState('');
+  const [routingCode, setRoutingCode] = useState('');
+  const [savedAccountNumberMasked, setSavedAccountNumberMasked] = useState<string | null>(null);
+  const [savedAccountNumberLast4, setSavedAccountNumberLast4] = useState<string | null>(null);
 
   const [currentStatus, setCurrentStatus] = useState<'DRAFT' | 'PUBLISHED'>('DRAFT');
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
@@ -162,6 +268,13 @@ export const CreateEventPage: React.FC = () => {
     enabled: isEditing,
   });
 
+  // Fetch organizer default payout details for prefilling if event doesn't have it
+  const { data: defaultPayoutData } = useQuery({
+    queryKey: ['organizer-payout-details'],
+    queryFn: () => api.organizer.getPayoutDetails(),
+    staleTime: 60000,
+  });
+
   useEffect(() => {
     if (existingData?.event) {
       const evt = existingData.event;
@@ -203,6 +316,36 @@ export const CreateEventPage: React.FC = () => {
       setHasUnsavedChanges(false);
     }
   }, [existingData]);
+
+  // Load and prefill payout details from existing event or organizer profile
+  useEffect(() => {
+    const payout = existingData?.event?.payoutDetails || defaultPayoutData?.payoutDetails;
+    if (payout) {
+      setOrgType(payout.orgType || 'Company');
+      setOrgTypeOther(payout.orgTypeOther || '');
+      setRegisteredName(payout.registeredName || '');
+      setRegistrationNumber(payout.registrationNumber || '');
+      setOrgCountry(payout.country || 'Kenya');
+      setOrgAddress(payout.address || '');
+      setContactPersonName(payout.contactPersonName || (user?.name || ''));
+      setContactEmail(payout.contactEmail || (user?.email || ''));
+
+      setAccountHolderName(payout.accountHolderName || '');
+      setBankName(payout.bankName || '');
+      setBankCountry(payout.bankCountry || 'Kenya');
+      setAccountCurrency(payout.accountCurrency || 'USD');
+      setSavedAccountNumberMasked(payout.accountNumberMasked || null);
+      setSavedAccountNumberLast4(payout.accountNumberLast4 || null);
+      setAccountNumber(payout.accountNumberMasked || '');
+      setConfirmAccountNumber(payout.accountNumberMasked || '');
+      setBankBranch(payout.bankBranch || '');
+      setSwiftBic(payout.swiftBic || '');
+      setRoutingCode(payout.routingCode || '');
+    } else if (user) {
+      if (!contactPersonName && user.name) setContactPersonName(user.name);
+      if (!contactEmail && user.email) setContactEmail(user.email);
+    }
+  }, [existingData, defaultPayoutData, user]);
 
   // Ticket tier actions
   const addTicketTier = () => {
@@ -253,9 +396,6 @@ export const CreateEventPage: React.FC = () => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    // Reset input value so the user can re-select the same file if needed
-    e.target.value = '';
-
     const allowedMimeTypes = ['image/jpeg', 'image/png', 'image/webp'];
     if (!allowedMimeTypes.includes(file.type)) {
       const msg = 'Please upload a valid image file (JPEG, PNG, or WebP).';
@@ -288,6 +428,9 @@ export const CreateEventPage: React.FC = () => {
       showNotification('error', msg);
     } finally {
       setIsUploadingImage(false);
+      if (e.target) {
+        e.target.value = '';
+      }
     }
   };
 
@@ -314,6 +457,35 @@ export const CreateEventPage: React.FC = () => {
       ? (description.trim() ? `${description.trim()}\n\nDoor Policy: ${doorPolicy.trim()}` : `Door Policy: ${doorPolicy.trim()}`)
       : description.trim();
 
+    let payoutPayload: PayoutDetailsInput | null = null;
+    const hasEnteredPayout =
+      Boolean(registeredName.trim()) ||
+      Boolean(accountHolderName.trim()) ||
+      Boolean(bankName.trim()) ||
+      Boolean(accountNumber.trim());
+
+    if (hasEnteredPayout) {
+      payoutPayload = {
+        orgType,
+        orgTypeOther: orgType === 'Other' ? orgTypeOther.trim() : null,
+        registeredName: registeredName.trim(),
+        registrationNumber: registrationNumber.trim() || null,
+        country: orgCountry.trim() || 'Kenya',
+        address: orgAddress.trim() || null,
+        contactPersonName: contactPersonName.trim(),
+        contactEmail: contactEmail.trim(),
+        accountHolderName: accountHolderName.trim(),
+        bankName: bankName.trim(),
+        bankCountry: bankCountry.trim() || 'Kenya',
+        accountCurrency: accountCurrency.trim() || 'USD',
+        accountNumber: accountNumber.trim() || null,
+        confirmAccountNumber: confirmAccountNumber.trim() || null,
+        bankBranch: bankBranch.trim() || null,
+        swiftBic: swiftBic.trim() || null,
+        routingCode: routingCode.trim() || null,
+      };
+    }
+
     return {
       title: title.trim() || 'Untitled Experience Draft',
       tagline: tagline.trim() || null,
@@ -332,6 +504,7 @@ export const CreateEventPage: React.FC = () => {
       dressCode: dressCode.trim() || null,
       status: statusOverride || currentStatus,
       ticketTiers: formattedTiers,
+      payoutDetails: payoutPayload,
     };
   };
 
@@ -376,6 +549,52 @@ export const CreateEventPage: React.FC = () => {
         }
       }
 
+      // Validate Payout & Organisation Details if filled
+      const hasEnteredPayout =
+        Boolean(registeredName.trim()) ||
+        Boolean(accountHolderName.trim()) ||
+        Boolean(bankName.trim()) ||
+        Boolean(accountNumber.trim());
+
+      if (hasEnteredPayout) {
+        if (orgType === 'Other' && !orgTypeOther.trim()) {
+          throw new Error('Please specify your organisation type in Payout & Organisation Details.');
+        }
+        if (!registeredName.trim() || registeredName.trim().length < 2) {
+          throw new Error('Registered organisation name must be at least 2 characters.');
+        }
+        if (!orgCountry.trim()) {
+          throw new Error('Country of registration is required in Organisation Details.');
+        }
+        if (!contactPersonName.trim() || contactPersonName.trim().length < 2) {
+          throw new Error("Authorised contact person's full name is required.");
+        }
+        if (!contactEmail.trim() || !contactEmail.includes('@')) {
+          throw new Error('A valid contact email is required in Organisation Details.');
+        }
+        if (!accountHolderName.trim() || accountHolderName.trim().length < 2) {
+          throw new Error('Account holder name is required in Payout Bank Details.');
+        }
+        if (!bankName.trim() || bankName.trim().length < 2) {
+          throw new Error('Bank name is required in Payout Bank Details.');
+        }
+        if (!bankCountry.trim()) {
+          throw new Error('Bank country is required in Payout Bank Details.');
+        }
+        if (!accountNumber.trim()) {
+          throw new Error('Bank account number is required in Payout Bank Details.');
+        }
+        // If a new (unmasked) account number was entered, check confirmation and length
+        if (!accountNumber.startsWith('••••')) {
+          if (accountNumber.trim().length < 4) {
+            throw new Error('Bank account number must be at least 4 characters.');
+          }
+          if (accountNumber.trim() !== confirmAccountNumber.trim()) {
+            throw new Error('Bank account number and confirmation do not match.');
+          }
+        }
+      }
+
       const payload = buildPayload(publish ? 'PUBLISHED' : undefined);
 
       let savedEventId = id;
@@ -400,6 +619,7 @@ export const CreateEventPage: React.FC = () => {
       queryClient.invalidateQueries({ queryKey: ['organizer-dashboard'] });
       queryClient.invalidateQueries({ queryKey: ['organizer-events'] });
       queryClient.invalidateQueries({ queryKey: ['organizer-event', eventId] });
+      queryClient.invalidateQueries({ queryKey: ['organizer-payout-details'] });
       queryClient.invalidateQueries({ queryKey: ['events'] });
 
       showNotification(
@@ -617,6 +837,7 @@ export const CreateEventPage: React.FC = () => {
               { id: 'tickets', label: '5. Ticket Tiers & Capacity', icon: Ticket },
               { id: 'policies', label: '6. Policies & Door Rules', icon: Sliders },
               { id: 'preview', label: '7. Live Discovery Card Preview', icon: Eye },
+              { id: 'payout', label: '8. Payout & Organisation Details', icon: Building2 },
             ].map((section) => {
               const Icon = section.icon;
               const isActive = activeSection === section.id;
@@ -652,6 +873,16 @@ export const CreateEventPage: React.FC = () => {
                 <span>Min Price:</span>
                 <span className="text-stone-900 font-bold">
                   ${Math.min(...ticketTiers.map((t) => Number(t.price) || 0))}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span>Payout Bank:</span>
+                <span className="text-stone-900 font-bold">
+                  {savedAccountNumberLast4
+                    ? `•••• ${savedAccountNumberLast4}`
+                    : accountNumber && !accountNumber.startsWith('••••')
+                    ? `•••• ${accountNumber.slice(-4)}`
+                    : 'Not Configured'}
                 </span>
               </div>
             </div>
@@ -948,10 +1179,14 @@ export const CreateEventPage: React.FC = () => {
                     </div>
 
                     <div>
-                      <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5">
+                      <label
+                        htmlFor="flyer-file-upload"
+                        className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5 cursor-pointer"
+                      >
                         Upload Flyer File (Max 5MB)
                       </label>
                       <label
+                        htmlFor="flyer-file-upload"
                         className={`w-full px-3.5 py-2.5 rounded-lg bg-[#FAF8F5] border border-dashed text-xs font-mono flex items-center justify-center gap-2 transition-colors ${
                           isUploadingImage
                             ? 'border-stone-400 text-stone-400 cursor-not-allowed'
@@ -970,11 +1205,15 @@ export const CreateEventPage: React.FC = () => {
                           </>
                         )}
                         <input
+                          id="flyer-file-upload"
                           type="file"
                           accept="image/jpeg,image/png,image/webp"
                           disabled={isUploadingImage}
+                          onClick={(e) => {
+                            (e.target as HTMLInputElement).value = '';
+                          }}
                           onChange={handleImageFileChange}
-                          className="hidden"
+                          className="sr-only"
                         />
                       </label>
                       {imageUploadError && (
@@ -1358,6 +1597,418 @@ export const CreateEventPage: React.FC = () => {
                           From ${Math.min(...ticketTiers.map((t) => Number(t.price) || 0))}
                         </span>
                       </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* 8. Payout & Organisation Details */}
+            {activeSection === 'payout' && (
+              <div className="space-y-6">
+                {/* User-facing Messaging Note */}
+                <div className="bg-amber-50/80 border border-amber-300 rounded-xl p-5 shadow-2xs">
+                  <div className="flex items-start gap-3">
+                    <Info className="w-5 h-5 text-amber-700 shrink-0 mt-0.5" />
+                    <div className="space-y-1">
+                      <h4 className="text-xs font-mono font-bold uppercase tracking-wider text-amber-900">
+                        Notice on Settlement & Payout Setup
+                      </h4>
+                      <p className="text-xs font-sans text-amber-900 leading-relaxed font-medium">
+                        Payout details are collected for future payment setup. Your bank account has not been independently verified, and payouts are not enabled yet.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Organisation Details Card */}
+                <div className="bg-white rounded-xl border border-stone-200/90 p-6 sm:p-8 space-y-6 shadow-xs">
+                  <div className="flex items-center gap-3">
+                    <div className="w-9 h-9 rounded-lg bg-stone-100 flex items-center justify-center text-stone-700 shrink-0">
+                      <Building2 className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <h2 className="text-lg sm:text-xl font-display font-black text-stone-900 uppercase tracking-tight">
+                        Organisation Details
+                      </h2>
+                      <p className="text-xs text-stone-500 mt-0.5 font-sans">
+                        Legal identity and authorized representative for this event experience.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="space-y-4 pt-2">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5">
+                          Organisation Type <span className="text-stone-900">*</span>
+                        </label>
+                        <select
+                          value={orgType}
+                          onChange={(e) => {
+                            setOrgType(e.target.value as OrgType);
+                            setHasUnsavedChanges(true);
+                          }}
+                          className="w-full px-3.5 py-2.5 rounded-lg bg-[#FAF8F5] border border-stone-300 text-stone-900 text-sm focus:outline-none focus:border-stone-900 focus:bg-white transition-colors cursor-pointer"
+                        >
+                          <option value="Company">Company</option>
+                          <option value="Partnership">Partnership</option>
+                          <option value="NGO/Non-profit">NGO / Non-profit</option>
+                          <option value="Other">Other</option>
+                        </select>
+                      </div>
+
+                      {orgType === 'Other' && (
+                        <div>
+                          <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5">
+                            Specify Organisation Type <span className="text-stone-900">*</span>
+                          </label>
+                          <input
+                            type="text"
+                            placeholder="e.g. Sole Proprietorship, Trust, Collective"
+                            value={orgTypeOther}
+                            onChange={(e) => {
+                              setOrgTypeOther(e.target.value);
+                              setHasUnsavedChanges(true);
+                            }}
+                            className="w-full px-3.5 py-2.5 rounded-lg bg-[#FAF8F5] border border-stone-300 text-stone-900 placeholder-stone-400 text-sm focus:outline-none focus:border-stone-900 focus:bg-white transition-colors"
+                          />
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5">
+                          Registered Organisation Name <span className="text-stone-900">*</span>
+                        </label>
+                        <input
+                          type="text"
+                          placeholder="e.g. Sol Collective Entertainment Ltd"
+                          value={registeredName}
+                          onChange={(e) => {
+                            setRegisteredName(e.target.value);
+                            setHasUnsavedChanges(true);
+                          }}
+                          className="w-full px-3.5 py-2.5 rounded-lg bg-[#FAF8F5] border border-stone-300 text-stone-900 placeholder-stone-400 text-sm focus:outline-none focus:border-stone-900 focus:bg-white transition-colors"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5">
+                          Registration Number <span className="text-stone-400 font-normal">(Optional)</span>
+                        </label>
+                        <input
+                          type="text"
+                          placeholder="e.g. CPR/2024/189201"
+                          value={registrationNumber}
+                          onChange={(e) => {
+                            setRegistrationNumber(e.target.value);
+                            setHasUnsavedChanges(true);
+                          }}
+                          className="w-full px-3.5 py-2.5 rounded-lg bg-[#FAF8F5] border border-stone-300 text-stone-900 placeholder-stone-400 text-sm focus:outline-none focus:border-stone-900 focus:bg-white transition-colors"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5">
+                          Country of Registration <span className="text-stone-900">*</span>
+                        </label>
+                        <input
+                          type="text"
+                          list="country-suggestions"
+                          placeholder="e.g. Kenya"
+                          value={orgCountry}
+                          onChange={(e) => {
+                            setOrgCountry(e.target.value);
+                            setHasUnsavedChanges(true);
+                          }}
+                          className="w-full px-3.5 py-2.5 rounded-lg bg-[#FAF8F5] border border-stone-300 text-stone-900 placeholder-stone-400 text-sm focus:outline-none focus:border-stone-900 focus:bg-white transition-colors"
+                        />
+                        <datalist id="country-suggestions">
+                          {COMMON_COUNTRIES.map((c) => (
+                            <option key={c} value={c} />
+                          ))}
+                        </datalist>
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5">
+                          Registered Address <span className="text-stone-400 font-normal">(Optional)</span>
+                        </label>
+                        <input
+                          type="text"
+                          placeholder="e.g. Westlands Commercial Center, Block B, Nairobi"
+                          value={orgAddress}
+                          onChange={(e) => {
+                            setOrgAddress(e.target.value);
+                            setHasUnsavedChanges(true);
+                          }}
+                          className="w-full px-3.5 py-2.5 rounded-lg bg-[#FAF8F5] border border-stone-300 text-stone-900 placeholder-stone-400 text-sm focus:outline-none focus:border-stone-900 focus:bg-white transition-colors"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2 border-t border-stone-100">
+                      <div>
+                        <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5">
+                          Authorised Contact Person's Full Name <span className="text-stone-900">*</span>
+                        </label>
+                        <input
+                          type="text"
+                          placeholder="e.g. Sol Omondi"
+                          value={contactPersonName}
+                          onChange={(e) => {
+                            setContactPersonName(e.target.value);
+                            setHasUnsavedChanges(true);
+                          }}
+                          className="w-full px-3.5 py-2.5 rounded-lg bg-[#FAF8F5] border border-stone-300 text-stone-900 placeholder-stone-400 text-sm focus:outline-none focus:border-stone-900 focus:bg-white transition-colors"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5">
+                          Contact Email <span className="text-stone-900">*</span>
+                        </label>
+                        <input
+                          type="email"
+                          placeholder="e.g. accounts@solcollective.ke"
+                          value={contactEmail}
+                          onChange={(e) => {
+                            setContactEmail(e.target.value);
+                            setHasUnsavedChanges(true);
+                          }}
+                          className="w-full px-3.5 py-2.5 rounded-lg bg-[#FAF8F5] border border-stone-300 text-stone-900 placeholder-stone-400 text-sm focus:outline-none focus:border-stone-900 focus:bg-white transition-colors"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Payout Bank Details Card */}
+                <div className="bg-white rounded-xl border border-stone-200/90 p-6 sm:p-8 space-y-6 shadow-xs">
+                  <div className="flex items-center gap-3">
+                    <div className="w-9 h-9 rounded-lg bg-stone-100 flex items-center justify-center text-stone-700 shrink-0">
+                      <Landmark className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <h2 className="text-lg sm:text-xl font-display font-black text-stone-900 uppercase tracking-tight">
+                        Payout Bank Details
+                      </h2>
+                      <p className="text-xs text-stone-500 mt-0.5 font-sans">
+                        Settlement account where ticket sale proceeds will be transferred.
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Masked account summary banner if existing saved bank account */}
+                  {savedAccountNumberLast4 && (
+                    <div className="bg-stone-50 border border-stone-200 rounded-lg p-3.5 flex items-center justify-between text-xs font-mono">
+                      <div className="flex items-center gap-2 text-stone-700">
+                        <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0" />
+                        <span>Saved Account:</span>
+                        <span className="font-bold text-stone-900">
+                          {savedAccountNumberMasked || `•••• •••• •••• ${savedAccountNumberLast4}`}
+                        </span>
+                      </div>
+                      <span className="text-[11px] text-stone-500">
+                        Leave fields unchanged to retain
+                      </span>
+                    </div>
+                  )}
+
+                  <div className="space-y-4 pt-2">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5">
+                          Account Holder Name <span className="text-stone-900">*</span>
+                        </label>
+                        <input
+                          type="text"
+                          placeholder="Exact name matching the bank account"
+                          value={accountHolderName}
+                          onChange={(e) => {
+                            setAccountHolderName(e.target.value);
+                            setHasUnsavedChanges(true);
+                          }}
+                          className="w-full px-3.5 py-2.5 rounded-lg bg-[#FAF8F5] border border-stone-300 text-stone-900 placeholder-stone-400 text-sm focus:outline-none focus:border-stone-900 focus:bg-white transition-colors"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5">
+                          Bank Name <span className="text-stone-900">*</span>
+                        </label>
+                        <input
+                          type="text"
+                          placeholder="e.g. Standard Chartered, KCB, Chase, Barclays"
+                          value={bankName}
+                          onChange={(e) => {
+                            setBankName(e.target.value);
+                            setHasUnsavedChanges(true);
+                          }}
+                          className="w-full px-3.5 py-2.5 rounded-lg bg-[#FAF8F5] border border-stone-300 text-stone-900 placeholder-stone-400 text-sm focus:outline-none focus:border-stone-900 focus:bg-white transition-colors"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5">
+                          Bank Country <span className="text-stone-900">*</span>
+                        </label>
+                        <input
+                          type="text"
+                          list="bank-country-suggestions"
+                          placeholder="e.g. Kenya, United States, United Kingdom"
+                          value={bankCountry}
+                          onChange={(e) => {
+                            setBankCountry(e.target.value);
+                            setHasUnsavedChanges(true);
+                          }}
+                          className="w-full px-3.5 py-2.5 rounded-lg bg-[#FAF8F5] border border-stone-300 text-stone-900 placeholder-stone-400 text-sm focus:outline-none focus:border-stone-900 focus:bg-white transition-colors"
+                        />
+                        <datalist id="bank-country-suggestions">
+                          {COMMON_COUNTRIES.map((c) => (
+                            <option key={c} value={c} />
+                          ))}
+                        </datalist>
+                        <p className="text-[11px] text-stone-500 mt-1 font-sans">
+                          {getBankFieldConfig(bankCountry).helperText}
+                        </p>
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5">
+                          Account Currency <span className="text-stone-900">*</span>
+                        </label>
+                        <select
+                          value={accountCurrency}
+                          onChange={(e) => {
+                            setAccountCurrency(e.target.value);
+                            setHasUnsavedChanges(true);
+                          }}
+                          className="w-full px-3.5 py-2.5 rounded-lg bg-[#FAF8F5] border border-stone-300 text-stone-900 text-sm focus:outline-none focus:border-stone-900 focus:bg-white transition-colors cursor-pointer"
+                        >
+                          {CURRENCIES.map((cur) => (
+                            <option key={cur} value={cur}>
+                              {cur}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+
+                    {/* Account number and confirmation */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5">
+                          Account Number / IBAN <span className="text-stone-900">*</span>
+                        </label>
+                        <input
+                          type="text"
+                          placeholder={getBankFieldConfig(bankCountry).accountPlaceholder}
+                          value={accountNumber}
+                          autoComplete="off"
+                          onChange={(e) => {
+                            setAccountNumber(e.target.value);
+                            setHasUnsavedChanges(true);
+                          }}
+                          className="w-full px-3.5 py-2.5 rounded-lg bg-[#FAF8F5] border border-stone-300 text-stone-900 placeholder-stone-400 text-sm font-mono focus:outline-none focus:border-stone-900 focus:bg-white transition-colors"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5">
+                          Confirm Account Number <span className="text-stone-900">*</span>
+                        </label>
+                        <input
+                          type="text"
+                          placeholder="Re-enter account number to confirm"
+                          value={confirmAccountNumber}
+                          autoComplete="off"
+                          onChange={(e) => {
+                            setConfirmAccountNumber(e.target.value);
+                            setHasUnsavedChanges(true);
+                          }}
+                          className={`w-full px-3.5 py-2.5 rounded-lg bg-[#FAF8F5] border text-stone-900 placeholder-stone-400 text-sm font-mono focus:outline-none focus:bg-white transition-colors ${
+                            accountNumber &&
+                            confirmAccountNumber &&
+                            !accountNumber.startsWith('••••') &&
+                            accountNumber !== confirmAccountNumber
+                              ? 'border-rose-400 focus:border-rose-600 bg-rose-50/30'
+                              : 'border-stone-300 focus:border-stone-900'
+                          }`}
+                        />
+                        {accountNumber &&
+                          confirmAccountNumber &&
+                          !accountNumber.startsWith('••••') &&
+                          accountNumber !== confirmAccountNumber && (
+                            <p className="text-[11px] text-rose-600 font-mono mt-1">
+                              Account numbers do not match
+                            </p>
+                          )}
+                      </div>
+                    </div>
+
+                    {/* Adaptable country fields */}
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 pt-2 border-t border-stone-100">
+                      <div>
+                        <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5">
+                          {getBankFieldConfig(bankCountry).routingLabel}
+                        </label>
+                        <input
+                          type="text"
+                          placeholder={getBankFieldConfig(bankCountry).routingPlaceholder}
+                          value={routingCode}
+                          onChange={(e) => {
+                            setRoutingCode(e.target.value);
+                            setHasUnsavedChanges(true);
+                          }}
+                          className="w-full px-3.5 py-2.5 rounded-lg bg-[#FAF8F5] border border-stone-300 text-stone-900 placeholder-stone-400 text-sm font-mono focus:outline-none focus:border-stone-900 focus:bg-white transition-colors"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5">
+                          {getBankFieldConfig(bankCountry).branchLabel}
+                        </label>
+                        <input
+                          type="text"
+                          placeholder={getBankFieldConfig(bankCountry).branchPlaceholder}
+                          value={bankBranch}
+                          onChange={(e) => {
+                            setBankBranch(e.target.value);
+                            setHasUnsavedChanges(true);
+                          }}
+                          className="w-full px-3.5 py-2.5 rounded-lg bg-[#FAF8F5] border border-stone-300 text-stone-900 placeholder-stone-400 text-sm focus:outline-none focus:border-stone-900 focus:bg-white transition-colors"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5">
+                          SWIFT / BIC Code <span className="text-stone-400 font-normal">(Optional)</span>
+                        </label>
+                        <input
+                          type="text"
+                          placeholder="e.g. SCBLKENX"
+                          value={swiftBic}
+                          onChange={(e) => {
+                            setSwiftBic(e.target.value);
+                            setHasUnsavedChanges(true);
+                          }}
+                          className="w-full px-3.5 py-2.5 rounded-lg bg-[#FAF8F5] border border-stone-300 text-stone-900 placeholder-stone-400 text-sm font-mono focus:outline-none focus:border-stone-900 focus:bg-white transition-colors"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="pt-2 text-[11px] text-stone-500 font-sans flex items-center gap-2">
+                      <ShieldCheck className="w-4 h-4 text-stone-400 shrink-0" />
+                      <span>
+                        Outside.vip encrypts banking details at rest. Full account numbers are never displayed publicly or exposed in client responses. We never collect debit/credit card numbers, PINs, or online banking passwords.
+                      </span>
                     </div>
                   </div>
                 </div>

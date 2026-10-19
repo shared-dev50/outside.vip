@@ -12,6 +12,8 @@ import {
   deleteOrganizerEvent,
   getUploadSignature,
   handleDirectUpload,
+  getOrganizerPayoutDetails,
+  updateOrganizerPayoutDetails,
 } from './organizer.controller.js';
 import { uploadCoverMiddleware } from '../../middleware/upload.js';
 
@@ -25,6 +27,8 @@ organizerRouter.post('/upload/sign', getUploadSignature);
 organizerRouter.post('/upload', uploadCoverMiddleware.single('image'), handleDirectUpload);
 
 organizerRouter.get('/dashboard', getDashboardStats);
+organizerRouter.get('/payout-details', getOrganizerPayoutDetails);
+organizerRouter.put('/payout-details', updateOrganizerPayoutDetails);
 organizerRouter.get('/events', listOrganizerEvents);
 organizerRouter.post('/events', createOrganizerEvent);
 organizerRouter.get('/events/:id', getOrganizerEventById);

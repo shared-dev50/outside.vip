@@ -16,6 +16,7 @@ async function main() {
   await prisma.ticketTier.deleteMany();
   await prisma.event.deleteMany();
   await prisma.organizerProfile.deleteMany();
+  await prisma.organizerPayoutDetails.deleteMany();
   await prisma.user.deleteMany();
 
   // Create Users

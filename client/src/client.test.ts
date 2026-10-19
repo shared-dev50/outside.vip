@@ -93,6 +93,8 @@ describe('Outside.vip Client Library', () => {
     expect(typeof api.organizer.getDashboard).toBe('function');
     expect(typeof api.organizer.listEvents).toBe('function');
     expect(typeof api.organizer.getEvent).toBe('function');
+    expect(typeof api.organizer.getPayoutDetails).toBe('function');
+    expect(typeof api.organizer.updatePayoutDetails).toBe('function');
     expect(typeof api.organizer.createEvent).toBe('function');
     expect(typeof api.organizer.updateEvent).toBe('function');
     expect(typeof api.organizer.publishEvent).toBe('function');
@@ -123,6 +125,36 @@ describe('Outside.vip Client Library', () => {
       '/api/organizer/dashboard',
       expect.objectContaining({
         headers: expect.any(Object),
+      })
+    );
+
+    await api.organizer.getPayoutDetails();
+    expect(fetchSpy).toHaveBeenCalledWith(
+      '/api/organizer/payout-details',
+      expect.objectContaining({
+        headers: expect.any(Object),
+      })
+    );
+
+    await api.organizer.updatePayoutDetails({
+      orgType: 'Company',
+      registeredName: 'Test Org Ltd',
+      country: 'Kenya',
+      contactPersonName: 'Test Contact',
+      contactEmail: 'contact@test.com',
+      accountHolderName: 'Test Org Ltd',
+      bankName: 'Test Bank',
+      bankCountry: 'Kenya',
+      accountCurrency: 'USD',
+      accountNumber: '12345678',
+      confirmAccountNumber: '12345678',
+    });
+    expect(fetchSpy).toHaveBeenCalledWith(
+      '/api/organizer/payout-details',
+      expect.objectContaining({
+        method: 'PUT',
+        headers: expect.any(Object),
+        body: expect.stringContaining('Test Org Ltd'),
       })
     );
 

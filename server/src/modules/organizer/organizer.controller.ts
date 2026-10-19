@@ -1,7 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { EventStatus, TicketTierStatus, OrderStatus, TicketStatus } from '@prisma/client';
 import { prisma } from '../../db/prisma.js';
-import { createEventSchema, updateEventSchema } from './organizer.schema.js';
+import { createEventSchema, updateEventSchema, payoutDetailsInputSchema, PayoutDetailsInput } from './organizer.schema.js';
 import { NotFoundError, ForbiddenError, BadRequestError } from '../../utils/errors.js';
 import {
   isCloudinaryConfigured,
@@ -10,6 +10,77 @@ import {
   deleteCloudinaryAsset,
   generateThumbnailUrl,
 } from '../../lib/cloudinary.js';
+import {
+  maskAccountNumber,
+  getAccountNumberLast4,
+  encryptAccountNumber,
+  sanitizePayoutDetails,
+} from '../../lib/payoutCrypto.js';
+
+async function saveOrganizerPayoutDetails(
+  tx: any,
+  userId: string,
+  payoutInput: PayoutDetailsInput
+) {
+  const existingPayout = await tx.organizerPayoutDetails.findUnique({
+    where: { userId },
+  });
+
+  let masked = existingPayout?.accountNumberMasked || '••••';
+  let last4 = existingPayout?.accountNumberLast4 || '';
+  let encrypted = existingPayout?.accountNumberEncrypted || null;
+
+  if (payoutInput.accountNumber && !payoutInput.accountNumber.startsWith('••••')) {
+    masked = maskAccountNumber(payoutInput.accountNumber);
+    last4 = getAccountNumberLast4(payoutInput.accountNumber);
+    encrypted = encryptAccountNumber(payoutInput.accountNumber);
+  }
+
+  return tx.organizerPayoutDetails.upsert({
+    where: { userId },
+    create: {
+      userId,
+      orgType: payoutInput.orgType,
+      orgTypeOther: payoutInput.orgType === 'Other' ? payoutInput.orgTypeOther : null,
+      registeredName: payoutInput.registeredName,
+      registrationNumber: payoutInput.registrationNumber || null,
+      country: payoutInput.country,
+      address: payoutInput.address || null,
+      contactPersonName: payoutInput.contactPersonName,
+      contactEmail: payoutInput.contactEmail,
+      accountHolderName: payoutInput.accountHolderName,
+      bankName: payoutInput.bankName,
+      bankCountry: payoutInput.bankCountry,
+      accountCurrency: payoutInput.accountCurrency || 'USD',
+      accountNumberMasked: masked,
+      accountNumberLast4: last4,
+      accountNumberEncrypted: encrypted,
+      bankBranch: payoutInput.bankBranch || null,
+      swiftBic: payoutInput.swiftBic || null,
+      routingCode: payoutInput.routingCode || null,
+    },
+    update: {
+      orgType: payoutInput.orgType,
+      orgTypeOther: payoutInput.orgType === 'Other' ? payoutInput.orgTypeOther : null,
+      registeredName: payoutInput.registeredName,
+      registrationNumber: payoutInput.registrationNumber || null,
+      country: payoutInput.country,
+      address: payoutInput.address || null,
+      contactPersonName: payoutInput.contactPersonName,
+      contactEmail: payoutInput.contactEmail,
+      accountHolderName: payoutInput.accountHolderName,
+      bankName: payoutInput.bankName,
+      bankCountry: payoutInput.bankCountry,
+      accountCurrency: payoutInput.accountCurrency || 'USD',
+      accountNumberMasked: masked,
+      accountNumberLast4: last4,
+      ...(encrypted ? { accountNumberEncrypted: encrypted } : {}),
+      bankBranch: payoutInput.bankBranch || null,
+      swiftBic: payoutInput.swiftBic || null,
+      routingCode: payoutInput.routingCode || null,
+    },
+  });
+}
 
 function slugify(text: string): string {
   return text
@@ -128,6 +199,7 @@ export async function getOrganizerEventById(req: Request, res: Response, next: N
         ticketTiers: {
           orderBy: { priceInCents: 'asc' },
         },
+        payoutDetails: true,
         organizer: {
           select: {
             id: true,
@@ -135,6 +207,7 @@ export async function getOrganizerEventById(req: Request, res: Response, next: N
             email: true,
             avatarUrl: true,
             organizer: true,
+            payoutDetails: true,
           },
         },
       },
@@ -148,9 +221,22 @@ export async function getOrganizerEventById(req: Request, res: Response, next: N
       throw new ForbiddenError('You do not have permission to view or edit this event');
     }
 
+    const effectivePayout = event.payoutDetails || event.organizer?.payoutDetails || null;
+    const sanitizedPayout = sanitizePayoutDetails(effectivePayout);
+    const sanitizedOrganizer = {
+      ...event.organizer,
+      payoutDetails: sanitizePayoutDetails(event.organizer?.payoutDetails),
+    };
+
     res.json({
       success: true,
-      data: { event },
+      data: {
+        event: {
+          ...event,
+          payoutDetails: sanitizedPayout,
+          organizer: sanitizedOrganizer,
+        },
+      },
     });
   } catch (error) {
     next(error);
@@ -220,6 +306,19 @@ export async function createOrganizerEvent(req: Request, res: Response, next: Ne
     }
 
     const event = await prisma.$transaction(async (tx) => {
+      let payoutDetailsId: string | null = null;
+      if (input.payoutDetails) {
+        const savedPayout = await saveOrganizerPayoutDetails(tx, organizerId, input.payoutDetails);
+        payoutDetailsId = savedPayout.id;
+      } else {
+        const existingPayout = await tx.organizerPayoutDetails.findUnique({
+          where: { userId: organizerId },
+        });
+        if (existingPayout) {
+          payoutDetailsId = existingPayout.id;
+        }
+      }
+
       return tx.event.create({
         data: {
           slug,
@@ -243,6 +342,7 @@ export async function createOrganizerEvent(req: Request, res: Response, next: Ne
           timezone: input.timezone,
           ageRestriction: input.ageRestriction,
           dressCode: input.dressCode,
+          payoutDetailsId,
           ticketTiers: {
             create: input.ticketTiers.map((tier) => ({
               name: tier.name,
@@ -260,13 +360,19 @@ export async function createOrganizerEvent(req: Request, res: Response, next: Ne
         },
         include: {
           ticketTiers: true,
+          payoutDetails: true,
         },
       });
     });
 
     res.status(201).json({
       success: true,
-      data: { event },
+      data: {
+        event: {
+          ...event,
+          payoutDetails: sanitizePayoutDetails(event.payoutDetails),
+        },
+      },
     });
   } catch (error) {
     if (req.body?.coverImagePublicId) {
@@ -320,6 +426,12 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
       (input.coverImageUrl !== undefined && input.coverImageUrl !== existingEvent.coverImageUrl && oldPublicId);
 
     const updatedEvent = await prisma.$transaction(async (tx) => {
+      let payoutDetailsId = existingEvent.payoutDetailsId;
+      if (input.payoutDetails) {
+        const savedPayout = await saveOrganizerPayoutDetails(tx, organizerId, input.payoutDetails);
+        payoutDetailsId = savedPayout.id;
+      }
+
       // 1. Update event details
       await tx.event.update({
         where: { id },
@@ -347,6 +459,7 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
           ...(input.ageRestriction !== undefined && { ageRestriction: input.ageRestriction }),
           ...(input.dressCode !== undefined && { dressCode: input.dressCode }),
           ...(input.status !== undefined && { status: input.status }),
+          ...(payoutDetailsId ? { payoutDetailsId } : {}),
         },
       });
 
@@ -416,6 +529,7 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
           ticketTiers: {
             orderBy: { priceInCents: 'asc' },
           },
+          payoutDetails: true,
         },
       });
     });
@@ -437,7 +551,12 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
 
     res.json({
       success: true,
-      data: { event: updatedEvent },
+      data: {
+        event: {
+          ...updatedEvent,
+          payoutDetails: sanitizePayoutDetails(updatedEvent?.payoutDetails),
+        },
+      },
     });
   } catch (error) {
     if (req.body?.coverImagePublicId && req.body.coverImagePublicId !== existingEvent?.coverImagePublicId) {
@@ -600,3 +719,40 @@ export async function deleteOrganizerEvent(req: Request, res: Response, next: Ne
     next(error);
   }
 }
+
+export async function getOrganizerPayoutDetails(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const organizerId = req.user!.userId;
+    const payoutDetails = await prisma.organizerPayoutDetails.findUnique({
+      where: { userId: organizerId },
+    });
+
+    res.json({
+      success: true,
+      data: {
+        payoutDetails: sanitizePayoutDetails(payoutDetails),
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function updateOrganizerPayoutDetails(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const organizerId = req.user!.userId;
+    const input = payoutDetailsInputSchema.parse(req.body);
+
+    const saved = await saveOrganizerPayoutDetails(prisma, organizerId, input);
+
+    res.json({
+      success: true,
+      data: {
+        payoutDetails: sanitizePayoutDetails(saved),
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
