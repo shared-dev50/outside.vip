@@ -3,6 +3,7 @@ import cors from 'cors';
 import cookieParser from 'cookie-parser';
 import morgan from 'morgan';
 import { env } from './config/env.js';
+import { corsOptions } from './config/cors.js';
 import { authenticateUser } from './middleware/auth.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { healthRouter } from './modules/health/health.routes.js';
@@ -15,13 +16,9 @@ import { ordersRouter } from './modules/orders/orders.routes.js';
 
 export const app = express();
 
-// Security and utility middleware
-app.use(
-  cors({
-    origin: [env.CLIENT_URL, 'http://localhost:5173', 'http://127.0.0.1:5173'],
-    credentials: true,
-  })
-);
+// Security and utility middleware - enable CORS and preflight handling before all routes
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 
 if (env.NODE_ENV !== 'test') {
   app.use(morgan('dev'));
