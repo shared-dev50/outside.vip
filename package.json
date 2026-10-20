@@ -11,9 +11,13 @@
     "dev": "npm run dev --workspaces --if-present",
     "dev:server": "npm run dev --workspace=server",
     "dev:client": "npm run dev --workspace=client",
-    "build": "npm run build --workspaces",
-    "build:server": "npm run build --workspace=server",
+    "prisma:generate": "npm run prisma:generate --workspace=server",
+    "postinstall": "npm run prisma:generate",
+    "build": "npm run prisma:generate && npm run build --workspaces",
+    "build:server": "npm run prisma:generate && npm run build --workspace=server",
     "build:client": "npm run build --workspace=client",
+    "start": "npm run start --workspace=server",
+    "start:server": "npm run start --workspace=server",
     "test": "npm run test --workspaces",
     "test:server": "npm run test --workspace=server",
     "test:client": "npm run test --workspace=client",
@@ -35,6 +39,7 @@
   "license": "UNLICENSED",
   "dependencies": {
     "@neon/config": "^1.9.2",
-    "@neon/env": "^1.6.3"
+    "@neon/env": "^1.6.3",
+    "prisma": "^5.22.0"
   }
 }
