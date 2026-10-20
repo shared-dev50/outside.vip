@@ -32,7 +32,6 @@ export const Navbar: React.FC = () => {
     return () => window.removeEventListener('scroll', handleScroll);
   }, []);
 
-  // Determine navbar appearance based on route and scroll position
   const headerClass = isHome
     ? isScrolled
       ? 'bg-[#FAF8F5]/90 backdrop-blur-md border-b border-stone-200/80 shadow-xs'
@@ -56,8 +55,8 @@ export const Navbar: React.FC = () => {
             <Link
               to="/"
               className={`transition-colors py-1 ${isHome
-                  ? 'text-stone-900 font-bold border-b-2 border-stone-900'
-                  : 'text-stone-500 hover:text-stone-900 font-medium'
+                ? 'text-stone-900 font-bold border-b-2 border-stone-900'
+                : 'text-stone-500 hover:text-stone-900 font-medium'
                 }`}
             >
               Home
@@ -65,8 +64,8 @@ export const Navbar: React.FC = () => {
             <Link
               to="/events"
               className={`transition-colors py-1 ${isDiscover
-                  ? 'text-stone-900 font-bold border-b-2 border-stone-900'
-                  : 'text-stone-500 hover:text-stone-900 font-medium'
+                ? 'text-stone-900 font-bold border-b-2 border-stone-900'
+                : 'text-stone-500 hover:text-stone-900 font-medium'
                 }`}
             >
               Discover
