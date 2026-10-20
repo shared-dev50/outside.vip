@@ -1,10 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
-import { 
-  Plus, 
-  Menu, 
-  X, 
+import {
+  Plus,
+  Menu,
+  X,
   LogOut,
   User as UserIcon
 } from 'lucide-react';
@@ -21,7 +21,7 @@ export const Navbar: React.FC = () => {
   const isDiscover = location.pathname.startsWith('/events');
   const isOrganizer = location.pathname.startsWith('/organizer');
 
-  // Track window scroll on the homepage to transition from transparent to subtle opaque
+
   useEffect(() => {
     const handleScroll = () => {
       setIsScrolled(window.scrollY > 16);
@@ -38,8 +38,8 @@ export const Navbar: React.FC = () => {
       ? 'bg-[#FAF8F5]/90 backdrop-blur-md border-b border-stone-200/80 shadow-xs'
       : 'bg-transparent border-b border-transparent'
     : isDiscover || isOrganizer
-    ? 'bg-[#FAF8F5]/95 backdrop-blur-md border-b border-stone-200/80 shadow-2xs'
-    : 'bg-white/95 backdrop-blur-md border-b border-gray-200';
+      ? 'bg-[#FAF8F5]/95 backdrop-blur-md border-b border-stone-200/80 shadow-2xs'
+      : 'bg-white/95 backdrop-blur-md border-b border-gray-200';
 
   return (
     <header className={`sticky top-0 z-50 w-full transition-all duration-300 ease-out ${headerClass}`}>
@@ -55,21 +55,19 @@ export const Navbar: React.FC = () => {
           <nav className="hidden sm:flex items-center gap-6 text-sm">
             <Link
               to="/"
-              className={`transition-colors py-1 ${
-                isHome
+              className={`transition-colors py-1 ${isHome
                   ? 'text-stone-900 font-bold border-b-2 border-stone-900'
                   : 'text-stone-500 hover:text-stone-900 font-medium'
-              }`}
+                }`}
             >
               Home
             </Link>
             <Link
               to="/events"
-              className={`transition-colors py-1 ${
-                isDiscover
+              className={`transition-colors py-1 ${isDiscover
                   ? 'text-stone-900 font-bold border-b-2 border-stone-900'
                   : 'text-stone-500 hover:text-stone-900 font-medium'
-              }`}
+                }`}
             >
               Discover
             </Link>
@@ -224,9 +222,8 @@ export const Navbar: React.FC = () => {
 
       {/* Mobile Menu Drawer */}
       {mobileMenuOpen && (
-        <div className={`sm:hidden border-b px-4 py-3 space-y-3 transition-colors ${
-          isHome ? 'bg-[#FAF8F5] border-stone-200' : 'bg-white border-gray-200'
-        }`}>
+        <div className={`sm:hidden border-b px-4 py-3 space-y-3 transition-colors ${isHome ? 'bg-[#FAF8F5] border-stone-200' : 'bg-white border-gray-200'
+          }`}>
           <div className="space-y-1 text-sm font-medium">
             <Link
               to="/"
