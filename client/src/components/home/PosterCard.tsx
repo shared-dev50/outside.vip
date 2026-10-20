@@ -17,7 +17,7 @@ export const PosterCard: React.FC<PosterCardProps> = ({
   onLeave,
   index = 0,
 }) => {
-  // Format Date in the authentic reference style: "12 NOVEMBER || 2026"
+
   const formatPosterDate = (dateString: string) => {
     const d = new Date(dateString);
     const day = d.getDate().toString().padStart(2, '0');
@@ -42,22 +42,20 @@ export const PosterCard: React.FC<PosterCardProps> = ({
       to={`/events/${event.slug}`}
       onMouseEnter={onHover}
       onMouseLeave={onLeave}
-      className={`group block text-left transition-all duration-500 ease-out focus:outline-none select-none relative ${
-        isElevated
+      className={`group block text-left transition-all duration-500 ease-out focus:outline-none select-none relative ${isElevated
           ? '-translate-y-3 sm:-translate-y-5 z-20'
           : 'translate-y-0 hover:-translate-y-2 z-10'
-      }`}
+        }`}
       style={{
         animationDelay: `${index * 80}ms`,
       }}
     >
       {/* Outer Card / Pedestal Frame */}
       <div
-        className={`rounded-sm transition-all duration-500 ease-out p-2.5 sm:p-3 relative ${
-          isElevated
+        className={`rounded-sm transition-all duration-500 ease-out p-2.5 sm:p-3 relative ${isElevated
             ? 'bg-[#EAE4D9] border border-[#DDD5C7] shadow-[0_25px_45px_-12px_rgba(40,30,20,0.22)]'
             : 'bg-transparent border border-transparent hover:bg-[#F2ECE1]/60 hover:border-[#E2DAD0]'
-        }`}
+          }`}
       >
         {/* 1. Poster Image Frame with authentic aspect ratio */}
         <div className="relative aspect-[3/4] w-full overflow-hidden bg-stone-900 border border-stone-800/80 shadow-inner">
