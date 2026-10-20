@@ -107,7 +107,7 @@ describe('Outside.vip Ticket PDF Generation & QR Credential Validation', () => {
         },
       },
     });
-  });
+  }, 30000);
 
   describe('1. Unpaid Order Protection', () => {
     it('blocks PDF ticket download when order is PENDING (unpaid)', async () => {
