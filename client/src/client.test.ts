@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { api } from './lib/api';
+import { api, resolveApiBaseUrl, buildApiUrl } from './lib/api';
 
 describe('Outside.vip Client Library', () => {
   it('should define public API service routes', () => {
@@ -369,6 +369,65 @@ describe('Outside.vip Client Library', () => {
       expect(res.orderNumber).toBe('OUT-2026-11111');
 
       fetchSpy.mockRestore();
+    });
+  });
+
+  describe('API base URL resolution and endpoint composition', () => {
+    it('resolves production Render backend URL ending in /api', () => {
+      expect(resolveApiBaseUrl('https://outside-vip.onrender.com/api')).toBe(
+        'https://outside-vip.onrender.com/api'
+      );
+    });
+
+    it('resolves production Render backend URL with trailing slash', () => {
+      expect(resolveApiBaseUrl('https://outside-vip.onrender.com/api/')).toBe(
+        'https://outside-vip.onrender.com/api'
+      );
+    });
+
+    it('appends /api if base domain is provided without /api', () => {
+      expect(resolveApiBaseUrl('https://outside-vip.onrender.com')).toBe(
+        'https://outside-vip.onrender.com/api'
+      );
+      expect(resolveApiBaseUrl('https://outside-vip.onrender.com/')).toBe(
+        'https://outside-vip.onrender.com/api'
+      );
+    });
+
+    it('defaults to /api for relative path or undefined in local dev', () => {
+      expect(resolveApiBaseUrl('/api')).toBe('/api');
+      expect(resolveApiBaseUrl('/api/')).toBe('/api');
+      expect(resolveApiBaseUrl('')).toBe('/api');
+      expect(resolveApiBaseUrl(undefined)).toBe('/api');
+      expect(resolveApiBaseUrl('   ')).toBe('/api');
+    });
+
+    it('builds full production endpoint URLs matching Render without duplicating /api', () => {
+      const renderBase = 'https://outside-vip.onrender.com/api';
+      expect(buildApiUrl('/events', renderBase)).toBe(
+        'https://outside-vip.onrender.com/api/events'
+      );
+      expect(buildApiUrl('/api/events', renderBase)).toBe(
+        'https://outside-vip.onrender.com/api/events'
+      );
+      expect(buildApiUrl('events', renderBase)).toBe(
+        'https://outside-vip.onrender.com/api/events'
+      );
+      expect(buildApiUrl('/events?sortBy=date_asc&limit=12', renderBase)).toBe(
+        'https://outside-vip.onrender.com/api/events?sortBy=date_asc&limit=12'
+      );
+      expect(buildApiUrl('/orders/OUT-2026-99999/tickets/pdf?token=abc', renderBase)).toBe(
+        'https://outside-vip.onrender.com/api/orders/OUT-2026-99999/tickets/pdf?token=abc'
+      );
+    });
+
+    it('builds relative endpoint URLs for local development', () => {
+      expect(buildApiUrl('/events', '/api')).toBe('/api/events');
+      expect(buildApiUrl('/api/events', '/api')).toBe('/api/events');
+      expect(buildApiUrl('events', '/api')).toBe('/api/events');
+      expect(buildApiUrl('/events?sortBy=date_asc&limit=12', '/api')).toBe(
+        '/api/events?sortBy=date_asc&limit=12'
+      );
     });
   });
 });

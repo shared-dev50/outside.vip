@@ -12,7 +12,53 @@ import {
   PayoutDetailsInput,
 } from '../types';
 
-const API_BASE = '/api';
+/**
+ * Normalizes the API base URL to ensure proper endpoint composition.
+ * Handles full URLs with or without trailing /api, trailing slashes,
+ * and falls back to '/api' for local Vite dev proxy.
+ */
+export function resolveApiBaseUrl(rawUrl?: string): string {
+  const url = (rawUrl ?? '').trim();
+  if (!url) {
+    return '/api';
+  }
+
+  // Strip trailing slashes
+  const clean = url.replace(/\/+$/, '');
+
+  if (!clean || clean === '/api') {
+    return '/api';
+  }
+
+  // If already ends with /api, return as is
+  if (clean.endsWith('/api')) {
+    return clean;
+  }
+
+  // Otherwise append /api
+  return `${clean}/api`;
+}
+
+export function buildApiUrl(endpoint: string, base: string = API_BASE): string {
+  const cleanBase = base.replace(/\/+$/, '');
+  let path = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
+
+  // Prevent duplicate /api if the endpoint already starts with /api
+  if (path === '/api') {
+    path = '';
+  } else if (path.startsWith('/api/')) {
+    path = path.slice(4);
+  }
+
+  return `${cleanBase}${path}`;
+}
+
+const rawEnvUrl =
+  typeof import.meta !== 'undefined' && import.meta.env
+    ? (import.meta.env.VITE_API_URL as string | undefined)
+    : undefined;
+
+export const API_BASE = resolveApiBaseUrl(rawEnvUrl);
 
 export class ApiError extends Error {
   public statusCode: number;
@@ -36,7 +82,7 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
     ...options.headers,
   };
 
-  const response = await fetch(`${API_BASE}${endpoint}`, {
+  const response = await fetch(buildApiUrl(endpoint), {
     ...options,
     headers,
   });
@@ -181,7 +227,7 @@ export const api = {
         const serverFormData = new FormData();
         serverFormData.append('image', file);
 
-        const serverRes = await fetch(`${API_BASE}/organizer/upload`, {
+        const serverRes = await fetch(buildApiUrl('/organizer/upload'), {
           method: 'POST',
           headers: {
             ...(token ? { Authorization: `Bearer ${token}` } : {}),
@@ -232,7 +278,7 @@ export const api = {
       if (token) params.set('token', token);
       if (ticketId) params.set('ticketId', ticketId);
       const qs = params.toString() ? `?${params.toString()}` : '';
-      return `${API_BASE}/orders/${orderNumber}/tickets/pdf${qs}`;
+      return buildApiUrl(`/orders/${orderNumber}/tickets/pdf${qs}`);
     },
     downloadTicketsPdf: async (orderNumber: string, token?: string | null, ticketId?: string): Promise<void> => {
       const params = new URLSearchParams();
@@ -253,7 +299,7 @@ export const api = {
         headers['x-order-token'] = token;
       }
 
-      const res = await fetch(`${API_BASE}/orders/${orderNumber}/tickets/pdf${qs}`, {
+      const res = await fetch(buildApiUrl(`/orders/${orderNumber}/tickets/pdf${qs}`), {
         method: 'GET',
         headers,
       });
