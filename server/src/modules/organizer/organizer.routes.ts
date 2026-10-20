@@ -14,6 +14,7 @@ import {
   handleDirectUpload,
   getOrganizerPayoutDetails,
   updateOrganizerPayoutDetails,
+  checkInTicket,
 } from './organizer.controller.js';
 import { uploadCoverMiddleware } from '../../middleware/upload.js';
 
@@ -23,7 +24,9 @@ export const organizerRouter = Router();
 organizerRouter.use(requireAuth);
 organizerRouter.use(requireRole(Role.ORGANIZER, Role.ADMIN));
 
+organizerRouter.post('/check-in', checkInTicket);
 organizerRouter.post('/upload/sign', getUploadSignature);
+
 organizerRouter.post('/upload', uploadCoverMiddleware.single('image'), handleDirectUpload);
 
 organizerRouter.get('/dashboard', getDashboardStats);

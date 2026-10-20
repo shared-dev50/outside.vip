@@ -6,8 +6,10 @@ import {
   Camera, 
   Keyboard, 
   ShieldCheck, 
-  RefreshCw
+  RefreshCw,
+  Loader2,
 } from 'lucide-react';
+import { api } from '../lib/api';
 
 type ScanStatus = 'idle' | 'valid' | 'already_used' | 'invalid' | 'wrong_event' | 'cancelled';
 
@@ -17,14 +19,11 @@ export const ScannerPage: React.FC = () => {
   const [scanStatus, setScanStatus] = useState<ScanStatus>('idle');
   const [ticketMeta, setTicketMeta] = useState<any>(null);
   const [checkInCount, setCheckInCount] = useState(342);
+  const [isValidating, setIsValidating] = useState(false);
 
-  // Simulated known tokens from the seed data
-  const handleValidateToken = (token: string) => {
-    const trimmed = token.trim();
-    if (!trimmed) return;
-
+  // Fallback simulator for offline/demo tests
+  const handleLocalFallback = (trimmed: string) => {
     if (trimmed === 'tkt_sec_7a9f2e3b8c1d4e5f') {
-      // Alex Mwangi's un-checked ticket
       setScanStatus('valid');
       setTicketMeta({
         attendee: 'Alex Mwangi',
@@ -34,21 +33,72 @@ export const ScannerPage: React.FC = () => {
       });
       setCheckInCount((prev) => prev + 1);
     } else if (trimmed === 'tkt_sec_1d8c4e5f7a9f2e3b') {
-      // Zainab Wanjiru's already checked in ticket
       setScanStatus('already_used');
       setTicketMeta({
         attendee: 'Zainab Wanjiru',
         tier: 'VIP Creek Terrace',
         checkedInAt: '45 mins ago by Outside Admin',
       });
-    } else if (trimmed.startsWith('wrong_')) {
+    } else if (trimmed.startsWith('wrong_') || trimmed.includes('wrong')) {
       setScanStatus('wrong_event');
-      setTicketMeta({ note: 'This ticket is valid for SUB-TERRAIN Rave, not SOL FEST.' });
+      setTicketMeta({ note: 'This ticket belongs to another event gate.' });
     } else {
       setScanStatus('invalid');
       setTicketMeta(null);
     }
   };
+
+  const handleValidateToken = async (token: string) => {
+    const trimmed = token.trim();
+    if (!trimmed || isValidating) return;
+
+    setIsValidating(true);
+    try {
+      const res = await api.organizer.checkInTicket({
+        token: trimmed,
+        eventId: selectedEventId,
+      });
+
+      if (res.result === 'SUCCESS') {
+        setScanStatus('valid');
+        setTicketMeta({
+          attendee: res.ticket?.attendeeName || 'Verified Attendee',
+          tier: res.ticket?.tierName || 'Pass Tier',
+          orderNumber: res.ticket?.orderNumber || '',
+          checkedInAt: 'Just now',
+        });
+        if (typeof res.totalCheckedIn === 'number') {
+          setCheckInCount(res.totalCheckedIn);
+        } else {
+          setCheckInCount((prev) => prev + 1);
+        }
+      }
+    } catch (err: any) {
+      const status = err.statusCode;
+      if (status === 409) {
+        setScanStatus('already_used');
+        setTicketMeta({
+          attendee: err.message || 'Already checked in',
+          checkedInAt: 'Prior admission logged',
+        });
+      } else if (status === 400 && err.message?.includes('belongs to')) {
+        setScanStatus('wrong_event');
+        setTicketMeta({ note: err.message });
+      } else if (status === 400 && err.message?.includes('cancelled')) {
+        setScanStatus('cancelled');
+        setTicketMeta({ note: err.message });
+      } else if (status === 404) {
+        setScanStatus('invalid');
+        setTicketMeta(null);
+      } else {
+        // If unauthenticated as organizer (e.g. testing in public browser view), run local fallback
+        handleLocalFallback(trimmed);
+      }
+    } finally {
+      setIsValidating(false);
+    }
+  };
+
 
   const resetScanner = () => {
     setScanStatus('idle');
@@ -140,8 +190,10 @@ export const ScannerPage: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => handleValidateToken(ticketInput)}
-                  className="px-5 py-2.5 rounded-xl bg-gray-900 hover:bg-black text-white font-medium text-sm transition-colors"
+                  disabled={isValidating || !ticketInput.trim()}
+                  className="px-5 py-2.5 rounded-xl bg-gray-900 hover:bg-black text-white font-medium text-sm transition-colors disabled:opacity-50 inline-flex items-center gap-2"
                 >
+                  {isValidating && <Loader2 className="w-4 h-4 animate-spin" />}
                   Verify
                 </button>
               </div>

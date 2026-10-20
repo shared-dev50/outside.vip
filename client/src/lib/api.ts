@@ -118,6 +118,16 @@ export const api = {
       request<{ message: string }>(`/organizer/events/${id}`, {
         method: 'DELETE',
       }),
+    checkInTicket: (payload: { token: string; eventId?: string }) =>
+      request<{
+        result: 'SUCCESS' | 'ALREADY_CHECKED_IN' | 'INVALID_TOKEN' | 'WRONG_EVENT' | 'CANCELLED_TICKET' | 'UNPAID_ORDER';
+        message: string;
+        ticket?: any;
+        totalCheckedIn?: number;
+      }>('/organizer/check-in', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }),
     uploadCoverImage: async (file: File): Promise<{
       secure_url: string;
       public_id: string;
@@ -217,6 +227,63 @@ export const api = {
       const query = token ? `?token=${encodeURIComponent(token)}` : '';
       return request<{ order: Order }>(`/orders/${orderNumber}${query}`);
     },
+    getPdfDownloadUrl: (orderNumber: string, token?: string | null, ticketId?: string) => {
+      const params = new URLSearchParams();
+      if (token) params.set('token', token);
+      if (ticketId) params.set('ticketId', ticketId);
+      const qs = params.toString() ? `?${params.toString()}` : '';
+      return `${API_BASE}/orders/${orderNumber}/tickets/pdf${qs}`;
+    },
+    downloadTicketsPdf: async (orderNumber: string, token?: string | null, ticketId?: string): Promise<void> => {
+      const params = new URLSearchParams();
+      if (token) params.set('token', token);
+      if (ticketId) params.set('ticketId', ticketId);
+      const qs = params.toString() ? `?${params.toString()}` : '';
+
+      const authToken =
+        typeof window !== 'undefined' && typeof window.localStorage !== 'undefined'
+          ? window.localStorage.getItem('outside_token')
+          : null;
+
+      const headers: HeadersInit = {};
+      if (authToken) {
+        headers['Authorization'] = `Bearer ${authToken}`;
+      }
+      if (token) {
+        headers['x-order-token'] = token;
+      }
+
+      const res = await fetch(`${API_BASE}/orders/${orderNumber}/tickets/pdf${qs}`, {
+        method: 'GET',
+        headers,
+      });
+
+      if (!res.ok) {
+        const errorJson = await res.json().catch(() => null);
+        throw new ApiError(
+          errorJson?.error?.message || 'Failed to download tickets PDF',
+          res.status
+        );
+      }
+
+      const blob = await res.blob();
+      const contentDisposition = res.headers.get('content-disposition');
+      let filename = `outside-vip-passes-${orderNumber}.pdf`;
+      if (contentDisposition) {
+        const match = contentDisposition.match(/filename="?([^"]+)"?/);
+        if (match && match[1]) filename = match[1];
+      }
+
+      const blobUrl = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = blobUrl;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(blobUrl);
+      document.body.removeChild(a);
+    },
   },
 };
+
 

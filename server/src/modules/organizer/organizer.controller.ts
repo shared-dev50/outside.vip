@@ -756,3 +756,239 @@ export async function updateOrganizerPayoutDetails(req: Request, res: Response, 
   }
 }
 
+export async function checkInTicket(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const rawToken = req.body.token;
+    const eventIdOrSlug = req.body.eventId;
+
+    if (!rawToken || typeof rawToken !== 'string') {
+      throw new BadRequestError('Ticket token is required');
+    }
+
+    const token = rawToken.trim();
+    const scannerUserId = req.user!.userId;
+    const isAdmin = req.user!.role === 'ADMIN';
+
+    // 1. Find ticket by ticketToken
+    const ticket = await prisma.ticket.findUnique({
+      where: { ticketToken: token },
+      include: {
+        event: {
+          select: {
+            id: true,
+            slug: true,
+            title: true,
+            organizerId: true,
+          },
+        },
+        ticketTier: {
+          select: {
+            name: true,
+          },
+        },
+        order: {
+          select: {
+            orderNumber: true,
+            status: true,
+            customerName: true,
+            customerEmail: true,
+          },
+        },
+        checkedInByUser: {
+          select: {
+            name: true,
+            email: true,
+          },
+        },
+      },
+    });
+
+    // 2. Token not found
+    if (!ticket) {
+      let targetEvent = null;
+      if (eventIdOrSlug) {
+        targetEvent = await prisma.event.findFirst({
+          where: {
+            OR: [{ id: eventIdOrSlug }, { slug: eventIdOrSlug }],
+          },
+          select: { id: true },
+        });
+      }
+
+      if (targetEvent) {
+        await prisma.checkInLog.create({
+          data: {
+            eventId: targetEvent.id,
+            scannedToken: token,
+            scannedByUserId: scannerUserId,
+            result: 'INVALID_TOKEN',
+            notes: 'Scanned credential does not exist in system',
+          },
+        });
+      }
+
+      res.status(404).json({
+        success: false,
+        data: {
+          result: 'INVALID_TOKEN',
+          message: 'Invalid ticket token. No ticket found with this credential.',
+        },
+      });
+      return;
+    }
+
+    // 3. Authorization check: organizer must own the event unless admin
+    if (!isAdmin && ticket.event.organizerId !== scannerUserId) {
+      throw new ForbiddenError('You do not have permission to check in attendees for this event');
+    }
+
+    // 4. Check if ticket is for the scanned event (if specified)
+    if (eventIdOrSlug) {
+      const isTargetEvent =
+        ticket.eventId === eventIdOrSlug || ticket.event.slug === eventIdOrSlug;
+
+      if (!isTargetEvent) {
+        await prisma.checkInLog.create({
+          data: {
+            ticketId: ticket.id,
+            eventId: ticket.eventId,
+            scannedToken: token,
+            scannedByUserId: scannerUserId,
+            result: 'WRONG_EVENT',
+            notes: `Ticket belongs to event '${ticket.event.title}', not the selected gate.`,
+          },
+        });
+
+        res.status(400).json({
+          success: false,
+          data: {
+            result: 'WRONG_EVENT',
+            message: `Ticket belongs to "${ticket.event.title}", not this event gate.`,
+            ticket: {
+              id: ticket.id,
+              attendeeName: ticket.attendeeName,
+              eventTitle: ticket.event.title,
+            },
+          },
+        });
+        return;
+      }
+    }
+
+    // 5. Check if ticket is cancelled / refunded
+    if (ticket.status === 'CANCELLED' || ticket.order.status === 'CANCELLED' || ticket.order.status === 'REFUNDED') {
+      await prisma.checkInLog.create({
+        data: {
+          ticketId: ticket.id,
+          eventId: ticket.eventId,
+          scannedToken: token,
+          scannedByUserId: scannerUserId,
+          result: 'CANCELLED_TICKET',
+          notes: 'Ticket or parent order was cancelled/refunded.',
+        },
+      });
+
+      res.status(400).json({
+        success: false,
+        data: {
+          result: 'CANCELLED_TICKET',
+          message: 'This ticket has been cancelled or refunded and is not valid for entry.',
+        },
+      });
+      return;
+    }
+
+    // 6. Check duplicate check-in
+    if (ticket.status === 'CHECKED_IN') {
+      await prisma.checkInLog.create({
+        data: {
+          ticketId: ticket.id,
+          eventId: ticket.eventId,
+          scannedToken: token,
+          scannedByUserId: scannerUserId,
+          result: 'ALREADY_CHECKED_IN',
+          notes: `Attempted re-entry. Originally checked in at ${ticket.checkedInAt?.toISOString()}`,
+        },
+      });
+
+      res.status(409).json({
+        success: false,
+        data: {
+          result: 'ALREADY_CHECKED_IN',
+          message: 'This ticket has already been used and cannot be re-admitted.',
+          ticket: {
+            id: ticket.id,
+            attendeeName: ticket.attendeeName,
+            tierName: ticket.ticketTier.name,
+            orderNumber: ticket.order.orderNumber,
+            checkedInAt: ticket.checkedInAt,
+            checkedBy: ticket.checkedInByUser?.name || 'Gate Staff',
+          },
+        },
+      });
+      return;
+    }
+
+    // 7. Verify order is completed
+    if (ticket.order.status !== 'COMPLETED') {
+      res.status(400).json({
+        success: false,
+        data: {
+          result: 'UNPAID_ORDER',
+          message: 'Order is not completed or paid. Admission denied.',
+        },
+      });
+      return;
+    }
+
+    // 8. Atomic Check-in
+    const [updatedTicket] = await prisma.$transaction([
+      prisma.ticket.update({
+        where: { id: ticket.id },
+        data: {
+          status: 'CHECKED_IN',
+          checkedInAt: new Date(),
+          checkedInByUserId: scannerUserId,
+        },
+      }),
+      prisma.checkInLog.create({
+        data: {
+          ticketId: ticket.id,
+          eventId: ticket.eventId,
+          scannedToken: token,
+          scannedByUserId: scannerUserId,
+          result: 'SUCCESS',
+        },
+      }),
+    ]);
+
+    const totalCheckedIn = await prisma.ticket.count({
+      where: {
+        eventId: ticket.eventId,
+        status: 'CHECKED_IN',
+      },
+    });
+
+    res.json({
+      success: true,
+      data: {
+        result: 'SUCCESS',
+        message: 'Valid admission pass verified.',
+        ticket: {
+          id: updatedTicket.id,
+          attendeeName: ticket.attendeeName,
+          attendeeEmail: ticket.attendeeEmail,
+          tierName: ticket.ticketTier.name,
+          orderNumber: ticket.order.orderNumber,
+          checkedInAt: updatedTicket.checkedInAt,
+          eventTitle: ticket.event.title,
+        },
+        totalCheckedIn,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+
