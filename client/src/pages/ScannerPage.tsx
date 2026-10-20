@@ -10,6 +10,7 @@ import {
   ShieldCheck, 
   RefreshCw,
   Loader2,
+  Lock,
 } from 'lucide-react';
 import { api } from '../lib/api';
 import { 
@@ -20,10 +21,31 @@ import {
   decodeVideoFrame 
 } from '../lib/scanner';
 
-type ScanStatus = 'idle' | 'valid' | 'already_used' | 'invalid' | 'wrong_event' | 'cancelled';
+type ScanStatus =
+  | 'idle'
+  | 'valid'
+  | 'already_used'
+  | 'invalid'
+  | 'wrong_event'
+  | 'cancelled'
+  | 'unpaid'
+  | 'forbidden';
+
+interface EventOption {
+  id: string;
+  title: string;
+  slug: string;
+}
+
+const DEFAULT_EVENTS: EventOption[] = [
+  { id: 'sol-fest-baobab-edition-2026', title: 'SOL FEST: Under The Baobab Tree', slug: 'sol-fest-baobab-edition-2026' },
+  { id: 'sub-terrain-industrial-warehouse-004', title: 'SUB-TERRAIN: Warehouse Rave', slug: 'sub-terrain-industrial-warehouse-004' },
+];
 
 export const ScannerPage: React.FC = () => {
-  const [selectedEventId, setSelectedEventId] = useState('sol-fest-baobab-edition-2026');
+  const [selectedEventId, setSelectedEventId] = useState('');
+  const [eventsList, setEventsList] = useState<EventOption[]>(DEFAULT_EVENTS);
+  const [isLoadingEvents, setIsLoadingEvents] = useState(false);
   const [ticketInput, setTicketInput] = useState('');
   const [scanStatus, setScanStatus] = useState<ScanStatus>('idle');
   const [ticketMeta, setTicketMeta] = useState<any>(null);
@@ -53,6 +75,71 @@ export const ScannerPage: React.FC = () => {
   useEffect(() => {
     scanStatusRef.current = scanStatus;
   }, [scanStatus]);
+
+  // Load available events dynamically and check ?event= / ?slug= in URL
+  useEffect(() => {
+    let isMounted = true;
+    const fetchEvents = async () => {
+      setIsLoadingEvents(true);
+      try {
+        const publicRes = await api.events.list({ limit: 100 });
+        if (isMounted && publicRes.events && publicRes.events.length > 0) {
+          const list: EventOption[] = publicRes.events.map((e) => ({
+            id: e.id,
+            title: e.title,
+            slug: e.slug,
+          }));
+          setEventsList((prev) => {
+            const map = new Map<string, EventOption>();
+            [...prev, ...list].forEach((item) => {
+              map.set(item.id, item);
+              if (item.slug) map.set(item.slug, item);
+            });
+            return Array.from(new Set(Array.from(map.values())));
+          });
+        }
+      } catch (err) {
+        console.warn('Could not load public events for scanner:', err);
+      }
+
+      try {
+        const orgRes = await api.organizer.listEvents();
+        if (isMounted && orgRes.events && orgRes.events.length > 0) {
+          const list: EventOption[] = orgRes.events.map((e) => ({
+            id: e.id,
+            title: e.title,
+            slug: e.slug,
+          }));
+          setEventsList((prev) => {
+            const map = new Map<string, EventOption>();
+            [...prev, ...list].forEach((item) => {
+              map.set(item.id, item);
+              if (item.slug) map.set(item.slug, item);
+            });
+            return Array.from(new Set(Array.from(map.values())));
+          });
+        }
+      } catch {
+        // Organizer endpoint may return 401 if unauthenticated
+      } finally {
+        if (isMounted) setIsLoadingEvents(false);
+      }
+    };
+
+    fetchEvents();
+
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      const eventParam = params.get('event') || params.get('slug');
+      if (eventParam) {
+        setSelectedEventId(eventParam);
+      }
+    }
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   /**
    * Stop camera stream and cancel animation frames.
@@ -220,22 +307,23 @@ export const ScannerPage: React.FC = () => {
       setTicketMeta({ note: 'This ticket belongs to another event gate.' });
     } else {
       setScanStatus('invalid');
-      setTicketMeta(null);
+      setTicketMeta({ note: 'The ticket token could not be verified against the check-in service.' });
     }
   };
 
   /**
    * Submits scanned or manually entered token to backend validation API.
    */
-  const handleValidateToken = async (token: string) => {
+  const handleValidateToken = async (token: string, overrideGateId?: string) => {
     const trimmed = extractTicketToken(token);
     if (!trimmed || isValidatingRef.current) return;
 
     setIsValidating(true);
+    const gateId = overrideGateId !== undefined ? overrideGateId : selectedEventId;
     try {
       const res = await api.organizer.checkInTicket({
         token: trimmed,
-        eventId: selectedEventId,
+        eventId: gateId || undefined,
       });
 
       if (res.result === 'SUCCESS') {
@@ -243,6 +331,7 @@ export const ScannerPage: React.FC = () => {
         setTicketMeta({
           attendee: res.ticket?.attendeeName || 'Verified Attendee',
           tier: res.ticket?.tierName || 'Pass Tier',
+          eventTitle: res.ticket?.eventTitle || '',
           orderNumber: res.ticket?.orderNumber || '',
           checkedInAt: 'Just now',
         });
@@ -253,24 +342,44 @@ export const ScannerPage: React.FC = () => {
         }
       }
     } catch (err: any) {
+      const code = err.code || err.data?.result;
       const status = err.statusCode;
-      if (status === 409) {
+      const message = err.message || '';
+
+      if (code === 'WRONG_EVENT' || message.toLowerCase().includes('belongs to')) {
+        setScanStatus('wrong_event');
+        setTicketMeta({
+          note: message,
+          token: trimmed,
+          wrongEvent: err.data?.ticket || err.data?.event,
+        });
+      } else if (code === 'ALREADY_CHECKED_IN' || status === 409) {
         setScanStatus('already_used');
         setTicketMeta({
-          attendee: err.message || 'Already checked in',
-          checkedInAt: 'Prior admission logged',
+          attendee: err.data?.ticket?.attendeeName || message || 'Already checked in',
+          tier: err.data?.ticket?.tierName,
+          orderNumber: err.data?.ticket?.orderNumber,
+          checkedInAt: err.data?.ticket?.checkedInAt
+            ? new Date(err.data.ticket.checkedInAt).toLocaleTimeString()
+            : 'Prior admission logged',
+          checkedBy: err.data?.ticket?.checkedBy || 'Door Staff',
         });
-      } else if (status === 400 && err.message?.includes('belongs to')) {
-        setScanStatus('wrong_event');
-        setTicketMeta({ note: err.message });
-      } else if (status === 400 && err.message?.includes('cancelled')) {
+      } else if (code === 'CANCELLED_TICKET' || message.toLowerCase().includes('cancelled')) {
         setScanStatus('cancelled');
-        setTicketMeta({ note: err.message });
-      } else if (status === 404) {
+        setTicketMeta({ note: message || 'This ticket has been cancelled or refunded.' });
+      } else if (code === 'UNPAID_ORDER' || message.toLowerCase().includes('unpaid')) {
+        setScanStatus('unpaid');
+        setTicketMeta({ note: message || 'The order for this ticket is not completed.' });
+      } else if (code === 'INVALID_TOKEN' || status === 404) {
         setScanStatus('invalid');
-        setTicketMeta(null);
+        setTicketMeta({ note: message || 'Scanned credential does not exist in the database.' });
+      } else if (status === 401 || status === 403) {
+        setScanStatus('forbidden');
+        setTicketMeta({
+          note: message || 'You do not have permission to check in tickets at this gate. Please sign in with an organizer account.',
+        });
       } else {
-        // If unauthenticated as organizer (e.g. testing in public browser view), run local fallback
+        // Fallback for offline or local demo simulations
         handleLocalFallback(trimmed);
       }
     } finally {
@@ -366,19 +475,30 @@ export const ScannerPage: React.FC = () => {
       {/* Event Selection & Live Count Bar */}
       <div className="p-4 rounded-2xl bg-white border border-gray-200 shadow-sm flex flex-col sm:flex-row items-center justify-between gap-4">
         <div className="w-full sm:w-auto flex-1">
-          <label className="block text-[11px] font-mono text-gray-500 uppercase font-semibold mb-1">
-            Active Gate Pass
-          </label>
+          <div className="flex items-center justify-between sm:justify-start gap-2 mb-1">
+            <label className="text-[11px] font-mono text-gray-500 uppercase font-semibold">
+              Active Gate Pass
+            </label>
+            {isLoadingEvents && (
+              <span className="text-[10px] text-gray-400 font-mono inline-flex items-center gap-1">
+                <Loader2 className="w-3 h-3 animate-spin" /> Loading gates...
+              </span>
+            )}
+          </div>
           <select
             value={selectedEventId}
             onChange={(e) => {
               setSelectedEventId(e.target.value);
               resetScanner();
             }}
-            className="w-full sm:w-80 px-3 py-2 rounded-xl bg-gray-50 border border-gray-200 text-gray-900 text-xs font-semibold focus:outline-none focus:border-gray-900"
+            className="w-full sm:w-96 px-3 py-2 rounded-xl bg-gray-50 border border-gray-200 text-gray-900 text-xs font-semibold focus:outline-none focus:border-gray-900"
           >
-            <option value="sol-fest-baobab-edition-2026">SOL FEST: Under The Baobab Tree</option>
-            <option value="sub-terrain-industrial-warehouse-004">SUB-TERRAIN: Warehouse Rave</option>
+            <option value="">All Gates · Auto-Detect Event</option>
+            {eventsList.map((evt) => (
+              <option key={evt.id} value={evt.slug || evt.id}>
+                {evt.title}
+              </option>
+            ))}
           </select>
         </div>
 
@@ -629,7 +749,7 @@ export const ScannerPage: React.FC = () => {
               {/* Quick test buttons for verification */}
               <div className="p-4 rounded-xl bg-gray-50 border border-gray-200 space-y-2">
                 <span className="text-[11px] font-mono uppercase text-gray-500 block font-semibold">
-                  Test Database Tokens (from Seed):
+                  Test Pass Credentials:
                 </span>
                 <div className="flex flex-wrap gap-2">
                   <button
@@ -637,28 +757,21 @@ export const ScannerPage: React.FC = () => {
                     onClick={() => handleValidateToken('tkt_sec_7a9f2e3b8c1d4e5f')}
                     className="px-3 py-1.5 rounded-lg bg-emerald-50 text-emerald-700 border border-emerald-200 text-xs font-mono hover:bg-emerald-100 transition-colors"
                   >
-                    Test Valid Pass (Alex Mwangi)
+                    Demo Valid (Alex)
                   </button>
                   <button
                     type="button"
                     onClick={() => handleValidateToken('tkt_sec_1d8c4e5f7a9f2e3b')}
                     className="px-3 py-1.5 rounded-lg bg-rose-50 text-rose-700 border border-rose-200 text-xs font-mono hover:bg-rose-100 transition-colors"
                   >
-                    Test Duplicate (Zainab Wanjiru)
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleValidateToken('wrong_pass_event_xyz')}
-                    className="px-3 py-1.5 rounded-lg bg-amber-50 text-amber-700 border border-amber-200 text-xs font-mono hover:bg-amber-100 transition-colors"
-                  >
-                    Test Wrong Event
+                    Demo Duplicate (Zainab)
                   </button>
                   <button
                     type="button"
                     onClick={() => handleValidateToken('bogus_invalid_token')}
                     className="px-3 py-1.5 rounded-lg bg-gray-100 text-gray-600 border border-gray-200 text-xs font-mono hover:bg-gray-200 transition-colors"
                   >
-                    Test Invalid Token
+                    Test Invalid
                   </button>
                 </div>
               </div>
@@ -682,8 +795,13 @@ export const ScannerPage: React.FC = () => {
                   <p className="text-sm font-semibold text-gray-700 mt-1 font-mono">
                     {ticketMeta?.tier}
                   </p>
+                  {ticketMeta?.eventTitle && (
+                    <p className="text-xs text-emerald-700 font-medium mt-1">
+                      Event: {ticketMeta.eventTitle}
+                    </p>
+                  )}
                   <p className="text-xs text-gray-500 mt-2">
-                    Order Ref: {ticketMeta?.orderNumber} · Checked In: {ticketMeta?.checkedInAt}
+                    {ticketMeta?.orderNumber && `Order Ref: ${ticketMeta.orderNumber} · `}Checked In: {ticketMeta?.checkedInAt}
                   </p>
                 </div>
               </div>
@@ -701,8 +819,13 @@ export const ScannerPage: React.FC = () => {
                   <h2 className="text-2xl sm:text-3xl font-display font-bold text-gray-900">
                     {ticketMeta?.attendee}
                   </h2>
+                  {ticketMeta?.tier && (
+                    <p className="text-sm text-gray-600 mt-1 font-mono">
+                      {ticketMeta.tier}
+                    </p>
+                  )}
                   <p className="text-xs text-rose-600 mt-2 font-mono">
-                    Prior Check-In: {ticketMeta?.checkedInAt}
+                    Prior Check-In: {ticketMeta?.checkedInAt} {ticketMeta?.checkedBy ? `by ${ticketMeta.checkedBy}` : ''}
                   </p>
                 </div>
               </div>
@@ -715,15 +838,40 @@ export const ScannerPage: React.FC = () => {
                 </div>
                 <div>
                   <span className="px-3.5 py-1 rounded-full bg-amber-50 text-amber-700 font-mono font-semibold text-xs uppercase tracking-wider border border-amber-200 inline-block mb-3">
-                    Wrong Event Pass
+                    Wrong Event Pass · Gate Mismatch
                   </span>
                   <h2 className="text-xl sm:text-2xl font-display font-bold text-gray-900">
-                    Event Mismatch
+                    Ticket Belongs to Another Event
                   </h2>
-                  <p className="text-xs text-gray-500 mt-2">
-                    {ticketMeta?.note}
+                  <p className="text-sm text-gray-700 mt-2 max-w-md mx-auto">
+                    {ticketMeta?.note || 'This pass was issued for a different event than the selected gate.'}
                   </p>
+                  {ticketMeta?.wrongEvent?.attendeeName && (
+                    <div className="mt-3 inline-block px-4 py-2 rounded-xl bg-gray-50 border border-gray-200 text-xs font-mono text-gray-700">
+                      Attendee: <strong className="text-gray-900">{ticketMeta.wrongEvent.attendeeName}</strong>
+                      {ticketMeta.wrongEvent.tierName && (
+                        <span> · {ticketMeta.wrongEvent.tierName}</span>
+                      )}
+                    </div>
+                  )}
                 </div>
+
+                {ticketMeta?.wrongEvent && (ticketMeta.wrongEvent.eventSlug || ticketMeta.wrongEvent.eventId) && (
+                  <div className="pt-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const targetGate = ticketMeta.wrongEvent.eventSlug || ticketMeta.wrongEvent.eventId;
+                        setSelectedEventId(targetGate);
+                        handleValidateToken(ticketMeta.token, targetGate);
+                      }}
+                      className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-medium text-xs uppercase tracking-wider transition-colors shadow-sm"
+                    >
+                      <RotateCw className="w-4 h-4" />
+                      Switch Gate to "{ticketMeta.wrongEvent.eventTitle || 'Target Event'}" & Admit
+                    </button>
+                  </div>
+                )}
               </div>
             )}
 
@@ -737,10 +885,48 @@ export const ScannerPage: React.FC = () => {
                     Cancelled Pass · Entry Denied
                   </span>
                   <h2 className="text-xl sm:text-2xl font-display font-bold text-gray-900">
-                    Ticket Cancelled / Refunded
+                    Ticket Cancelled or Refunded
                   </h2>
-                  <p className="text-xs text-gray-500 mt-2">
+                  <p className="text-xs text-gray-500 mt-2 max-w-md mx-auto">
                     {ticketMeta?.note || 'This pass has been cancelled and cannot be admitted.'}
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {scanStatus === 'unpaid' && (
+              <div className="space-y-4">
+                <div className="w-20 h-20 rounded-full bg-rose-50 text-rose-600 mx-auto flex items-center justify-center border border-rose-200">
+                  <AlertTriangle className="w-10 h-10" />
+                </div>
+                <div>
+                  <span className="px-3.5 py-1 rounded-full bg-rose-50 text-rose-700 font-mono font-semibold text-xs uppercase tracking-wider border border-rose-200 inline-block mb-3">
+                    Unpaid Pass · Admission Denied
+                  </span>
+                  <h2 className="text-xl sm:text-2xl font-display font-bold text-gray-900">
+                    Order Payment Incomplete
+                  </h2>
+                  <p className="text-xs text-gray-500 mt-2 max-w-md mx-auto">
+                    {ticketMeta?.note || 'The order associated with this pass was not completed.'}
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {scanStatus === 'forbidden' && (
+              <div className="space-y-4">
+                <div className="w-20 h-20 rounded-full bg-rose-50 text-rose-600 mx-auto flex items-center justify-center border border-rose-200">
+                  <Lock className="w-10 h-10" />
+                </div>
+                <div>
+                  <span className="px-3.5 py-1 rounded-full bg-rose-50 text-rose-700 font-mono font-semibold text-xs uppercase tracking-wider border border-rose-200 inline-block mb-3">
+                    Access Denied · Organizer Authorization Required
+                  </span>
+                  <h2 className="text-xl sm:text-2xl font-display font-bold text-gray-900">
+                    Unauthorized Gate Staff
+                  </h2>
+                  <p className="text-xs text-gray-500 mt-2 max-w-md mx-auto">
+                    {ticketMeta?.note || 'You do not have organizer permissions to check in attendees for this event.'}
                   </p>
                 </div>
               </div>
@@ -758,8 +944,8 @@ export const ScannerPage: React.FC = () => {
                   <h2 className="text-xl sm:text-2xl font-display font-bold text-gray-900">
                     No Matching Ticket Record
                   </h2>
-                  <p className="text-xs text-gray-500 mt-2">
-                    {ticketMeta?.note || 'This token is unrecognised or has been revoked.'}
+                  <p className="text-xs text-gray-500 mt-2 max-w-md mx-auto">
+                    {ticketMeta?.note || 'This token does not exist in the database or could not be recognized.'}
                   </p>
                 </div>
               </div>

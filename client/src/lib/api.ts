@@ -63,11 +63,21 @@ export const API_BASE = resolveApiBaseUrl(rawEnvUrl);
 export class ApiError extends Error {
   public statusCode: number;
   public details?: Array<{ field: string; message: string }>;
+  public data?: any;
+  public code?: string;
 
-  constructor(message: string, statusCode: number, details?: Array<{ field: string; message: string }>) {
+  constructor(
+    message: string,
+    statusCode: number,
+    details?: Array<{ field: string; message: string }>,
+    data?: any,
+    code?: string
+  ) {
     super(message);
     this.statusCode = statusCode;
     this.details = details;
+    this.data = data;
+    this.code = code;
   }
 }
 
@@ -94,11 +104,14 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
   }));
 
   if (!response.ok || !json.success) {
-    throw new ApiError(
-      json.error?.message || 'An unexpected error occurred',
-      json.error?.statusCode || response.status,
-      json.error?.details
-    );
+    const message =
+      json.error?.message ||
+      (json.data as any)?.message ||
+      'An unexpected error occurred';
+    const statusCode = json.error?.statusCode || response.status;
+    const code = (json.error as any)?.code || (json.data as any)?.result;
+
+    throw new ApiError(message, statusCode, json.error?.details, json.data, code);
   }
 
   return json.data;
