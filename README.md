@@ -275,6 +275,8 @@ These are development credentials only. Never use the demo passwords for product
 
 Outside.vip is being developed toward a pilot with small events. Current work focuses on validating checkout, payment confirmation, ticket issuance, QR scanning, and reliable check-in.
 
+## CLIENT FEEDBACK
+
 ## Home Page feedbback
 -Change main text "outside.vip" 
  1. Make text all black color
