@@ -292,7 +292,8 @@ Outside.vip is being developed toward a pilot with small events. Current work fo
 We can verify an account as soon as they hit 15000 gross revenue.(This will be done later)
 
 
-## Basic logic for ticket sales
+## Checkout feedback.
+## Basic logic for ticket sales 
 
 10% = platform fee per ticket
 0.95 - service fee
