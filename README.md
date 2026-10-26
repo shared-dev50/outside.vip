@@ -281,6 +281,7 @@ Outside.vip is being developed toward a pilot with small events. Current work fo
  2. Capitalize "O" in outside
  3. change font size(Not too big) 
 
+Overwrite this text (THERE'S A WORLD OUT THERE.) with "OUTSIDE AWAITS"
 ## Organizer creating an event feedback
 
 - On a smaller resolution(mobile) add a next button instead of having configuration steps sitting on top.
