@@ -275,4 +275,46 @@ These are development credentials only. Never use the demo passwords for product
 
 Outside.vip is being developed toward a pilot with small events. Current work focuses on validating checkout, payment confirmation, ticket issuance, QR scanning, and reliable check-in.
 
+## Home Page feedbback
+-Change main text "outside.vip" 
+ 1. Make text all black color
+ 2. Capitalize "O" in outside
+ 3. change font size(Not too big) 
+
+## Organizer creating an event feedback
+
+- On a smaller resolution(mobile) add a next button instead of having configuration steps sitting on top.
+-On a bigger resolution(desktop,laptop) leave the configuring steps.
+
+- When uploading a flyer, it should be portrait and not landscape(need more infor)
+-Allow event organizers to specify there socials, "spotify, youtube url's, insta,  TikTok
+
+We can verify an account as soon as they hit 15000 gross revenue.(This will be done later)
+
+
+## Basic logic for ticket sales
+
+10% = platform fee per ticket
+0.95 - service fee
+0.88 = stripe fee per transaction
+Total fee (Cost to buyer)
+
+Break down example
+Ticket price:   $20
+
+Service fee:     (10% of ticket fee + 0.95)  in this example the total will be $22.95
+10% + $0.95 per ticket
+
+Processing fee:
+0.88c
+
+Cost to buyer (Show total cost)
+
+
+## Add this logic
+1.when a customer is purchasing a ticket give them this breakdown
+2. when the organizer is creating an event show them this a breakdown of what they get
+
+
+
 
