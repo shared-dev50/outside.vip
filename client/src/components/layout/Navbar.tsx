@@ -47,7 +47,7 @@ export const Navbar: React.FC = () => {
         <div className="flex items-center gap-8">
           <Link to="/" className="flex items-center gap-1.5 group focus:outline-none focus-visible:ring-2 focus-visible:ring-stone-900 rounded">
             <span className="font-display font-black text-lg tracking-tight text-stone-900 group-hover:opacity-85 transition-opacity">
-              outside<span className="text-stone-400 font-normal">.vip</span>
+              Outside<span className="text-stone-400 font-normal">.Vip</span>
             </span>
           </Link>
 
