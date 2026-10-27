@@ -1,29 +1,6 @@
 import PDFDocument from 'pdfkit';
 import QRCode from 'qrcode';
-import fs from 'fs';
-import path from 'path';
 
-let cachedLogoPath: string | null | undefined = undefined;
-
-function getOfficialLogoPath(): string | null {
-  if (cachedLogoPath !== undefined) {
-    return cachedLogoPath;
-  }
-  const possiblePaths = [
-    path.resolve(__dirname, '../../../../client/public/outside-logo.png'),
-    path.resolve(process.cwd(), '../client/public/outside-logo.png'),
-    path.resolve(process.cwd(), 'client/public/outside-logo.png'),
-    path.resolve(process.cwd(), './client/public/outside-logo.png'),
-  ];
-  for (const p of possiblePaths) {
-    if (fs.existsSync(p)) {
-      cachedLogoPath = p;
-      return cachedLogoPath;
-    }
-  }
-  cachedLogoPath = null;
-  return null;
-}
 
 interface TicketPdfEvent {
   title: string;
@@ -178,7 +155,6 @@ export async function generateTicketsPdf(
 
   // Pre-fetch cover image buffer once for all pages
   const coverImageBuffer = await fetchImageBuffer(order.event.coverImageUrl);
-  const logoPath = getOfficialLogoPath();
 
   return new Promise(async (resolve, reject) => {
     try {
@@ -399,30 +375,13 @@ export async function generateTicketsPdf(
         doc.font('Helvetica').fontSize(6.5).fillColor('#6B7280')
            .text('Tickets sold are non-refundable', bodyCol2X, rightColY, { width: bodyCol2Width, align: 'center' });
 
-        // 5. Footer Branding with Official Outside.vip Logo
-        const footerY = 766;
-        if (logoPath) {
-          try {
-            const logoWidth = 110;
-            const logoHeight = logoWidth * (223 / 1008); // exact aspect ratio (~24.3pt)
-            const logoX = leftMargin + (contentWidth - logoWidth) / 2;
-            doc.image(logoPath, logoX, footerY, { width: logoWidth, height: logoHeight });
+        // 5. Footer Branding
+        const footerY = 780;
+        doc.font('Helvetica-Bold').fontSize(11).fillColor('#111827')
+           .text('OUTSIDE.VIP', leftMargin, footerY, { width: contentWidth, align: 'center', characterSpacing: 1.5 });
 
-            doc.font('Helvetica').fontSize(6.5).fillColor('#6B7280')
-               .text('Delivered by Outside.vip · Verified Secure Event Ticketing · tickets@outside.vip', leftMargin, footerY + logoHeight + 5, { width: contentWidth, align: 'center' });
-          } catch {
-            // Graceful fallback to text if image rendering fails
-            doc.font('Helvetica-Bold').fontSize(11).fillColor('#111827')
-               .text('OUTSIDE.VIP', leftMargin, footerY, { width: contentWidth, align: 'center', characterSpacing: 1.5 });
-            doc.font('Helvetica').fontSize(6.5).fillColor('#6B7280')
-               .text('Delivered by Outside.vip · Verified Secure Event Ticketing · tickets@outside.vip', leftMargin, footerY + 14, { width: contentWidth, align: 'center' });
-          }
-        } else {
-          doc.font('Helvetica-Bold').fontSize(11).fillColor('#111827')
-             .text('OUTSIDE.VIP', leftMargin, footerY, { width: contentWidth, align: 'center', characterSpacing: 1.5 });
-          doc.font('Helvetica').fontSize(6.5).fillColor('#6B7280')
-             .text('Delivered by Outside.vip · Verified Secure Event Ticketing · tickets@outside.vip', leftMargin, footerY + 14, { width: contentWidth, align: 'center' });
-        }
+        doc.font('Helvetica').fontSize(6.5).fillColor('#6B7280')
+           .text('Delivered by Outside.vip · Verified Secure Event Ticketing · tickets@outside.vip', leftMargin, footerY + 14, { width: contentWidth, align: 'center' });
       }
 
       doc.end();

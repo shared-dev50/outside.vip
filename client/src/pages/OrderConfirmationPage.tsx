@@ -306,12 +306,10 @@ export const OrderConfirmationPage: React.FC = () => {
               <div className="p-6 md:p-8 md:col-span-8 space-y-6 flex flex-col justify-between">
                 <div className="space-y-4">
                   <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2.5">
-                      <img
-                        src="/outside-logo.png"
-                        alt="Outside.vip"
-                        className="h-5 sm:h-6 w-auto object-contain select-none"
-                      />
+                    <div className="flex items-center gap-2">
+                      <span className="font-display font-bold text-base text-gray-900">
+                        outside<span className="text-gray-400">.vip</span>
+                      </span>
                       <span className="text-[10px] font-mono uppercase text-gray-500 px-2 py-0.5 rounded bg-gray-100 border border-gray-200">
                         Ticket {idx + 1} / {tickets.length}
                       </span>
