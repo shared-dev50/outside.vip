@@ -12,7 +12,7 @@ interface StencilHeadlineProps {
  */
 export const StencilHeadline: React.FC<StencilHeadlineProps> = ({
   className = '',
-  title = "THE WORLD AWAITS",
+  title = "OUTSIDE AWAITS",
   subtitle = 'FIND SOMETHING WORTH SHOWING UP FOR',
 }) => {
   return (

@@ -44,11 +44,17 @@ export const Navbar: React.FC = () => {
     <header className={`sticky top-0 z-50 w-full transition-all duration-300 ease-out ${headerClass}`}>
       <div className="max-w-7xl xl:max-w-[1536px] mx-auto px-4 sm:px-6 lg:px-8 xl:px-10 h-16 flex items-center justify-between gap-4">
         {/* Left: Brand Wordmark & Nav Links */}
-        <div className="flex items-center gap-8">
-          <Link to="/" className="flex items-center gap-1.5 group focus:outline-none focus-visible:ring-2 focus-visible:ring-stone-900 rounded">
-            <span className="font-display font-black text-lg tracking-tight text-stone-900 group-hover:opacity-85 transition-opacity">
-              Outside<span className="text-stone-400 font-normal">.Vip</span>
-            </span>
+        <div className="flex items-center gap-6 sm:gap-8">
+          <Link
+            to="/"
+            className="flex items-center group focus:outline-none focus-visible:ring-2 focus-visible:ring-stone-900 rounded py-1"
+            aria-label="Outside.vip homepage"
+          >
+            <img
+              src="/outside-logo.png"
+              alt="Outside.vip"
+              className="h-7 sm:h-8 w-auto object-contain transition-opacity group-hover:opacity-90 select-none"
+            />
           </Link>
 
           <nav className="hidden sm:flex items-center gap-6 text-sm">
