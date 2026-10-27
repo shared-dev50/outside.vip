@@ -281,7 +281,8 @@ Outside.vip is being developed toward a pilot with small events. Current work fo
 -Change main text "outside.vip" 
  1. Make text all black color
  2. Capitalize "O" in outside
- 3. change font size(Not too big) 
+ 3. change font size(Not too big)
+ 4. Change then image of the site from a bulb to a big "O"
 
 Overwrite this text (THERE'S A WORLD OUT THERE.) with "OUTSIDE AWAITS"
 ## Organizer creating an event feedback
@@ -312,7 +313,7 @@ Service fee:     (10% of ticket fee + 0.95)  in this example the total will be $
 Processing fee:
 0.88c
 
-Cost to buyer (Show total cost)
+Cost to buyer ($23.83)
 
 
 ## Add this logic
