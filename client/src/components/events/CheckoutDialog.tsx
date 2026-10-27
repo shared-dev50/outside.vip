@@ -5,6 +5,7 @@ import { X, ShieldCheck, Clock, AlertCircle, Lock, CheckCircle2 } from 'lucide-r
 import { Event, TicketTier, CheckoutSessionResult } from '../../types';
 import { getStripePromise } from '../../lib/stripe';
 import { api } from '../../lib/api';
+import { calculateCheckoutFeeBreakdown } from '../../lib/fees';
 
 export interface CheckoutDialogProps {
   isOpen: boolean;
@@ -70,6 +71,13 @@ const PaymentContent: React.FC<PaymentContentProps> = ({
     const diff = Math.floor((new Date(paymentSession.expiresAt).getTime() - Date.now()) / 1000);
     return Math.max(0, diff);
   });
+
+  const dialogFees = calculateCheckoutFeeBreakdown(
+    selectedItems.map(({ tier, quantity }) => ({
+      priceInCents: tier.priceInCents,
+      quantity,
+    }))
+  );
 
   const isBusy = paymentStep === 'processing' || paymentStep === 'success';
 
@@ -298,16 +306,42 @@ const PaymentContent: React.FC<PaymentContentProps> = ({
                     {formatPrice(tier.priceInCents, tier.currency)} each
                   </div>
                 </div>
-                <div className="font-semibold text-gray-900">
+                <div className="font-semibold text-gray-900 font-mono">
                   {formatPrice(tier.priceInCents * quantity, tier.currency)}
                 </div>
               </div>
             ))}
           </div>
 
+          {/* Fee breakdown details */}
+          {dialogFees.ticketSubtotalInCents > 0 && (
+            <div className="pt-3 border-t border-gray-100 space-y-1.5 text-xs text-gray-500">
+              <div className="flex justify-between">
+                <span>Platform fee (10%)</span>
+                <span className="text-gray-700 font-medium font-mono">
+                  {formatPrice(dialogFees.platformFeeInCents, currency)}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span>Service fee ($0.95 / ticket)</span>
+                <span className="text-gray-700 font-medium font-mono">
+                  {formatPrice(dialogFees.serviceFeeInCents, currency)}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span>Stripe processing (est. 2.9% + $0.30)</span>
+                <span className="text-gray-700 font-medium font-mono">
+                  {formatPrice(dialogFees.processingFeeInCents, currency)}
+                </span>
+              </div>
+            </div>
+          )}
+
           <div className="pt-3 border-t border-gray-200 flex items-center justify-between text-sm font-bold text-gray-900">
-            <span>Total</span>
-            <span className="text-base text-gray-900">{formatPrice(totalInCents, currency)}</span>
+            <span>Total Payable</span>
+            <span className="text-base text-gray-900 font-mono">
+              {formatPrice(paymentSession.totalInCents || dialogFees.buyerTotalInCents || totalInCents, currency)}
+            </span>
           </div>
         </div>
 
@@ -490,7 +524,7 @@ const PaymentContent: React.FC<PaymentContentProps> = ({
               ) : !isReady ? (
                 <span>Securing Card Form...</span>
               ) : (
-                <span>Pay {formatPrice(totalInCents, currency)}</span>
+                <span>Pay {formatPrice(paymentSession.totalInCents || dialogFees.buyerTotalInCents || totalInCents, currency)}</span>
               )}
             </button>
 

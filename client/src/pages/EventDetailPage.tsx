@@ -4,6 +4,7 @@ import { useQuery } from '@tanstack/react-query';
 import { api } from '../lib/api';
 import { TicketTier, CheckoutSessionResult } from '../types';
 import { CheckoutDialog } from '../components/events/CheckoutDialog';
+import { calculateCheckoutFeeBreakdown } from '../lib/fees';
 import { 
   Calendar, 
   MapPin, 
@@ -54,12 +55,15 @@ export const EventDetailPage: React.FC = () => {
 
   const totalTickets = Object.values(selectedQuantities).reduce((a, b) => a + b, 0);
 
-  const totalInCents = event
+  const ticketSubtotalInCents = event
     ? event.ticketTiers.reduce((acc, tier) => {
         const qty = selectedQuantities[tier.id] || 0;
         return acc + qty * tier.priceInCents;
       }, 0)
     : 0;
+
+  const checkoutFees = calculateCheckoutFeeBreakdown(ticketSubtotalInCents, totalTickets);
+  const totalInCents = checkoutFees.buyerTotalInCents;
 
   const selectedItems = (event?.ticketTiers || [])
     .filter((tier) => (selectedQuantities[tier.id] || 0) > 0)
@@ -70,10 +74,22 @@ export const EventDetailPage: React.FC = () => {
 
   const formatPrice = (cents?: number, currency = 'USD') => {
     if (cents === undefined || cents === 0) return 'Free';
+    const hasCents = cents % 100 !== 0;
     return new Intl.NumberFormat('en-US', {
       style: 'currency',
       currency,
-      maximumFractionDigits: 0,
+      minimumFractionDigits: hasCents ? 2 : 0,
+      maximumFractionDigits: 2,
+    }).format(cents / 100);
+  };
+
+  const formatPriceWithCents = (cents?: number, currency = 'USD') => {
+    if (cents === undefined || cents === 0) return 'Free';
+    return new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency,
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
     }).format(cents / 100);
   };
 
@@ -574,10 +590,42 @@ export const EventDetailPage: React.FC = () => {
                 </div>
               </div>
 
+              {/* Ticket Fee Breakdown */}
+              {totalTickets > 0 && checkoutFees.ticketSubtotalInCents > 0 && (
+                <div className="p-3 rounded-lg bg-gray-50 border border-gray-200/80 space-y-2 text-xs">
+                  <div className="flex justify-between text-gray-600">
+                    <span>
+                      Ticket Subtotal ({totalTickets} ticket{totalTickets === 1 ? '' : 's'})
+                    </span>
+                    <span className="font-semibold text-gray-900 font-mono">
+                      {formatPriceWithCents(checkoutFees.ticketSubtotalInCents, event.currency)}
+                    </span>
+                  </div>
+                  <div className="flex justify-between text-gray-600">
+                    <span>Platform Fee (10%)</span>
+                    <span className="font-semibold text-gray-900 font-mono">
+                      {formatPriceWithCents(checkoutFees.platformFeeInCents, event.currency)}
+                    </span>
+                  </div>
+                  <div className="flex justify-between text-gray-600">
+                    <span>Service Fee ($0.95 / ticket)</span>
+                    <span className="font-semibold text-gray-900 font-mono">
+                      {formatPriceWithCents(checkoutFees.serviceFeeInCents, event.currency)}
+                    </span>
+                  </div>
+                  <div className="flex justify-between text-gray-600">
+                    <span>Stripe Processing (est. 2.9% + $0.30)</span>
+                    <span className="font-semibold text-gray-900 font-mono">
+                      {formatPriceWithCents(checkoutFees.processingFeeInCents, event.currency)}
+                    </span>
+                  </div>
+                </div>
+              )}
+
               <div className="pt-2 flex items-center justify-between text-sm font-bold text-gray-900 border-t border-gray-100">
-                <span>Total ({totalTickets} ticket{totalTickets === 1 ? '' : 's'})</span>
-                <span className="text-base">
-                  {formatPrice(totalInCents, event.currency)}
+                <span>Total Payable</span>
+                <span className="text-base font-mono text-gray-900">
+                  {formatPriceWithCents(totalInCents, event.currency)}
                 </span>
               </div>
 

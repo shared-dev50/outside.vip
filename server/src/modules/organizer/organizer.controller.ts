@@ -1,7 +1,8 @@
 import { Request, Response, NextFunction } from 'express';
 import { EventStatus, TicketTierStatus, OrderStatus, TicketStatus } from '@prisma/client';
 import { prisma } from '../../db/prisma.js';
-import { createEventSchema, updateEventSchema, payoutDetailsInputSchema, PayoutDetailsInput } from './organizer.schema.js';
+import { createEventSchema, updateEventSchema, payoutDetailsInputSchema, PayoutDetailsInput, earningsPreviewInputSchema } from './organizer.schema.js';
+import { calculateCombinedEarnings } from '../checkout/checkout.financials.js';
 import { NotFoundError, ForbiddenError, BadRequestError } from '../../utils/errors.js';
 import {
   isCloudinaryConfigured,
@@ -1099,5 +1100,25 @@ export async function checkInTicket(req: Request, res: Response, next: NextFunct
     next(error);
   }
 }
+
+export async function getOrganizerEarningsPreview(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const input = earningsPreviewInputSchema.parse(req.body);
+    const result = calculateCombinedEarnings(input.tiers);
+    res.json({
+      success: true,
+      data: {
+        preview: result,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
 
 

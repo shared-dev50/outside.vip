@@ -4,7 +4,11 @@ import { prisma } from '../../db/prisma.js';
 import { stripe } from '../../lib/stripe.js';
 import { env } from '../../config/env.js';
 import { BadRequestError, ConflictError, NotFoundError } from '../../utils/errors.js';
-import { calculateFinancialBreakdown } from './checkout.financials.js';
+import {
+  calculateFinancialBreakdown,
+  calculateCheckoutFeeBreakdown,
+  CheckoutFeeBreakdown,
+} from './checkout.financials.js';
 import { CreateCheckoutSessionInput } from './checkout.schema.js';
 
 export interface CheckoutResult {
@@ -15,6 +19,7 @@ export interface CheckoutResult {
   totalInCents: number;
   currency: string;
   expiresAt: string;
+  breakdown?: CheckoutFeeBreakdown;
 }
 
 /**
@@ -137,6 +142,10 @@ export async function createCheckoutSession(
             totalInCents: existingOrder.totalInCents,
             currency: existingOrder.currency,
             expiresAt: existingOrder.expiresAt.toISOString(),
+            breakdown: calculateCheckoutFeeBreakdown(
+              existingOrder.organizerNetInCents,
+              existingOrder.items.reduce((acc, it) => acc + it.quantity, 0)
+            ),
           };
         }
       } catch {
@@ -202,10 +211,10 @@ export async function createCheckoutSession(
   const orderNumber = `OUT-${now.getFullYear()}-${Math.floor(10000 + Math.random() * 90000)}`;
   const orderAccessToken = `oat_${nanoid(32)}`;
 
-  let createdOrder: any = null;
+  let reservationResult: { order: any; feeBreakdown: CheckoutFeeBreakdown };
 
   try {
-    createdOrder = await prisma.$transaction(
+    reservationResult = await prisma.$transaction(
       async (tx) => {
         // Lock the requested tier rows for update
         const lockedTiers = await tx.$queryRaw<
@@ -227,8 +236,9 @@ export async function createCheckoutSession(
 
         const lockedMap = new Map(lockedTiers.map((t) => [t.id, t]));
 
-        // Calculate verified total strictly from database prices
-        let totalInCents = 0;
+        // Calculate verified subtotal and total tickets strictly from database prices
+        let ticketSubtotalInCents = 0;
+        let totalTicketQuantity = 0;
         const orderItemsData = [];
         const reservationData = [];
 
@@ -246,7 +256,8 @@ export async function createCheckoutSession(
           }
 
           const subtotalInCents = locked.priceInCents * item.quantity;
-          totalInCents += subtotalInCents;
+          ticketSubtotalInCents += subtotalInCents;
+          totalTicketQuantity += item.quantity;
 
           orderItemsData.push({
             ticketTierId: item.ticketTierId,
@@ -273,8 +284,8 @@ export async function createCheckoutSession(
           });
         }
 
-        // Calculate financial breakdown
-        const financials = calculateFinancialBreakdown(totalInCents);
+        // Authoritatively compute fee breakdown (10% platform, $0.95 service, 2.9% + $0.30 Stripe gross-up)
+        const feeBreakdown = calculateCheckoutFeeBreakdown(ticketSubtotalInCents, totalTicketQuantity);
 
         // Create the pending order record
         const order = await tx.order.create({
@@ -286,10 +297,10 @@ export async function createCheckoutSession(
             customerEmail,
             customerName,
             customerPhone: customerPhone || null,
-            totalInCents,
+            totalInCents: feeBreakdown.buyerTotalInCents,
             currency: currency.toUpperCase(),
-            platformFeeInCents: financials.platformFeeInCents,
-            organizerNetInCents: financials.organizerNetInCents,
+            platformFeeInCents: feeBreakdown.buyerTotalInCents - feeBreakdown.organizerEarningsInCents,
+            organizerNetInCents: feeBreakdown.organizerEarningsInCents,
             orderAccessToken,
             idempotencyKey: finalIdempotencyKey,
             expiresAt,
@@ -307,7 +318,7 @@ export async function createCheckoutSession(
           },
         });
 
-        return order;
+        return { order, feeBreakdown };
       },
       {
         isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
@@ -322,6 +333,9 @@ export async function createCheckoutSession(
     throw new BadRequestError('Could not secure ticket reservation. Please try again.');
   }
 
+  const createdOrder = reservationResult.order;
+  const createdFeeBreakdown = reservationResult.feeBreakdown;
+
   // 5. Create Stripe PaymentIntent
   try {
     const paymentIntent = await stripe.paymentIntents.create(
@@ -334,6 +348,10 @@ export async function createCheckoutSession(
           orderNumber: createdOrder.orderNumber,
           eventId: event.id,
           orderAccessToken,
+          ticketSubtotalInCents: createdFeeBreakdown?.ticketSubtotalInCents.toString() || '0',
+          platformFeeInCents: createdFeeBreakdown?.platformFeeInCents.toString() || '0',
+          serviceFeeInCents: createdFeeBreakdown?.serviceFeeInCents.toString() || '0',
+          processingFeeInCents: createdFeeBreakdown?.processingFeeInCents.toString() || '0',
         },
         receipt_email: customerEmail,
         automatic_payment_methods: {
@@ -363,6 +381,7 @@ export async function createCheckoutSession(
       totalInCents: createdOrder.totalInCents,
       currency: createdOrder.currency,
       expiresAt: expiresAt.toISOString(),
+      breakdown: createdFeeBreakdown || undefined,
     };
   } catch (stripeError) {
     console.error('Stripe PaymentIntent creation failed; initiating reservation rollback:', stripeError);

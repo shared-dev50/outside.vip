@@ -15,6 +15,7 @@ import {
   getOrganizerPayoutDetails,
   updateOrganizerPayoutDetails,
   checkInTicket,
+  getOrganizerEarningsPreview,
 } from './organizer.controller.js';
 import { uploadCoverMiddleware } from '../../middleware/upload.js';
 
@@ -30,6 +31,7 @@ organizerRouter.post('/upload/sign', getUploadSignature);
 organizerRouter.post('/upload', uploadCoverMiddleware.single('image'), handleDirectUpload);
 
 organizerRouter.get('/dashboard', getDashboardStats);
+organizerRouter.post('/earnings-preview', getOrganizerEarningsPreview);
 organizerRouter.get('/payout-details', getOrganizerPayoutDetails);
 organizerRouter.put('/payout-details', updateOrganizerPayoutDetails);
 organizerRouter.get('/events', listOrganizerEvents);

@@ -27,7 +27,10 @@ import {
   Info,
   Landmark,
   ShieldCheck,
+  Wallet,
+  TrendingUp,
 } from 'lucide-react';
+import { calculateTierEarnings, calculateCombinedEarnings, formatCents } from '../lib/fees';
 
 interface FormTicketTier {
   id?: string;
@@ -697,6 +700,13 @@ export const CreateEventPage: React.FC = () => {
         .replace(/(^-|-$)+/g, '')
     : 'event-slug';
 
+  const combinedEarnings = calculateCombinedEarnings(
+    ticketTiers.map((t) => ({
+      priceInCents: Math.round((Number(t.price) || 0) * 100),
+      capacity: Math.max(0, Number(t.totalCapacity) || 0),
+    }))
+  );
+
   return (
     <div className="min-h-screen bg-[#FAF8F5] text-stone-900 selection:bg-stone-900 selection:text-white pb-36">
       {/* Sticky Editor Command Bar */}
@@ -873,6 +883,12 @@ export const CreateEventPage: React.FC = () => {
                 <span>Min Price:</span>
                 <span className="text-stone-900 font-bold">
                   ${Math.min(...ticketTiers.map((t) => Number(t.price) || 0))}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span>Est. Earnings (Sold Out):</span>
+                <span className="text-emerald-600 font-bold">
+                  {formatCents(combinedEarnings.totalProjectedEarningsInCents)}
                 </span>
               </div>
               <div className="flex justify-between">
@@ -1478,9 +1494,178 @@ export const CreateEventPage: React.FC = () => {
                             className="w-full px-3 py-2 rounded-lg bg-white border border-stone-300 text-stone-900 text-xs focus:outline-none focus:border-stone-900"
                           />
                         </div>
+
+                        {/* Organizer Earnings & Fee Breakdown */}
+                        {(() => {
+                          const priceInCents = Math.round((Number(tier.price) || 0) * 100);
+                          const capacity = Math.max(0, Number(tier.totalCapacity) || 0);
+                          const breakdown = calculateTierEarnings(priceInCents, capacity);
+
+                          return (
+                            <div className="mt-4 pt-3.5 border-t border-stone-200/80">
+                              <div className="bg-white rounded-xl p-4 border border-stone-200/90 shadow-2xs space-y-3">
+                                {/* Header */}
+                                <div className="flex items-center justify-between pb-2 border-b border-stone-100">
+                                  <div className="flex items-center gap-2">
+                                    <div className="w-6 h-6 rounded-md bg-emerald-50 text-emerald-700 flex items-center justify-center shrink-0">
+                                      <Wallet className="w-3.5 h-3.5" />
+                                    </div>
+                                    <div>
+                                      <span className="text-xs font-mono font-bold uppercase tracking-wider text-stone-900">
+                                        Earnings & Fee Breakdown
+                                      </span>
+                                      <span className="block text-[11px] text-stone-500 font-sans">
+                                        Buyer pays all fees at checkout; you receive 100% of your ticket price.
+                                      </span>
+                                    </div>
+                                  </div>
+                                  <div className="text-right">
+                                    <span className="text-[10px] font-mono uppercase text-stone-400 block">
+                                      Earnings Per Ticket
+                                    </span>
+                                    <span className="text-sm font-mono font-bold text-emerald-600">
+                                      {formatCents(breakdown.organizerEarningsInCents)}
+                                    </span>
+                                  </div>
+                                </div>
+
+                                {/* Fee metrics grid */}
+                                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 pt-1">
+                                  <div className="p-2.5 rounded-lg bg-[#FAF8F5] border border-stone-200/80">
+                                    <span className="block text-[10px] font-mono uppercase text-stone-500">
+                                      Ticket Price
+                                    </span>
+                                    <span className="text-xs font-mono font-bold text-stone-900">
+                                      {formatCents(breakdown.ticketPriceInCents)}
+                                    </span>
+                                  </div>
+                                  <div className="p-2.5 rounded-lg bg-[#FAF8F5] border border-stone-200/80">
+                                    <span className="block text-[10px] font-mono uppercase text-stone-500">
+                                      Platform Fee (10%)
+                                    </span>
+                                    <span className="text-xs font-mono font-bold text-stone-900">
+                                      {formatCents(breakdown.platformFeeInCents)}
+                                    </span>
+                                    <span className="block text-[9px] text-stone-400 font-mono">paid by buyer</span>
+                                  </div>
+                                  <div className="p-2.5 rounded-lg bg-[#FAF8F5] border border-stone-200/80">
+                                    <span className="block text-[10px] font-mono uppercase text-stone-500">
+                                      Service Fee ($0.95)
+                                    </span>
+                                    <span className="text-xs font-mono font-bold text-stone-900">
+                                      {formatCents(breakdown.serviceFeeInCents)}
+                                    </span>
+                                    <span className="block text-[9px] text-stone-400 font-mono">paid by buyer</span>
+                                  </div>
+                                  <div className="p-2.5 rounded-lg bg-[#FAF8F5] border border-stone-200/80">
+                                    <span className="block text-[10px] font-mono uppercase text-stone-500">
+                                      Processing (est.)
+                                    </span>
+                                    <span className="text-xs font-mono font-bold text-stone-900">
+                                      {formatCents(breakdown.processingFeeInCents)}
+                                    </span>
+                                    <span className="block text-[9px] text-stone-400 font-mono">2.9% + $0.30</span>
+                                  </div>
+                                </div>
+
+                                {/* Summary highlights */}
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-1">
+                                  <div className="p-3 rounded-lg bg-stone-100/70 border border-stone-200 flex items-center justify-between">
+                                    <div>
+                                      <span className="text-[11px] font-mono uppercase text-stone-600 block font-semibold">
+                                        Estimated Buyer Total
+                                      </span>
+                                      <span className="text-[10px] text-stone-500 font-sans">
+                                        Includes ticket, platform & Stripe fees
+                                      </span>
+                                    </div>
+                                    <span className="text-sm font-mono font-bold text-stone-900">
+                                      {formatCents(breakdown.buyerTotalInCents)}
+                                    </span>
+                                  </div>
+
+                                  <div className="p-3 rounded-lg bg-emerald-50 border border-emerald-200/70 flex items-center justify-between">
+                                    <div>
+                                      <span className="text-[11px] font-mono uppercase text-emerald-900 block font-bold">
+                                        Projected Tier Earnings
+                                      </span>
+                                      <span className="text-[10px] text-emerald-700 font-sans">
+                                        Projection assuming all {capacity.toLocaleString()} tickets sell
+                                      </span>
+                                    </div>
+                                    <span className="text-base font-mono font-black text-emerald-700">
+                                      {formatCents(breakdown.projectedEarningsInCents)}
+                                    </span>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })()}
                       </div>
                     );
                   })}
+                </div>
+
+                {/* Combined Projected Earnings Summary */}
+                <div className="mt-6 p-6 rounded-xl bg-stone-900 text-white shadow-md border border-stone-800 space-y-4">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-stone-800">
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 rounded-lg bg-emerald-500/20 text-emerald-400 flex items-center justify-center shrink-0">
+                        <TrendingUp className="w-5 h-5" />
+                      </div>
+                      <div>
+                        <h3 className="text-sm font-mono uppercase font-bold text-white tracking-wider">
+                          Combined Projected Earnings
+                        </h3>
+                        <p className="text-xs text-stone-400 font-sans mt-0.5">
+                          Projected net payout across all {ticketTiers.length} tier{ticketTiers.length === 1 ? '' : 's'} assuming 100% sell-out ({combinedEarnings.totalCapacity.toLocaleString()} total tickets).
+                        </p>
+                      </div>
+                    </div>
+                    <div className="sm:text-right">
+                      <span className="text-[10px] font-mono uppercase tracking-widest text-stone-400 block">
+                        Total Projected Earnings
+                      </span>
+                      <span className="text-2xl font-mono font-black text-emerald-400">
+                        {formatCents(combinedEarnings.totalProjectedEarningsInCents)}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs font-mono">
+                    <div className="p-3 rounded-lg bg-stone-800/70 border border-stone-700/60">
+                      <span className="text-[10px] uppercase text-stone-400 block">Total Capacity</span>
+                      <span className="text-stone-100 font-bold text-sm">
+                        {combinedEarnings.totalCapacity.toLocaleString()} tickets
+                      </span>
+                    </div>
+                    <div className="p-3 rounded-lg bg-stone-800/70 border border-stone-700/60">
+                      <span className="text-[10px] uppercase text-stone-400 block">Organizer Payout</span>
+                      <span className="text-emerald-400 font-bold text-sm">
+                        {formatCents(combinedEarnings.totalProjectedEarningsInCents)}
+                      </span>
+                    </div>
+                    <div className="p-3 rounded-lg bg-stone-800/70 border border-stone-700/60">
+                      <span className="text-[10px] uppercase text-stone-400 block">Platform Revenue</span>
+                      <span className="text-stone-300 font-bold text-sm">
+                        {formatCents(combinedEarnings.totalProjectedPlatformRevenueInCents)}
+                      </span>
+                    </div>
+                    <div className="p-3 rounded-lg bg-stone-800/70 border border-stone-700/60">
+                      <span className="text-[10px] uppercase text-stone-400 block">Gross Buyer Volume</span>
+                      <span className="text-stone-100 font-bold text-sm">
+                        {formatCents(combinedEarnings.totalProjectedBuyerSpendInCents)}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="text-[11px] font-sans text-stone-400 bg-stone-950/60 p-3 rounded-lg border border-stone-800 flex items-start gap-2.5">
+                    <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                    <span>
+                      <strong className="text-stone-200">Outside.vip Fee Protection:</strong> All platform fees (10%), service fees ($0.95/ticket), and estimated Stripe processing fees (2.9% + $0.30) are paid by buyers at checkout. You receive 100% of your configured ticket price directly to your verified payout bank account.
+                    </span>
+                  </div>
                 </div>
               </div>
             )}

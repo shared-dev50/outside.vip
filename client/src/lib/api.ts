@@ -10,6 +10,7 @@ import {
   CheckoutSessionResult,
   OrganizerPayoutDetails,
   PayoutDetailsInput,
+  CombinedEarningsBreakdown,
 } from '../types';
 
 /**
@@ -260,6 +261,11 @@ export const api = {
         return serverJson.data;
       }
     },
+    getEarningsPreview: (payload: { tiers: Array<{ priceInCents: number; capacity?: number }> }) =>
+      request<{ preview: CombinedEarningsBreakdown }>('/organizer/earnings-preview', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }),
   },
   auth: {
     me: () => request<{ user: User }>('/auth/me'),

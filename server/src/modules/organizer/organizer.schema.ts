@@ -126,3 +126,20 @@ export const updateEventSchema = z.object({
   ticketTiers: z.array(ticketTierInputSchema).optional(),
   payoutDetails: payoutDetailsInputSchema.optional().nullable(),
 });
+
+export type CreateEventInput = z.infer<typeof createEventSchema>;
+export type UpdateEventInput = z.infer<typeof updateEventSchema>;
+
+export const earningsPreviewInputSchema = z.object({
+  tiers: z
+    .array(
+      z.object({
+        priceInCents: z.number().int().min(0, 'Price must be 0 or greater'),
+        capacity: z.number().int().min(1, 'Capacity must be at least 1').default(1),
+      })
+    )
+    .min(1, 'At least one tier is required'),
+});
+
+export type EarningsPreviewInput = z.infer<typeof earningsPreviewInputSchema>;
+

@@ -221,6 +221,7 @@ export interface CheckoutSessionResult {
   totalInCents: number;
   currency: string;
   expiresAt: string;
+  breakdown?: import('../lib/fees').CheckoutFeeBreakdown;
 }
 
 export interface ApiResponse<T> {
@@ -260,4 +261,11 @@ export interface OrganizerEventItem extends Event {
   revenueInCents: number;
   revenueFormatted: string;
 }
+
+export type {
+  TierFeeBreakdown,
+  CombinedEarningsBreakdown,
+  CheckoutFeeBreakdown,
+} from '../lib/fees';
+
 
