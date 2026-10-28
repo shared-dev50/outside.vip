@@ -328,6 +328,9 @@ describe('Outside.vip Checkout, Atomic Reservations & Payments API', () => {
       expect(res2.status).toBe(201);
       expect(res2.body.data.orderNumber).toBe(firstOrderNumber);
       expect(res2.body.data.clientSecret).toBe(mockClientSecret);
+      expect(res2.body.data.breakdown).toBeDefined();
+      expect(res2.body.data.breakdown.ticketSubtotalInCents).toBeGreaterThan(0);
+      expect(res2.body.data.breakdown.buyerTotalInCents).toBe(res2.body.data.totalInCents);
 
       createSpy.mockRestore();
       retrieveSpy.mockRestore();

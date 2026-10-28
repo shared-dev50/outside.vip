@@ -142,10 +142,7 @@ export async function createCheckoutSession(
             totalInCents: existingOrder.totalInCents,
             currency: existingOrder.currency,
             expiresAt: existingOrder.expiresAt.toISOString(),
-            breakdown: calculateCheckoutFeeBreakdown(
-              existingOrder.organizerNetInCents,
-              existingOrder.items.reduce((acc, it) => acc + it.quantity, 0)
-            ),
+            breakdown: calculateCheckoutFeeBreakdown(existingOrder.items),
           };
         }
       } catch {

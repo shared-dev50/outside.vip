@@ -157,6 +157,8 @@ export async function getOrderByOrderNumber(
           customerPhone: order.customerPhone,
           totalInCents: order.totalInCents,
           currency: order.currency,
+          platformFeeInCents: order.platformFeeInCents,
+          organizerNetInCents: order.organizerNetInCents,
           createdAt: order.createdAt,
           expiresAt: order.expiresAt,
           event: order.event,

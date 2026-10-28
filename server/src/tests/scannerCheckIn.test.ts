@@ -283,6 +283,31 @@ describe('Organizer Check-In & Scanner Validation API', () => {
       expect(res.body.error.code).toBe('CANCELLED_TICKET');
     });
 
+    it('returns 400 CANCELLED_TICKET when parent order has been refunded', async () => {
+      const refundedOrderTicket = {
+        ...mockTicketSavannah,
+        order: {
+          ...mockTicketSavannah.order,
+          status: 'REFUNDED',
+        },
+      };
+
+      vi.spyOn(prisma.ticket, 'findUnique').mockResolvedValue(refundedOrderTicket as any);
+      vi.spyOn(prisma.checkInLog, 'create').mockResolvedValue({} as any);
+
+      const res = await request(app)
+        .post('/api/organizer/check-in')
+        .set('Authorization', `Bearer ${organizerToken}`)
+        .send({
+          token: 'tkt_sec_9kTftYU2E7CA5k2CIdOZxd56',
+          eventId: 'savannah-cinema-vinyl-under-stars',
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error.code).toBe('CANCELLED_TICKET');
+      expect(res.body.error.message).toContain('cancelled or refunded');
+    });
+
     it('returns 400 UNPAID_ORDER when ticket order is not completed', async () => {
       const unpaidTicket = {
         ...mockTicketSavannah,
