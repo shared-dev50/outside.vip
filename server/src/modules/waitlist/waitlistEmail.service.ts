@@ -37,7 +37,6 @@ export function resetSentWaitlistEmails(): void {
 /**
  * Sends a ticket waitlist offer notification to the customer.
  * Uses the configured EMAIL_FROM address and formats a clean, branded email.
- * Safe to call: handles failures gracefully without crashing transaction caller.
  */
 export async function sendWaitlistOfferEmail(
   payload: WaitlistOfferEmailPayload
