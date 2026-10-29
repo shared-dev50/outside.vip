@@ -55,6 +55,12 @@ export const updateEventSchema = createEventSchema.partial().extend({
   ).optional(),
 });
 
+export const verifyEventPasswordSchema = z.object({
+  password: z.string().min(1, 'Password is required'),
+});
+
 export type ListEventsQuery = z.infer<typeof listEventsQuerySchema>;
 export type CreateEventInput = z.infer<typeof createEventSchema>;
 export type UpdateEventInput = z.infer<typeof updateEventSchema>;
+export type VerifyEventPasswordInput = z.infer<typeof verifyEventPasswordSchema>;
+

@@ -10,6 +10,7 @@ import { CreateEventPage } from './pages/CreateEventPage';
 import { EventPreviewPage } from './pages/EventPreviewPage';
 import { ScannerPage } from './pages/ScannerPage';
 import { OrderConfirmationPage } from './pages/OrderConfirmationPage';
+import { FinanceOrganizationPage } from './pages/FinanceOrganizationPage';
 
 export const App: React.FC = () => {
   const location = useLocation();
@@ -35,6 +36,7 @@ export const App: React.FC = () => {
           <Route path="/organizer/events/new" element={<CreateEventPage />} />
           <Route path="/organizer/events/:id/edit" element={<CreateEventPage />} />
           <Route path="/organizer/events/:id/preview" element={<EventPreviewPage />} />
+          <Route path="/organizer/finance" element={<FinanceOrganizationPage />} />
           <Route path="/scanner" element={<ScannerPage />} />
           <Route path="/orders/:orderNumber" element={<OrderConfirmationPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />

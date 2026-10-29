@@ -28,7 +28,7 @@ describe('Outside.vip Server API Endpoints', () => {
   });
 
   it('GET /api/events with category and sortBy should filter and sort correctly', async () => {
-    const res = await request(app).get('/api/events?category=FESTIVAL&sortBy=price_asc');
+    const res = await request(app).get('/api/events?category=FESTIVAL&timeFilter=all&sortBy=price_asc');
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
     expect(res.body.data.events.length).toBeGreaterThan(0);

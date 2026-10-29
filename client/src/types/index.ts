@@ -12,6 +12,49 @@ export type EventCategory =
 
 export type EventStatus = 'DRAFT' | 'PUBLISHED' | 'ARCHIVED' | 'CANCELLED';
 
+export type RecurrenceFrequency = 'DAILY' | 'WEEKLY' | 'MONTHLY';
+
+export interface RecurrenceRule {
+  frequency: RecurrenceFrequency;
+  interval: number;
+  byWeekday?: number[];
+  endDate?: string | null;
+  count?: number | null;
+}
+
+export interface EventSeriesSummary {
+  id: string;
+  title: string;
+  frequency: RecurrenceFrequency;
+  interval: number;
+  byWeekday?: number[];
+  startDate?: string;
+  endDate?: string | null;
+  count?: number | null;
+  timezone?: string;
+  occurrencesCount?: number;
+  events?: Array<{
+    id: string;
+    slug: string;
+    occurrenceIndex?: number | null;
+    startAt: string;
+    endAt: string;
+    status?: string;
+    isCustomized?: boolean;
+  }>;
+  occurrences?: Array<{
+    id: string;
+    slug: string;
+    occurrenceIndex?: number | null;
+    startAt: string;
+    endAt: string;
+    status?: string;
+    isCustomized?: boolean;
+    totalCapacity?: number;
+    ticketsSold?: number;
+  }>;
+}
+
 export type TicketTierStatus = 'ACTIVE' | 'PAUSED' | 'SOLD_OUT' | 'HIDDEN';
 
 export type OrderStatus = 'PENDING' | 'COMPLETED' | 'CANCELLED' | 'EXPIRED' | 'REFUNDED';
@@ -62,6 +105,30 @@ export interface TicketTier {
   salesEndAt?: string | null;
   status: TicketTierStatus;
   isAvailable?: boolean;
+  waitlistEnabled?: boolean;
+  waitlistWaitingCount?: number;
+  waitlistOfferedCount?: number;
+}
+
+export type EventFeatureType = 'PERFORMER' | 'SPONSOR' | 'SPEAKER' | 'HOST' | 'OTHER';
+
+export interface EventGalleryImage {
+  id?: string;
+  eventId?: string;
+  imageUrl: string;
+  publicId?: string | null;
+  displayOrder: number;
+}
+
+export interface EventFeature {
+  id?: string;
+  eventId?: string;
+  name: string;
+  type: EventFeatureType;
+  imageUrl?: string | null;
+  imagePublicId?: string | null;
+  description?: string | null;
+  displayOrder: number;
 }
 
 export interface Event {
@@ -102,8 +169,21 @@ export interface Event {
   ageRestriction?: string | null;
   dressCode?: string | null;
   isFeatured: boolean;
+  showOnExplore?: boolean;
+  hideGuestCount?: boolean;
+  guestCount?: number | null;
+  isPasswordProtected?: boolean;
+  hasAccess?: boolean;
+  youtubeVideoId?: string | null;
+  youtubeVideoUrl?: string | null;
+  galleryImages?: EventGalleryImage[];
+  features?: EventFeature[];
   ticketTiers: TicketTier[];
   payoutDetails?: OrganizerPayoutDetails | null;
+  seriesId?: string | null;
+  occurrenceIndex?: number | null;
+  isCustomized?: boolean;
+  series?: EventSeriesSummary | null;
   minPriceInCents?: number;
   currency?: string;
   isSoldOut?: boolean;
@@ -211,6 +291,103 @@ export interface CheckoutSessionInput {
   customerName: string;
   customerPhone?: string;
   idempotencyKey?: string;
+  eventAccessToken?: string;
+  offerToken?: string;
+}
+
+export type WaitlistEntryStatus =
+  | 'WAITING'
+  | 'OFFERED'
+  | 'PURCHASED'
+  | 'EXPIRED'
+  | 'DECLINED'
+  | 'CANCELLED';
+
+export type WaitlistOfferStatus =
+  | 'PENDING'
+  | 'ACCEPTED'
+  | 'EXPIRED'
+  | 'DECLINED'
+  | 'CANCELLED';
+
+export interface WaitlistOfferInfo {
+  token: string;
+  ticketTierId: string;
+  tierName: string;
+  quantity: number;
+  unitPriceInCents: number;
+  totalInCents: number;
+  currency: string;
+  status: WaitlistOfferStatus;
+  expiresAt: string;
+  event: {
+    id: string;
+    slug: string;
+    title: string;
+    startAt: string;
+    venueName?: string | null;
+  };
+  customerName: string;
+  customerEmail: string;
+}
+
+export interface JoinWaitlistInput {
+  ticketTierId: string;
+  customerName: string;
+  customerEmail: string;
+  customerPhone?: string;
+  quantity: number;
+}
+
+export interface JoinWaitlistResult {
+  entry: {
+    id: string;
+    ticketTierId: string;
+    customerName: string;
+    customerEmail: string;
+    quantity: number;
+    status: WaitlistEntryStatus;
+    position: number;
+  };
+  message: string;
+}
+
+export interface OrganizerWaitlistEntry {
+  id: string;
+  customerName: string;
+  customerEmail: string;
+  customerPhone?: string | null;
+  quantity: number;
+  status: WaitlistEntryStatus;
+  createdAt: string;
+  ticketTier: {
+    id: string;
+    name: string;
+    priceInCents: number;
+  };
+  offers: Array<{
+    id: string;
+    status: WaitlistOfferStatus;
+    expiresAt: string;
+    createdAt: string;
+  }>;
+}
+
+export interface OrganizerWaitlistResponse {
+  entries: OrganizerWaitlistEntry[];
+  tierSummaries: Array<{
+    tierId: string;
+    tierName: string;
+    waitlistEnabled: boolean;
+    totalCapacity: number;
+    soldQuantity: number;
+    reservedQuantity: number;
+    waitingCount: number;
+    offeredCount: number;
+    purchasedCount: number;
+    expiredCount: number;
+    declinedCount: number;
+  }>;
 }
 
 export interface CheckoutSessionResult {

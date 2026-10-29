@@ -1,10 +1,12 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../lib/api';
-import { TicketTier, CheckoutSessionResult } from '../types';
+import { TicketTier, CheckoutSessionResult, WaitlistOfferInfo } from '../types';
 import { CheckoutDialog } from '../components/events/CheckoutDialog';
+import { JoinWaitlistDialog } from '../components/events/JoinWaitlistDialog';
 import { calculateCheckoutFeeBreakdown } from '../lib/fees';
+import { getYouTubeEmbedUrl } from '../lib/youtube';
 import { 
   Calendar, 
   MapPin, 
@@ -14,11 +16,31 @@ import {
   ExternalLink,
   Share2,
   Check,
-  AlertCircle
+  AlertCircle,
+  Lock,
+  Eye,
+  EyeOff,
+  Users,
+  Sparkles,
+  Image as ImageIcon,
+  Clock,
+  X
 } from 'lucide-react';
 
 export const EventDetailPage: React.FC = () => {
   const { slug } = useParams<{ slug: string }>();
+  const [eventAccessToken, setEventAccessToken] = useState<string | null>(() => {
+    if (typeof window !== 'undefined' && slug) {
+      return sessionStorage.getItem(`outside_event_token_${slug}`);
+    }
+    return null;
+  });
+  const [passwordInput, setPasswordInput] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [isVerifyingPassword, setIsVerifyingPassword] = useState(false);
+  const [passwordError, setPasswordError] = useState<string | null>(null);
+  const [activeGalleryModalImage, setActiveGalleryModalImage] = useState<string | null>(null);
+
   const [selectedQuantities, setSelectedQuantities] = useState<Record<string, number>>({});
   const [attendeeName, setAttendeeName] = useState('');
   const [attendeeEmail, setAttendeeEmail] = useState('');
@@ -33,14 +55,92 @@ export const EventDetailPage: React.FC = () => {
   const [paymentSession, setPaymentSession] = useState<CheckoutSessionResult | null>(null);
   const [sessionSnapshotKey, setSessionSnapshotKey] = useState<string | null>(null);
 
-  // Fetch event details by slug
+  // Waitlist Registration Modal
+  const [waitlistModalTier, setWaitlistModalTier] = useState<TicketTier | null>(null);
+
+  // Timed Waitlist Purchase Offer State
+  const [offerTokenParam] = useState<string | null>(() => {
+    if (typeof window !== 'undefined') {
+      const sp = new URLSearchParams(window.location.search);
+      return sp.get('offerToken') || sp.get('waitlistToken');
+    }
+    return null;
+  });
+  const [offerInfo, setOfferInfo] = useState<WaitlistOfferInfo | null>(null);
+  const [offerError, setOfferError] = useState<string | null>(null);
+  const [offerSecondsRemaining, setOfferSecondsRemaining] = useState<number | null>(null);
+  const [isDecliningOffer, setIsDecliningOffer] = useState(false);
+  const [offerDeclinedMessage, setOfferDeclinedMessage] = useState<string | null>(null);
+
+  // Fetch event details by slug (passing eventAccessToken header if authenticated)
   const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ['event', slug],
-    queryFn: () => api.events.bySlug(slug!),
+    queryKey: ['event', slug, eventAccessToken],
+    queryFn: () => api.events.bySlug(slug!, eventAccessToken || undefined),
     enabled: Boolean(slug),
   });
 
   const event = data?.event;
+
+  // Retrieve Waitlist Offer on Mount if offer token exists in URL
+  useEffect(() => {
+    if (!offerTokenParam) return;
+    let isMounted = true;
+    api.waitlist
+      .lookupOffer(offerTokenParam)
+      .then((res) => {
+        if (!isMounted) return;
+        setOfferInfo(res.offer);
+        if (res.offer.customerName) setAttendeeName(res.offer.customerName);
+        if (res.offer.customerEmail) setAttendeeEmail(res.offer.customerEmail);
+        setSelectedQuantities({ [res.offer.ticketTierId]: res.offer.quantity });
+        const remaining = Math.max(0, Math.floor((new Date(res.offer.expiresAt).getTime() - Date.now()) / 1000));
+        setOfferSecondsRemaining(remaining);
+      })
+      .catch((err) => {
+        if (!isMounted) return;
+        setOfferError(err.message || 'Waitlist offer is invalid or has expired.');
+      });
+    return () => {
+      isMounted = false;
+    };
+  }, [offerTokenParam]);
+
+  // Live Countdown Ticker for Waitlist Offer Expiry
+  useEffect(() => {
+    if (offerSecondsRemaining === null || offerSecondsRemaining <= 0) return;
+    const timer = setInterval(() => {
+      setOfferSecondsRemaining((prev) => {
+        if (prev === null || prev <= 1) {
+          clearInterval(timer);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [offerSecondsRemaining]);
+
+  const handleDeclineOffer = async () => {
+    if (!offerTokenParam || isDecliningOffer) return;
+    setIsDecliningOffer(true);
+    try {
+      const res = await api.waitlist.declineOffer(offerTokenParam);
+      setOfferDeclinedMessage(res.message || 'You have declined this waitlist offer. The tickets have been released to the next person.');
+      setOfferInfo(null);
+      setSelectedQuantities({});
+      refetch();
+    } catch (err: any) {
+      setOfferError(err.message || 'Failed to decline offer.');
+    } finally {
+      setIsDecliningOffer(false);
+    }
+  };
+
+  const formatCountdown = (seconds: number) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
+  };
 
   const updateQuantity = (tierId: string, delta: number, max: number) => {
     if (isReserving) return;
@@ -116,6 +216,30 @@ export const EventDetailPage: React.FC = () => {
     }
   };
 
+  const handleVerifyPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!passwordInput.trim()) {
+      setPasswordError('Please enter the event password.');
+      return;
+    }
+    setIsVerifyingPassword(true);
+    setPasswordError(null);
+    try {
+      const res = await api.events.verifyPassword(slug!, passwordInput.trim());
+      if (res.eventAccessToken) {
+        if (typeof window !== 'undefined') {
+          sessionStorage.setItem(`outside_event_token_${slug}`, res.eventAccessToken);
+        }
+        setEventAccessToken(res.eventAccessToken);
+        refetch();
+      }
+    } catch (err: any) {
+      setPasswordError(err.message || 'Incorrect password. Access denied.');
+    } finally {
+      setIsVerifyingPassword(false);
+    }
+  };
+
   const handleProceedToCheckout = async (e: React.FormEvent) => {
     e.preventDefault();
     setCheckoutError(null);
@@ -185,12 +309,16 @@ export const EventDetailPage: React.FC = () => {
         .filter(([_, qty]) => qty > 0)
         .map(([ticketTierId, quantity]) => ({ ticketTierId, quantity }));
 
+      const isOfferActive = Boolean(offerInfo && (offerSecondsRemaining ?? 0) > 0);
+
       const res = await api.checkout.createSession({
         eventId: event.id,
         items,
         customerEmail: trimmedEmail,
         customerName: trimmedName,
         customerPhone: attendeePhone.trim() || undefined,
+        eventAccessToken: eventAccessToken || undefined,
+        offerToken: isOfferActive ? offerInfo!.token : undefined,
       });
 
       if (res.clientSecret) {
@@ -269,6 +397,118 @@ export const EventDetailPage: React.FC = () => {
     );
   }
 
+  // 3. Password Protected Event Gate
+  if (event.isPasswordProtected && !event.hasAccess) {
+    return (
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8 bg-white min-h-[70vh]">
+        {/* Top Back Navigation */}
+        <div className="flex items-center justify-between text-xs">
+          <Link
+            to="/events"
+            className="inline-flex items-center gap-1.5 text-gray-500 hover:text-gray-900 transition-colors font-medium"
+          >
+            <ArrowLeft className="w-3.5 h-3.5" />
+            <span>Discover events</span>
+          </Link>
+        </div>
+
+        <div className="max-w-xl mx-auto space-y-6 pt-4">
+          {/* Teaser Header with Cover Image */}
+          <div className="relative aspect-[16/10] rounded-xl overflow-hidden bg-stone-900 border border-stone-200 shadow-md">
+            <img
+              src={event.coverImageUrl}
+              alt={event.title}
+              className="w-full h-full object-cover filter blur-[2px] brightness-75 scale-105"
+            />
+            <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/40 to-transparent flex flex-col justify-end p-6 text-white space-y-1.5">
+              <div className="flex items-center gap-2">
+                <span className="px-2.5 py-0.5 rounded bg-amber-600 text-white font-mono text-[10px] font-bold uppercase flex items-center gap-1">
+                  <Lock className="w-3 h-3" />
+                  <span>Private Access</span>
+                </span>
+                <span className="text-stone-300 font-mono text-xs">
+                  {event.city}, {event.country}
+                </span>
+              </div>
+              <h1 className="font-display font-black text-2xl sm:text-3xl uppercase tracking-tight text-white leading-tight">
+                {event.title}
+              </h1>
+              {event.tagline && (
+                <p className="text-stone-300 text-xs sm:text-sm line-clamp-2">{event.tagline}</p>
+              )}
+            </div>
+          </div>
+
+          {/* Password Entry Card */}
+          <div className="bg-[#FAF8F5] border border-stone-200 rounded-xl p-6 sm:p-8 space-y-5 text-center shadow-xs">
+            <div className="w-12 h-12 rounded-full bg-amber-100 border border-amber-200 text-amber-800 flex items-center justify-center mx-auto shadow-2xs">
+              <Lock className="w-6 h-6" />
+            </div>
+
+            <div className="space-y-1.5">
+              <h2 className="font-display font-black text-xl text-stone-900 uppercase tracking-tight">
+                Password Protected Event
+              </h2>
+              <p className="text-xs text-stone-600 font-sans max-w-md mx-auto">
+                This experience is private. Please enter the access password provided by the host to unlock full event details, lineup, and ticket registration.
+              </p>
+            </div>
+
+            <form onSubmit={handleVerifyPassword} className="space-y-4 max-w-sm mx-auto text-left">
+              <div>
+                <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5">
+                  Access Password
+                </label>
+                <div className="relative">
+                  <input
+                    type={showPassword ? 'text' : 'password'}
+                    placeholder="Enter password..."
+                    value={passwordInput}
+                    onChange={(e) => {
+                      setPasswordInput(e.target.value);
+                      if (passwordError) setPasswordError(null);
+                    }}
+                    autoFocus
+                    className="w-full px-3.5 py-2.5 rounded-lg bg-white border border-stone-300 text-stone-900 placeholder-stone-400 text-sm font-mono focus:outline-none focus:border-stone-900 transition-colors pr-10"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-stone-500 hover:text-stone-800 p-1"
+                  >
+                    {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+              </div>
+
+              {passwordError && (
+                <div className="p-3 rounded-lg bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4 shrink-0" />
+                  <span>{passwordError}</span>
+                </div>
+              )}
+
+              <button
+                type="submit"
+                disabled={isVerifyingPassword || !passwordInput.trim()}
+                className="w-full py-2.5 rounded-lg bg-stone-900 hover:bg-black text-white font-mono text-xs font-bold uppercase tracking-wider transition-colors disabled:opacity-50 flex items-center justify-center gap-2 shadow-2xs"
+              >
+                {isVerifyingPassword ? (
+                  <>
+                    <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                    <span>Verifying...</span>
+                  </>
+                ) : (
+                  <span>Unlock Event</span>
+                )}
+              </button>
+            </form>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   const mapSearchUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
     `${event.venueName}, ${event.venueAddress}, ${event.city}`
   )}`;
@@ -340,7 +580,8 @@ export const EventDetailPage: React.FC = () => {
           </div>
 
           {/* Key Details Row: Date, Time & Venue */}
-          <div className="p-4 rounded-lg bg-gray-50 border border-gray-200 grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
+          {/* Key Details Row: Date, Time & Venue */}
+          <div className={`p-4 rounded-lg bg-gray-50 border border-gray-200 grid grid-cols-1 ${!event.hideGuestCount && typeof event.guestCount === 'number' && event.guestCount > 0 ? 'sm:grid-cols-3' : 'sm:grid-cols-2'} gap-4 text-xs`}>
             {/* Date & Time */}
             <div className="space-y-1">
               <div className="text-gray-400 font-medium flex items-center gap-1.5 uppercase tracking-wider text-[11px]">
@@ -385,6 +626,22 @@ export const EventDetailPage: React.FC = () => {
                 {event.venueAddress}, {event.city}
               </div>
             </div>
+
+            {/* Verified Attendees (if not hidden) */}
+            {!event.hideGuestCount && typeof event.guestCount === 'number' && event.guestCount > 0 && (
+              <div className="space-y-1">
+                <div className="text-gray-400 font-medium flex items-center gap-1.5 uppercase tracking-wider text-[11px]">
+                  <Users className="w-3.5 h-3.5" />
+                  <span>Guests Going</span>
+                </div>
+                <div className="font-semibold text-gray-900 text-sm">
+                  {event.guestCount.toLocaleString()} {event.guestCount === 1 ? 'Guest' : 'Guests'}
+                </div>
+                <div className="text-gray-500">
+                  Confirmed attendance
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Organizer Card */}
@@ -446,6 +703,97 @@ export const EventDetailPage: React.FC = () => {
               Please have a digital or printed pass ready at the gate. Valid photo ID matching attendee name may be requested.
             </p>
           </div>
+
+          {/* Event Features Section (Performers, Sponsors, Speakers, Hosts, Others) */}
+          {event.features && event.features.length > 0 && (
+            <div className="space-y-4 pt-4 border-t border-gray-100">
+              <div className="flex items-center gap-2">
+                <Sparkles className="w-4 h-4 text-gray-900" />
+                <h2 className="font-bold text-lg text-gray-900">Lineup & Features</h2>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {event.features.map((feature, idx) => (
+                  <div
+                    key={feature.id || feature.name + idx}
+                    className="p-3.5 rounded-xl border border-gray-200 bg-gray-50/70 hover:bg-gray-50 transition-colors flex items-start gap-3"
+                  >
+                    {feature.imageUrl ? (
+                      <img
+                        src={feature.imageUrl}
+                        alt={feature.name}
+                        className="w-12 h-12 rounded-full object-cover border border-gray-300 shrink-0"
+                      />
+                    ) : (
+                      <div className="w-12 h-12 rounded-full bg-stone-900 text-white flex items-center justify-center font-display font-bold text-sm shrink-0">
+                        {feature.name.charAt(0).toUpperCase()}
+                      </div>
+                    )}
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="font-bold text-gray-900 text-sm">{feature.name}</span>
+                        <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase bg-white border border-gray-200 text-gray-700">
+                          {feature.type}
+                        </span>
+                      </div>
+                      {feature.description && (
+                        <p className="text-gray-500 text-xs mt-1 leading-relaxed">{feature.description}</p>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Featured Video (YouTube) */}
+          {event.youtubeVideoId && (
+            <div className="space-y-3 pt-4 border-t border-gray-100">
+              <h2 className="font-bold text-lg text-gray-900">Featured Video</h2>
+              <div className="aspect-video rounded-xl overflow-hidden border border-gray-200 bg-black shadow-xs">
+                <iframe
+                  src={getYouTubeEmbedUrl(event.youtubeVideoId)}
+                  title={`${event.title} video`}
+                  className="w-full h-full border-0"
+                  allow="accelerometer; encrypted-media; gyroscope; picture-in-picture"
+                  allowFullScreen
+                />
+              </div>
+            </div>
+          )}
+
+          {/* Event Gallery */}
+          {event.galleryImages && event.galleryImages.length > 0 && (
+            <div className="space-y-3 pt-4 border-t border-gray-100">
+              <div className="flex items-center justify-between">
+                <h2 className="font-bold text-lg text-gray-900 flex items-center gap-2">
+                  <ImageIcon className="w-4 h-4 text-gray-900" />
+                  <span>Event Gallery</span>
+                </h2>
+                <span className="text-xs font-mono text-gray-500">
+                  {event.galleryImages.length} {event.galleryImages.length === 1 ? 'photo' : 'photos'}
+                </span>
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                {event.galleryImages.map((img, idx) => (
+                  <button
+                    key={img.id || img.imageUrl + idx}
+                    type="button"
+                    onClick={() => setActiveGalleryModalImage(img.imageUrl)}
+                    className="group aspect-[4/3] rounded-lg overflow-hidden border border-gray-200 bg-gray-100 relative focus:outline-none focus:ring-2 focus:ring-black cursor-pointer text-left"
+                  >
+                    <img
+                      src={img.imageUrl}
+                      alt={`Gallery photo ${idx + 1}`}
+                      className="w-full h-full object-cover transition-transform group-hover:scale-105 duration-300"
+                    />
+                    <div className="absolute inset-0 bg-black/0 group-hover:bg-black/20 transition-colors" />
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Right Column: Ticket Purchase Panel */}
@@ -455,6 +803,76 @@ export const EventDetailPage: React.FC = () => {
               <h2 className="font-bold text-lg text-gray-900">Tickets</h2>
               <span className="text-xs text-gray-500">Official passes</span>
             </div>
+
+            {/* Active Waitlist Offer Banner */}
+            {offerInfo && (offerSecondsRemaining ?? 0) > 0 && (
+              <div className="p-4 rounded-xl bg-amber-500/10 border-2 border-amber-500 text-stone-900 space-y-3 shadow-xs">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex items-start gap-2.5">
+                    <Sparkles className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+                    <div>
+                      <h3 className="font-display font-bold text-sm uppercase text-amber-950">
+                        Exclusive Waitlist Ticket Offer
+                      </h3>
+                      <p className="text-xs text-amber-900 leading-snug">
+                        {offerInfo.quantity}x <strong>{offerInfo.tierName}</strong> pass(es) reserved for {offerInfo.customerName}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-amber-600 text-white font-mono text-xs font-bold shrink-0 shadow-2xs">
+                    <Clock className="w-3.5 h-3.5" />
+                    <span>{formatCountdown(offerSecondsRemaining ?? 0)}</span>
+                  </div>
+                </div>
+                <div className="flex items-center justify-between text-xs text-amber-950 pt-2 border-t border-amber-200">
+                  <span>
+                    Total: <strong>{formatPrice(offerInfo.totalInCents, offerInfo.currency)}</strong>
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={handleDeclineOffer}
+                      disabled={isDecliningOffer}
+                      className="px-3 py-1.5 rounded-lg border border-amber-300 text-amber-900 hover:bg-amber-100 text-xs font-medium transition-colors cursor-pointer"
+                    >
+                      {isDecliningOffer ? 'Declining...' : 'Decline Offer'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleProceedToCheckout}
+                      disabled={isReserving}
+                      className="px-4 py-1.5 rounded-lg bg-stone-900 hover:bg-black text-white text-xs font-bold transition-colors cursor-pointer"
+                    >
+                      {isReserving ? 'Reserving...' : 'Claim & Checkout'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Expired or Invalid Offer Banner */}
+            {offerTokenParam && ((offerSecondsRemaining !== null && offerSecondsRemaining <= 0) || offerError) && (
+              <div className="p-3.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-start gap-2.5">
+                <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                <div>
+                  <div className="font-bold">Waitlist Offer Unavailable</div>
+                  <p className="mt-0.5 text-rose-700 leading-relaxed">
+                    {offerError || 'Your purchase window has expired. The reserved tickets have been released to the next eligible person in queue.'}
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {/* Declined Offer Message */}
+            {offerDeclinedMessage && (
+              <div className="p-3.5 rounded-xl bg-stone-100 border border-stone-300 text-stone-800 text-xs flex items-start gap-2.5">
+                <Check className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                <div>
+                  <div className="font-bold">Offer Declined</div>
+                  <p className="mt-0.5 text-stone-600 leading-relaxed">{offerDeclinedMessage}</p>
+                </div>
+              </div>
+            )}
 
             {/* Ticket Tier List */}
             <div className="space-y-3">
@@ -469,7 +887,9 @@ export const EventDetailPage: React.FC = () => {
                       qty > 0
                         ? 'bg-gray-50 border-gray-900'
                         : isSoldOut
-                        ? 'bg-gray-50/60 border-gray-200 opacity-60'
+                        ? tier.waitlistEnabled
+                          ? 'bg-amber-50/20 border-amber-200/60'
+                          : 'bg-gray-50/60 border-gray-200 opacity-60'
                         : 'border-gray-200 hover:border-gray-300'
                     }`}
                   >
@@ -497,14 +917,14 @@ export const EventDetailPage: React.FC = () => {
                         </div>
                       </div>
 
-                      {/* Quantity Stepper */}
+                      {/* Quantity Stepper or Join Waitlist */}
                       {!isSoldOut ? (
                         <div className="flex items-center gap-1.5 bg-gray-50 border border-gray-200 rounded-md p-1 shrink-0">
                           <button
                             type="button"
                             onClick={() => updateQuantity(tier.id, -1, tier.maxPerOrder)}
                             disabled={qty === 0 || isReserving}
-                            className="w-6 h-6 rounded flex items-center justify-center text-gray-600 hover:text-black hover:bg-gray-200 disabled:opacity-20"
+                            className="w-6 h-6 rounded flex items-center justify-center text-gray-600 hover:text-black hover:bg-gray-200 disabled:opacity-20 cursor-pointer"
                             aria-label={`Decrease ${tier.name}`}
                           >
                             <Minus className="w-3 h-3" />
@@ -516,12 +936,21 @@ export const EventDetailPage: React.FC = () => {
                             type="button"
                             onClick={() => updateQuantity(tier.id, 1, Math.min(tier.maxPerOrder, tier.remainingCapacity || 10))}
                             disabled={isReserving || qty >= (tier.remainingCapacity || tier.maxPerOrder)}
-                            className="w-6 h-6 rounded flex items-center justify-center text-gray-600 hover:text-black hover:bg-gray-200 disabled:opacity-20"
+                            className="w-6 h-6 rounded flex items-center justify-center text-gray-600 hover:text-black hover:bg-gray-200 disabled:opacity-20 cursor-pointer"
                             aria-label={`Increase ${tier.name}`}
                           >
                             <Plus className="w-3 h-3" />
                           </button>
                         </div>
+                      ) : tier.waitlistEnabled ? (
+                        <button
+                          type="button"
+                          onClick={() => setWaitlistModalTier(tier)}
+                          className="px-3 py-1.5 rounded-lg bg-stone-900 hover:bg-black text-white text-xs font-bold flex items-center gap-1.5 shrink-0 transition-colors shadow-2xs cursor-pointer"
+                        >
+                          <Clock className="w-3.5 h-3.5 text-amber-400" />
+                          <span>Join waitlist</span>
+                        </button>
                       ) : null}
                     </div>
                   </div>
@@ -699,6 +1128,43 @@ export const EventDetailPage: React.FC = () => {
           formatPrice={formatPrice}
           onSessionExpired={handleSessionExpired}
         />
+      )}
+
+      {/* Join Waitlist Modal */}
+      {waitlistModalTier && event && (
+        <JoinWaitlistDialog
+          isOpen={Boolean(waitlistModalTier)}
+          onClose={() => setWaitlistModalTier(null)}
+          tier={waitlistModalTier}
+          eventSlug={event.slug}
+          initialName={attendeeName}
+          initialEmail={attendeeEmail}
+          initialPhone={attendeePhone}
+          formatPrice={formatPrice}
+        />
+      )}
+
+      {/* Gallery Lightbox Modal */}
+      {activeGalleryModalImage && (
+        <div
+          className="fixed inset-0 z-50 bg-black/90 flex items-center justify-center p-4 backdrop-blur-xs"
+          onClick={() => setActiveGalleryModalImage(null)}
+        >
+          <div className="relative max-w-4xl max-h-[90vh]" onClick={(e) => e.stopPropagation()}>
+            <button
+              type="button"
+              onClick={() => setActiveGalleryModalImage(null)}
+              className="absolute -top-10 right-0 text-white hover:text-stone-300 p-1 cursor-pointer"
+            >
+              <X className="w-6 h-6" />
+            </button>
+            <img
+              src={activeGalleryModalImage}
+              alt="Enlarged gallery photo"
+              className="max-h-[85vh] max-w-full rounded-lg object-contain"
+            />
+          </div>
+        </div>
       )}
     </div>
   );

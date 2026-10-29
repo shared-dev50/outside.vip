@@ -35,6 +35,37 @@ enum EventStatus {
   CANCELLED
 }
 
+enum RecurrenceFrequency {
+  DAILY
+  WEEKLY
+  MONTHLY
+}
+
+enum EventFeatureType {
+  PERFORMER
+  SPONSOR
+  SPEAKER
+  HOST
+  OTHER
+}
+
+enum WaitlistEntryStatus {
+  WAITING
+  OFFERED
+  PURCHASED
+  EXPIRED
+  DECLINED
+  CANCELLED
+}
+
+enum WaitlistOfferStatus {
+  PENDING
+  ACCEPTED
+  EXPIRED
+  DECLINED
+  CANCELLED
+}
+
 enum TicketTierStatus {
   ACTIVE
   PAUSED
@@ -97,6 +128,7 @@ model User {
   organizer    OrganizerProfile?
   payoutDetails OrganizerPayoutDetails?
   events       Event[]           @relation("OrganizerEvents")
+  eventSeries  EventSeries[]     @relation("OrganizerSeries")
   orders       Order[]
   checkIns     CheckInLog[]      @relation("ScannerLogs")
   ticketsScanned Ticket[]        @relation("ScannerTickets")
@@ -149,6 +181,14 @@ model Event {
   dressCode      String?
   isFeatured     Boolean       @default(false)
   
+  // Presentation, media & privacy settings
+  youtubeVideoId      String?
+  youtubeVideoUrl     String?
+  showOnExplore       Boolean       @default(true)
+  hideGuestCount      Boolean       @default(false)
+  isPasswordProtected Boolean       @default(false)
+  passwordHash        String?
+  
   createdAt      DateTime      @default(now())
   updatedAt      DateTime      @updatedAt
 
@@ -156,14 +196,79 @@ model Event {
   orders         Order[]
   tickets        Ticket[]
   checkInLogs    CheckInLog[]
+  galleryImages  EventGalleryImage[]
+  features       EventFeature[]
+  waitlistEntries TicketWaitlistEntry[]
+  waitlistOffers  TicketWaitlistOffer[]
   payoutDetailsId String?
   payoutDetails   OrganizerPayoutDetails? @relation(fields: [payoutDetailsId], references: [id], onDelete: SetNull)
+
+  seriesId        String?
+  series          EventSeries?  @relation("SeriesEvents", fields: [seriesId], references: [id], onDelete: SetNull)
+  occurrenceIndex Int?
+  isCustomized    Boolean       @default(false)
 
   @@index([slug])
   @@index([category, status])
   @@index([city, status])
   @@index([startAt])
   @@index([isFeatured, status])
+  @@index([seriesId])
+  @@index([showOnExplore, status])
+}
+
+model EventSeries {
+  id                  String              @id @default(uuid())
+  organizerId         String
+  organizer           User                @relation("OrganizerSeries", fields: [organizerId], references: [id], onDelete: Restrict)
+  title               String
+  frequency           RecurrenceFrequency @default(WEEKLY)
+  interval            Int                 @default(1)
+  byWeekday           Int[]
+  startDate           DateTime
+  endDate             DateTime?
+  count               Int?
+  timezone            String              @default("Africa/Nairobi")
+  showOnExplore       Boolean             @default(true)
+  hideGuestCount      Boolean             @default(false)
+  isPasswordProtected Boolean             @default(false)
+  passwordHash        String?
+  youtubeVideoId      String?
+  youtubeVideoUrl     String?
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
+
+  events              Event[]             @relation("SeriesEvents")
+
+  @@index([organizerId])
+}
+
+model EventGalleryImage {
+  id           String   @id @default(uuid())
+  eventId      String
+  event        Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  imageUrl     String
+  publicId     String?
+  displayOrder Int      @default(0)
+  createdAt    DateTime @default(now())
+
+  @@index([eventId, displayOrder])
+}
+
+model EventFeature {
+  id            String           @id @default(uuid())
+  eventId       String
+  event         Event            @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  name          String
+  type          EventFeatureType @default(PERFORMER)
+  imageUrl      String?
+  imagePublicId String?
+  description   String?          @db.Text
+  displayOrder  Int              @default(0)
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+
+  @@index([eventId, displayOrder])
 }
 
 model TicketTier {
@@ -182,6 +287,7 @@ model TicketTier {
   salesStartAt     DateTime?
   salesEndAt       DateTime?
   status           TicketTierStatus @default(ACTIVE)
+  waitlistEnabled  Boolean          @default(false)
   
   createdAt        DateTime         @default(now())
   updatedAt        DateTime         @updatedAt
@@ -189,6 +295,8 @@ model TicketTier {
   orderItems       OrderItem[]
   tickets          Ticket[]
   reservations     TicketReservation[]
+  waitlistEntries  TicketWaitlistEntry[]
+  waitlistOffers   TicketWaitlistOffer[]
 
   @@index([eventId])
 }
@@ -240,6 +348,7 @@ model Order {
   tickets          Ticket[]
   reservations     TicketReservation[]
   transactions     PaymentTransaction[]
+  waitlistOffers   TicketWaitlistOffer[]
 
   @@index([orderNumber])
   @@index([customerEmail])
@@ -364,5 +473,53 @@ model OrganizerPayoutDetails {
   events                 Event[]
 
   @@index([userId])
+}
+
+model TicketWaitlistEntry {
+  id            String              @id @default(uuid())
+  eventId       String
+  event         Event               @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  ticketTierId  String
+  ticketTier    TicketTier          @relation(fields: [ticketTierId], references: [id], onDelete: Cascade)
+  customerName  String
+  customerEmail String
+  customerPhone String?
+  quantity      Int                 @default(1)
+  status        WaitlistEntryStatus @default(WAITING)
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+
+  offers        TicketWaitlistOffer[]
+
+  @@index([ticketTierId, status, createdAt])
+  @@index([eventId, status])
+  @@index([customerEmail])
+}
+
+model TicketWaitlistOffer {
+  id                   String              @id @default(uuid())
+  entryId              String
+  entry                TicketWaitlistEntry @relation(fields: [entryId], references: [id], onDelete: Cascade)
+  eventId              String
+  event                Event               @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  ticketTierId         String
+  ticketTier           TicketTier          @relation(fields: [ticketTierId], references: [id], onDelete: Cascade)
+  quantity             Int
+  status               WaitlistOfferStatus @default(PENDING)
+  tokenHash            String              @unique
+  expiresAt            DateTime
+  claimedAt            DateTime?
+  orderId              String?
+  order                Order?              @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  notificationSentAt   DateTime?
+  notificationAttempts Int                 @default(0)
+  notificationError    String?             @db.Text
+  createdAt            DateTime            @default(now())
+  updatedAt            DateTime            @updatedAt
+
+  @@index([ticketTierId, status, expiresAt])
+  @@index([tokenHash])
+  @@index([expiresAt, status])
+  @@index([entryId])
 }
 

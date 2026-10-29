@@ -1,8 +1,16 @@
 import { Request, Response, NextFunction } from 'express';
-import { EventStatus, Prisma } from '@prisma/client';
+import { EventStatus, OrderStatus, TicketStatus, Prisma } from '@prisma/client';
 import { prisma } from '../../db/prisma.js';
-import { listEventsQuerySchema } from './events.schema.js';
-import { NotFoundError } from '../../utils/errors.js';
+import { listEventsQuerySchema, verifyEventPasswordSchema } from './events.schema.js';
+import { NotFoundError, UnauthorizedError } from '../../utils/errors.js';
+import {
+  checkPasswordRateLimit,
+  recordFailedPasswordAttempt,
+  clearPasswordRateLimit,
+  verifyEventPasswordMatch,
+  signEventAccessToken,
+  verifyEventAccessToken,
+} from './passwordAccess.service.js';
 
 export async function listEvents(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
@@ -11,6 +19,7 @@ export async function listEvents(req: Request, res: Response, next: NextFunction
 
     const where: Prisma.EventWhereInput = {
       status: EventStatus.PUBLISHED,
+      showOnExplore: true,
     };
 
     if (search && search.trim().length > 0) {
@@ -103,8 +112,9 @@ export async function listEvents(req: Request, res: Response, next: NextFunction
       prisma.event.count({ where }),
     ]);
 
-    // Enhance events with lowest price and availability status
+    // Enhance events with lowest price and availability status, ensuring passwordHash is stripped
     let enhancedEvents = events.map((event) => {
+      const { passwordHash: _, ...eventWithoutHash } = event;
       const minPrice =
         event.ticketTiers.length > 0
           ? Math.min(...event.ticketTiers.map((t) => t.priceInCents))
@@ -116,7 +126,7 @@ export async function listEvents(req: Request, res: Response, next: NextFunction
       );
 
       return {
-        ...event,
+        ...eventWithoutHash,
         minPriceInCents: minPrice,
         currency,
         isSoldOut,
@@ -189,6 +199,52 @@ export async function getEventBySlug(req: Request, res: Response, next: NextFunc
             salesStartAt: true,
             salesEndAt: true,
             status: true,
+            waitlistEnabled: true,
+          },
+        },
+        galleryImages: {
+          orderBy: { displayOrder: 'asc' },
+          select: {
+            id: true,
+            imageUrl: true,
+            publicId: true,
+            displayOrder: true,
+          },
+        },
+        features: {
+          orderBy: { displayOrder: 'asc' },
+          select: {
+            id: true,
+            name: true,
+            type: true,
+            imageUrl: true,
+            imagePublicId: true,
+            description: true,
+            displayOrder: true,
+          },
+        },
+        series: {
+          select: {
+            id: true,
+            title: true,
+            frequency: true,
+            interval: true,
+            byWeekday: true,
+            events: {
+              where: {
+                status: EventStatus.PUBLISHED,
+                endAt: { gte: new Date() },
+              },
+              orderBy: { startAt: 'asc' },
+              take: 6,
+              select: {
+                id: true,
+                slug: true,
+                occurrenceIndex: true,
+                startAt: true,
+                endAt: true,
+              },
+            },
           },
         },
       },
@@ -196,6 +252,54 @@ export async function getEventBySlug(req: Request, res: Response, next: NextFunc
 
     if (!event) {
       throw new NotFoundError(`Event with slug '${slug}' was not found`);
+    }
+
+    // Determine access permissions
+    const accessToken =
+      (req.headers['x-event-access-token'] as string) ||
+      (req.headers.authorization?.startsWith('Bearer ')
+        ? req.headers.authorization.substring(7)
+        : undefined);
+
+    const hasTokenAccess = accessToken ? verifyEventAccessToken(accessToken, event.id) : false;
+    const isOwner = req.user && (req.user.userId === event.organizerId || req.user.role === 'ADMIN');
+    const hasAccess = !event.isPasswordProtected || hasTokenAccess || Boolean(isOwner);
+
+    // If password-protected and unauthenticated, return sanitized teaser without sensitive content
+    if (event.isPasswordProtected && !hasAccess) {
+      res.json({
+        success: true,
+        data: {
+          event: {
+            id: event.id,
+            slug: event.slug,
+            title: event.title,
+            tagline: event.tagline,
+            coverImageUrl: event.coverImageUrl,
+            thumbnailUrl: event.thumbnailUrl,
+            category: event.category,
+            city: event.city,
+            country: event.country,
+            startAt: event.startAt,
+            endAt: event.endAt,
+            timezone: event.timezone,
+            isPasswordProtected: true,
+            isLocked: true,
+            hasAccess: false,
+            organizer: event.organizer,
+            ticketTiers: [],
+            galleryImages: [],
+            features: [],
+            youtubeVideoId: null,
+            youtubeVideoUrl: null,
+            guestCount: null,
+            description: null,
+            venueName: event.venueName,
+            venueAddress: null,
+          },
+        },
+      });
+      return;
     }
 
     // Calculate available remaining tickets per tier
@@ -208,13 +312,93 @@ export async function getEventBySlug(req: Request, res: Response, next: NextFunc
       };
     });
 
+    // Compute verified attendee count if guest count is not hidden
+    let guestCount: number | null = null;
+    if (!event.hideGuestCount) {
+      guestCount = await prisma.ticket.count({
+        where: {
+          eventId: event.id,
+          status: { in: [TicketStatus.ISSUED, TicketStatus.CHECKED_IN] },
+          order: {
+            status: OrderStatus.COMPLETED,
+          },
+        },
+      });
+    }
+
+    const { passwordHash: _, ...eventWithoutHash } = event;
+
     res.json({
       success: true,
       data: {
         event: {
-          ...event,
+          ...eventWithoutHash,
+          isLocked: false,
+          hasAccess: true,
+          guestCount,
           ticketTiers: tiersWithAvailability,
         },
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function verifyEventPassword(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { slug } = req.params;
+    const { password } = verifyEventPasswordSchema.parse(req.body);
+
+    const event = await prisma.event.findUnique({
+      where: { slug },
+      select: {
+        id: true,
+        slug: true,
+        isPasswordProtected: true,
+        passwordHash: true,
+      },
+    });
+
+    if (!event) {
+      throw new NotFoundError(`Event with slug '${slug}' was not found`);
+    }
+
+    if (!event.isPasswordProtected || !event.passwordHash) {
+      res.json({
+        success: true,
+        data: {
+          hasAccess: true,
+          message: 'Event is not password protected',
+        },
+      });
+      return;
+    }
+
+    const clientIp =
+      (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() ||
+      req.socket.remoteAddress ||
+      req.ip ||
+      'unknown';
+    const rateLimitKey = `${clientIp}:${event.id}`;
+
+    checkPasswordRateLimit(rateLimitKey);
+
+    const isMatch = await verifyEventPasswordMatch(password, event.passwordHash);
+    if (!isMatch) {
+      recordFailedPasswordAttempt(rateLimitKey);
+      throw new UnauthorizedError('Incorrect password');
+    }
+
+    clearPasswordRateLimit(rateLimitKey);
+    const eventAccessToken = signEventAccessToken(event.id);
+
+    res.json({
+      success: true,
+      data: {
+        eventAccessToken,
+        eventId: event.id,
+        hasAccess: true,
       },
     });
   } catch (error) {
@@ -227,6 +411,7 @@ export async function getFeaturedEvents(_req: Request, res: Response, next: Next
     const events = await prisma.event.findMany({
       where: {
         status: EventStatus.PUBLISHED,
+        showOnExplore: true,
         isFeatured: true,
         endAt: { gte: new Date() },
       },
@@ -243,11 +428,14 @@ export async function getFeaturedEvents(_req: Request, res: Response, next: Next
       },
     });
 
-    const enhanced = events.map((e) => ({
-      ...e,
-      minPriceInCents: e.ticketTiers.length > 0 ? Math.min(...e.ticketTiers.map((t) => t.priceInCents)) : 0,
-      currency: e.ticketTiers[0]?.currency || 'USD',
-    }));
+    const enhanced = events.map((e) => {
+      const { passwordHash: _, ...clean } = e;
+      return {
+        ...clean,
+        minPriceInCents: clean.ticketTiers.length > 0 ? Math.min(...clean.ticketTiers.map((t) => t.priceInCents)) : 0,
+        currency: clean.ticketTiers[0]?.currency || 'USD',
+      };
+    });
 
     res.json({
       success: true,
@@ -261,7 +449,10 @@ export async function getFeaturedEvents(_req: Request, res: Response, next: Next
 export async function getCities(_req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const cities = await prisma.event.findMany({
-      where: { status: EventStatus.PUBLISHED },
+      where: {
+        status: EventStatus.PUBLISHED,
+        showOnExplore: true,
+      },
       select: { city: true },
       distinct: ['city'],
     });

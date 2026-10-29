@@ -18,6 +18,8 @@ export const createCheckoutSessionSchema = z.object({
   customerName: z.string().trim().min(1, 'Full name is required').max(100),
   customerPhone: z.string().trim().max(30).optional(),
   idempotencyKey: z.string().trim().max(100).optional(),
+  eventAccessToken: z.string().optional(),
+  offerToken: z.string().optional(),
 });
 
 export type CreateCheckoutSessionInput = z.infer<typeof createCheckoutSessionSchema>;

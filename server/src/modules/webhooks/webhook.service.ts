@@ -1,5 +1,5 @@
 import Stripe from 'stripe';
-import { Prisma, PaymentProvider, PaymentStatus, OrderStatus, ReservationStatus, TicketStatus } from '@prisma/client';
+import { Prisma, PaymentProvider, PaymentStatus, OrderStatus, ReservationStatus, TicketStatus, WaitlistOfferStatus, WaitlistEntryStatus } from '@prisma/client';
 import { nanoid } from 'nanoid';
 import { prisma } from '../../db/prisma.js';
 
@@ -187,6 +187,28 @@ export async function handlePaymentIntentSucceeded(
         amountInCents: paymentIntent.amount || order.totalInCents,
         currency: order.currency,
         rawResponse: paymentIntent as any,
+      },
+    });
+  }
+
+  // 6. Fulfill any linked waitlist offer idempotently
+  const linkedOffers = await tx.ticketWaitlistOffer.findMany({
+    where: { orderId: order.id },
+  });
+
+  for (const offer of linkedOffers) {
+    await tx.ticketWaitlistOffer.update({
+      where: { id: offer.id },
+      data: {
+        status: WaitlistOfferStatus.ACCEPTED,
+        claimedAt: new Date(),
+      },
+    });
+
+    await tx.ticketWaitlistEntry.update({
+      where: { id: offer.entryId },
+      data: {
+        status: WaitlistEntryStatus.PURCHASED,
       },
     });
   }

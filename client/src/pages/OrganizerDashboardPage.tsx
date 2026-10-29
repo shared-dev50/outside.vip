@@ -4,6 +4,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useAuth } from '../context/AuthContext';
 import { api } from '../lib/api';
 import { OrganizerEventItem } from '../types';
+import { OrganizerWaitlistModal } from '../components/organizer/OrganizerWaitlistModal';
 import {
   Plus,
   Calendar,
@@ -23,6 +24,7 @@ import {
   RefreshCw,
   X,
   Sparkles,
+  Building2,
 } from 'lucide-react';
 
 export const OrganizerDashboardPage: React.FC = () => {
@@ -43,6 +45,7 @@ export const OrganizerDashboardPage: React.FC = () => {
   const [notification, setNotification] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [eventToDelete, setEventToDelete] = useState<OrganizerEventItem | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [waitlistEvent, setWaitlistEvent] = useState<OrganizerEventItem | null>(null);
 
   const showNotification = (type: 'success' | 'error', message: string) => {
     setNotification({ type, message });
@@ -279,6 +282,14 @@ export const OrganizerDashboardPage: React.FC = () => {
             >
               <RefreshCw className="w-4 h-4" />
             </button>
+            <Link
+              to="/organizer/finance"
+              className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-white hover:bg-stone-100 text-stone-700 hover:text-stone-900 border border-stone-200/90 shadow-2xs font-semibold text-xs sm:text-sm font-mono transition-colors"
+              title="Finance & Organisation Settings"
+            >
+              <Building2 className="w-4 h-4 text-stone-500" />
+              <span>Finance & Org</span>
+            </Link>
             <Link
               to="/organizer/events/new"
               className="flex-1 sm:flex-none inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl bg-stone-900 hover:bg-black text-white font-semibold text-xs sm:text-sm font-mono uppercase tracking-wider transition-all duration-200 shadow-xs hover:shadow-sm"
@@ -596,6 +607,16 @@ export const OrganizerDashboardPage: React.FC = () => {
                         {/* Actions */}
                         <td className="px-6 py-4.5 align-middle text-right">
                           <div className="flex items-center justify-end gap-1.5 whitespace-nowrap">
+                            {/* View Waitlist */}
+                            <button
+                              type="button"
+                              onClick={() => setWaitlistEvent(evt)}
+                              className="p-2 rounded-lg bg-stone-100/80 hover:bg-stone-200/80 text-stone-600 hover:text-stone-900 border border-stone-200/90 transition-colors shadow-2xs cursor-pointer"
+                              title="View Event Waitlist"
+                            >
+                              <Clock className="w-3.5 h-3.5 text-amber-600" />
+                            </button>
+
                             {/* Preview Mode */}
                             <Link
                               to={`/organizer/events/${evt.id}/preview`}
@@ -712,6 +733,13 @@ export const OrganizerDashboardPage: React.FC = () => {
           </div>
         </div>
       )}
+
+      {/* Organizer Waitlist Modal */}
+      <OrganizerWaitlistModal
+        isOpen={Boolean(waitlistEvent)}
+        onClose={() => setWaitlistEvent(null)}
+        event={waitlistEvent}
+      />
     </div>
   );
 };

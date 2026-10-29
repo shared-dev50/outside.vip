@@ -121,6 +121,13 @@ export const Navbar: React.FC = () => {
                     Organizer Dashboard
                   </Link>
                   <Link
+                    to="/organizer/finance"
+                    onClick={() => setShowAccountMenu(false)}
+                    className="w-full text-left px-3 py-1.5 rounded hover:bg-stone-50 text-stone-700 block font-medium"
+                  >
+                    Finance & Organization
+                  </Link>
+                  <Link
                     to="/scanner"
                     onClick={() => setShowAccountMenu(false)}
                     className="w-full text-left px-3 py-1.5 rounded hover:bg-stone-50 text-stone-700 block font-medium"
@@ -244,6 +251,13 @@ export const Navbar: React.FC = () => {
               className="block text-stone-600 hover:text-stone-900 py-1.5"
             >
               Organizer Portal
+            </Link>
+            <Link
+              to="/organizer/finance"
+              onClick={() => setMobileMenuOpen(false)}
+              className="block text-stone-600 hover:text-stone-900 py-1.5"
+            >
+              Finance & Organization
             </Link>
             <Link
               to="/scanner"

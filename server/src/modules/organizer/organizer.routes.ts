@@ -10,6 +10,9 @@ import {
   publishEvent,
   unpublishEvent,
   deleteOrganizerEvent,
+  cancelOrganizerEvent,
+  cancelOrganizerSeries,
+  getOrganizerSeries,
   getUploadSignature,
   handleDirectUpload,
   getOrganizerPayoutDetails,
@@ -17,6 +20,7 @@ import {
   checkInTicket,
   getOrganizerEarningsPreview,
 } from './organizer.controller.js';
+import { handleGetOrganizerWaitlist } from '../waitlist/waitlist.controller.js';
 import { uploadCoverMiddleware } from '../../middleware/upload.js';
 
 export const organizerRouter = Router();
@@ -37,7 +41,11 @@ organizerRouter.put('/payout-details', updateOrganizerPayoutDetails);
 organizerRouter.get('/events', listOrganizerEvents);
 organizerRouter.post('/events', createOrganizerEvent);
 organizerRouter.get('/events/:id', getOrganizerEventById);
+organizerRouter.get('/events/:id/waitlist', handleGetOrganizerWaitlist);
 organizerRouter.put('/events/:id', updateOrganizerEvent);
 organizerRouter.post('/events/:id/publish', publishEvent);
 organizerRouter.post('/events/:id/unpublish', unpublishEvent);
+organizerRouter.post('/events/:id/cancel', cancelOrganizerEvent);
 organizerRouter.delete('/events/:id', deleteOrganizerEvent);
+organizerRouter.get('/series/:id', getOrganizerSeries);
+organizerRouter.post('/series/:id/cancel', cancelOrganizerSeries);

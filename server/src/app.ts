@@ -13,6 +13,7 @@ import { organizerRouter } from './modules/organizer/organizer.routes.js';
 import { checkoutRouter } from './modules/checkout/checkout.routes.js';
 import { webhookRouter } from './modules/webhooks/webhook.routes.js';
 import { ordersRouter } from './modules/orders/orders.routes.js';
+import { waitlistRouter } from './modules/waitlist/waitlist.routes.js';
 
 export const app = express();
 
@@ -46,6 +47,7 @@ app.use('/api/organizer', organizerRouter);
 app.use('/api/checkout', checkoutRouter);
 app.use('/api/webhooks', webhookRouter);
 app.use('/api/orders', ordersRouter);
+app.use('/api/waitlist', waitlistRouter);
 
 // Fallback 404 handler
 app.use('/api/*', (_req, res) => {

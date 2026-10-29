@@ -1,9 +1,11 @@
-import { Prisma, OrderStatus, ReservationStatus, TicketTierStatus, EventStatus } from '@prisma/client';
+import { Prisma, OrderStatus, ReservationStatus, TicketTierStatus, EventStatus, WaitlistOfferStatus, WaitlistEntryStatus } from '@prisma/client';
 import { nanoid } from 'nanoid';
 import { prisma } from '../../db/prisma.js';
 import { stripe } from '../../lib/stripe.js';
 import { env } from '../../config/env.js';
-import { BadRequestError, ConflictError, NotFoundError } from '../../utils/errors.js';
+import { BadRequestError, ConflictError, NotFoundError, ForbiddenError } from '../../utils/errors.js';
+import { verifyEventAccessToken } from '../events/passwordAccess.service.js';
+import { hashOfferToken, processWaitlistForTier } from '../waitlist/waitlist.service.js';
 import {
   calculateFinancialBreakdown,
   calculateCheckoutFeeBreakdown,
@@ -84,6 +86,36 @@ export async function releaseExpiredReservations(
     data: { status: OrderStatus.EXPIRED },
   });
 
+  // Also mark any waitlist offers attached to these expired orders as EXPIRED
+  const linkedExpiredOffers = await prismaClient.ticketWaitlistOffer.findMany({
+    where: {
+      orderId: { in: orderIds },
+      status: WaitlistOfferStatus.PENDING,
+    },
+  });
+
+  if (linkedExpiredOffers.length > 0) {
+    const offerIds = linkedExpiredOffers.map((o) => o.id);
+    const entryIds = linkedExpiredOffers.map((o) => o.entryId);
+
+    await prismaClient.ticketWaitlistOffer.updateMany({
+      where: { id: { in: offerIds } },
+      data: { status: WaitlistOfferStatus.EXPIRED },
+    });
+
+    await prismaClient.ticketWaitlistEntry.updateMany({
+      where: { id: { in: entryIds } },
+      data: { status: WaitlistEntryStatus.EXPIRED },
+    });
+  }
+
+  // Advance waitlist queue for tiers that received released inventory
+  for (const tierId of tierQuantityMap.keys()) {
+    processWaitlistForTier(tierId).catch((err) => {
+      console.error(`Error advancing waitlist after releasing reservations for tier ${tierId}:`, err);
+    });
+  }
+
   return expiredReservations.length;
 }
 
@@ -98,7 +130,7 @@ export async function createCheckoutSession(
   // 1. Release any expired holds so inventory is fresh
   await releaseExpiredReservations();
 
-  const { eventId, items, customerEmail, customerName, customerPhone, idempotencyKey: clientIdempotency } = input;
+  const { eventId, items, customerEmail, customerName, customerPhone, idempotencyKey: clientIdempotency, offerToken } = input;
 
   // 2. Fetch event and validate status
   const event = await prisma.event.findUnique({
@@ -119,6 +151,61 @@ export async function createCheckoutSession(
   const now = new Date();
   if (event.endAt < now) {
     throw new BadRequestError('This event has already concluded');
+  }
+
+  if (event.isPasswordProtected) {
+    if (!verifyEventAccessToken(input.eventAccessToken, event.id)) {
+      throw new ForbiddenError(
+        'This event is password protected. Valid access token required to checkout.'
+      );
+    }
+  }
+
+  // Validate waitlist offer token if provided
+  let verifiedOffer: any = null;
+  if (offerToken) {
+    const tokenHash = hashOfferToken(offerToken);
+    verifiedOffer = await prisma.ticketWaitlistOffer.findUnique({
+      where: { tokenHash },
+      include: { entry: true, ticketTier: true },
+    });
+
+    if (!verifiedOffer) {
+      throw new BadRequestError('Invalid waitlist offer token');
+    }
+
+    if (verifiedOffer.status !== WaitlistOfferStatus.PENDING || verifiedOffer.expiresAt < now) {
+      throw new BadRequestError('This waitlist offer has expired or is no longer valid');
+    }
+
+    if (verifiedOffer.entry.customerEmail.toLowerCase() !== customerEmail.trim().toLowerCase()) {
+      throw new BadRequestError('Customer email does not match the waitlist offer recipient');
+    }
+
+    if (items.length !== 1 || items[0].ticketTierId !== verifiedOffer.ticketTierId) {
+      throw new BadRequestError('Checkout items do not match the offered ticket tier');
+    }
+
+    if (items[0].quantity > verifiedOffer.quantity) {
+      throw new BadRequestError(`Cannot purchase more tickets than offered (${verifiedOffer.quantity})`);
+    }
+
+    if (verifiedOffer.orderId) {
+      const existingLinkedOrder = await prisma.order.findUnique({
+        where: { id: verifiedOffer.orderId },
+      });
+      if (existingLinkedOrder && existingLinkedOrder.status === OrderStatus.COMPLETED) {
+        throw new BadRequestError('This waitlist offer has already been completed and purchased');
+      }
+      if (
+        existingLinkedOrder &&
+        existingLinkedOrder.status === OrderStatus.PENDING &&
+        existingLinkedOrder.expiresAt > now &&
+        existingLinkedOrder.idempotencyKey !== (clientIdempotency || '')
+      ) {
+        throw new ConflictError('A checkout session is already in progress for this waitlist offer');
+      }
+    }
   }
 
   // Check idempotency if provided
@@ -245,10 +332,14 @@ export async function createCheckoutSession(
             throw new BadRequestError(`Ticket tier '${item.ticketTierId}' not found`);
           }
 
-          const available = locked.totalCapacity - locked.soldQuantity - locked.reservedQuantity;
-          if (available < item.quantity) {
+          const isOfferItem = verifiedOffer && verifiedOffer.ticketTierId === item.ticketTierId;
+          const effectiveAvailable = isOfferItem
+            ? locked.totalCapacity - locked.soldQuantity - locked.reservedQuantity + verifiedOffer.quantity
+            : locked.totalCapacity - locked.soldQuantity - locked.reservedQuantity;
+
+          if (effectiveAvailable < item.quantity) {
             throw new ConflictError(
-              `Insufficient ticket availability for '${locked.name}'. Requested ${item.quantity}, but only ${Math.max(0, available)} remaining.`
+              `Insufficient ticket availability for '${locked.name}'. Requested ${item.quantity}, but only ${Math.max(0, effectiveAvailable)} remaining.`
             );
           }
 
@@ -270,15 +361,31 @@ export async function createCheckoutSession(
             status: ReservationStatus.ACTIVE,
           });
 
-          // Atomically increment reserved quantity on tier
-          await tx.ticketTier.update({
-            where: { id: item.ticketTierId },
-            data: {
-              reservedQuantity: {
-                increment: item.quantity,
+          // If purchasing through waitlist offer, the tickets were already reserved.
+          // If buyer bought fewer tickets than offered, release the difference back.
+          if (isOfferItem) {
+            if (item.quantity < verifiedOffer.quantity) {
+              const diff = verifiedOffer.quantity - item.quantity;
+              await tx.ticketTier.update({
+                where: { id: item.ticketTierId },
+                data: {
+                  reservedQuantity: {
+                    decrement: diff,
+                  },
+                },
+              });
+            }
+          } else {
+            // Atomically increment reserved quantity on tier for general purchases
+            await tx.ticketTier.update({
+              where: { id: item.ticketTierId },
+              data: {
+                reservedQuantity: {
+                  increment: item.quantity,
+                },
               },
-            },
-          });
+            });
+          }
         }
 
         // Authoritatively compute fee breakdown (10% platform, $0.95 service, 2.9% + $0.30 Stripe gross-up)
@@ -314,6 +421,14 @@ export async function createCheckoutSession(
             },
           },
         });
+
+        // Link waitlist offer to order
+        if (verifiedOffer) {
+          await tx.ticketWaitlistOffer.update({
+            where: { id: verifiedOffer.id },
+            data: { orderId: order.id },
+          });
+        }
 
         return { order, feeBreakdown };
       },
@@ -386,13 +501,34 @@ export async function createCheckoutSession(
     // Rollback reservation atomically so stock is not locked up
     await prisma.$transaction(async (tx) => {
       for (const item of createdOrder.items) {
-        await tx.ticketTier.update({
-          where: { id: item.ticketTierId },
-          data: {
-            reservedQuantity: {
-              decrement: item.quantity,
+        // If not an offer item, decrement the reserved quantity that was added
+        if (!verifiedOffer || verifiedOffer.ticketTierId !== item.ticketTierId) {
+          await tx.ticketTier.update({
+            where: { id: item.ticketTierId },
+            data: {
+              reservedQuantity: {
+                decrement: item.quantity,
+              },
             },
-          },
+          });
+        } else if (item.quantity < verifiedOffer.quantity) {
+          // If offer item and difference was decremented, re-increment back
+          const diff = verifiedOffer.quantity - item.quantity;
+          await tx.ticketTier.update({
+            where: { id: item.ticketTierId },
+            data: {
+              reservedQuantity: {
+                increment: diff,
+              },
+            },
+          });
+        }
+      }
+
+      if (verifiedOffer) {
+        await tx.ticketWaitlistOffer.update({
+          where: { id: verifiedOffer.id },
+          data: { orderId: null },
         });
       }
 
@@ -406,6 +542,11 @@ export async function createCheckoutSession(
         data: { status: OrderStatus.CANCELLED },
       });
     });
+
+    // Advance waitlist if inventory was released
+    for (const item of createdOrder.items) {
+      processWaitlistForTier(item.ticketTierId).catch(() => {});
+    }
 
     throw new BadRequestError('Payment provider session creation failed. Your reservation was safely released.');
   }

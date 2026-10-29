@@ -11,6 +11,10 @@ import {
   OrganizerPayoutDetails,
   PayoutDetailsInput,
   CombinedEarningsBreakdown,
+  JoinWaitlistInput,
+  JoinWaitlistResult,
+  WaitlistOfferInfo,
+  OrganizerWaitlistResponse,
 } from '../types';
 
 /**
@@ -143,7 +147,18 @@ export const api = {
     },
     featured: () => request<{ events: Event[] }>('/events/featured'),
     cities: () => request<{ cities: string[] }>('/events/cities'),
-    bySlug: (slug: string) => request<{ event: Event }>(`/events/${slug}`),
+    bySlug: (slug: string, eventAccessToken?: string) =>
+      request<{ event: Event }>(`/events/${slug}`, {
+        headers: eventAccessToken ? { 'x-event-access-token': eventAccessToken } : undefined,
+      }),
+    verifyPassword: (slug: string, password: string) =>
+      request<{ eventAccessToken: string; eventId: string; hasAccess: boolean }>(
+        `/events/${slug}/verify-password`,
+        {
+          method: 'POST',
+          body: JSON.stringify({ password }),
+        }
+      ),
   },
   organizer: {
     getDashboard: () => request<OrganizerDashboardStats>('/organizer/dashboard'),
@@ -166,18 +181,41 @@ export const api = {
         method: 'PUT',
         body: JSON.stringify(payload),
       }),
-    publishEvent: (id: string) =>
-      request<{ event: Event; message: string }>(`/organizer/events/${id}/publish`, {
+    publishEvent: (id: string, publishSeries?: boolean) =>
+      request<{ event: Event; message: string }>(
+        `/organizer/events/${id}/publish${publishSeries ? '?publishSeries=true' : ''}`,
+        {
+          method: 'POST',
+        }
+      ),
+    unpublishEvent: (id: string, unpublishSeries?: boolean) =>
+      request<{ event: Event; message: string }>(
+        `/organizer/events/${id}/unpublish${unpublishSeries ? '?unpublishSeries=true' : ''}`,
+        {
+          method: 'POST',
+        }
+      ),
+    cancelEvent: (id: string, reason?: string) =>
+      request<{ event: Event; message: string }>(`/organizer/events/${id}/cancel`, {
         method: 'POST',
+        ...(reason ? { body: JSON.stringify({ reason }) } : {}),
       }),
-    unpublishEvent: (id: string) =>
-      request<{ event: Event; message: string }>(`/organizer/events/${id}/unpublish`, {
-        method: 'POST',
-      }),
+    getSeries: (id: string) =>
+      request<{ series: any }>(`/organizer/series/${id}`),
+    cancelSeries: (id: string, reason?: string) =>
+      request<{ seriesId: string; cancelledCount: number; message: string }>(
+        `/organizer/series/${id}/cancel`,
+        {
+          method: 'POST',
+          ...(reason ? { body: JSON.stringify({ reason }) } : {}),
+        }
+      ),
     deleteEvent: (id: string) =>
       request<{ message: string }>(`/organizer/events/${id}`, {
         method: 'DELETE',
       }),
+    getWaitlist: (eventId: string) =>
+      request<OrganizerWaitlistResponse>(`/organizer/events/${eventId}/waitlist`),
     checkInTicket: (payload: { token: string; eventId?: string }) =>
       request<{
         result: 'SUCCESS' | 'ALREADY_CHECKED_IN' | 'INVALID_TOKEN' | 'WRONG_EVENT' | 'CANCELLED_TICKET' | 'UNPAID_ORDER';
@@ -266,6 +304,7 @@ export const api = {
         method: 'POST',
         body: JSON.stringify(payload),
       }),
+    uploadImage: (file: File) => api.organizer.uploadCoverImage(file),
   },
   auth: {
     me: () => request<{ user: User }>('/auth/me'),
@@ -348,6 +387,19 @@ export const api = {
       window.URL.revokeObjectURL(blobUrl);
       document.body.removeChild(a);
     },
+  },
+  waitlist: {
+    join: (eventSlug: string, payload: JoinWaitlistInput) =>
+      request<JoinWaitlistResult>(`/events/${eventSlug}/waitlist`, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }),
+    lookupOffer: (token: string) =>
+      request<{ offer: WaitlistOfferInfo }>(`/waitlist/offers/${token}`),
+    declineOffer: (token: string) =>
+      request<{ success: boolean; message: string }>(`/waitlist/offers/${token}/decline`, {
+        method: 'POST',
+      }),
   },
 };
 

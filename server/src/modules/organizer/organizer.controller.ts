@@ -1,9 +1,10 @@
 import { Request, Response, NextFunction } from 'express';
-import { EventStatus, TicketTierStatus, OrderStatus, TicketStatus } from '@prisma/client';
+import { EventStatus, TicketTierStatus, OrderStatus, TicketStatus, RecurrenceFrequency } from '@prisma/client';
 import { prisma } from '../../db/prisma.js';
 import { createEventSchema, updateEventSchema, payoutDetailsInputSchema, PayoutDetailsInput, earningsPreviewInputSchema } from './organizer.schema.js';
 import { calculateCombinedEarnings } from '../checkout/checkout.financials.js';
 import { NotFoundError, ForbiddenError, BadRequestError } from '../../utils/errors.js';
+import { calculateOccurrences, formatOccurrenceSlugSuffix } from '../events/recurrence.service.js';
 import {
   isCloudinaryConfigured,
   generateSignedUploadParams,
@@ -17,6 +18,9 @@ import {
   encryptAccountNumber,
   sanitizePayoutDetails,
 } from '../../lib/payoutCrypto.js';
+import { extractYouTubeVideoId, normalizeYouTubeUrl } from '../../utils/youtube.js';
+import { hashEventPassword } from '../events/passwordAccess.service.js';
+import { cancelWaitlistForEventIds, processWaitlistForTier } from '../waitlist/waitlist.service.js';
 
 async function saveOrganizerPayoutDetails(
   tx: any,
@@ -169,8 +173,8 @@ export async function listOrganizerEvents(req: Request, res: Response, next: Nex
       const ticketsSold = event.ticketTiers.reduce((acc, t) => acc + t.soldQuantity, 0);
       const revenueInCents = event.orders.reduce((acc, o) => acc + o.totalInCents, 0);
 
-      // Clean orders array before returning
-      const { orders: _, ...rest } = event;
+      // Clean orders array and sensitive fields before returning
+      const { orders: _, passwordHash: __, ...rest } = event;
       return {
         ...rest,
         totalCapacity,
@@ -200,7 +204,29 @@ export async function getOrganizerEventById(req: Request, res: Response, next: N
         ticketTiers: {
           orderBy: { priceInCents: 'asc' },
         },
+        galleryImages: {
+          orderBy: { displayOrder: 'asc' },
+        },
+        features: {
+          orderBy: { displayOrder: 'asc' },
+        },
         payoutDetails: true,
+        series: {
+          include: {
+            events: {
+              orderBy: { startAt: 'asc' },
+              select: {
+                id: true,
+                slug: true,
+                occurrenceIndex: true,
+                startAt: true,
+                endAt: true,
+                status: true,
+                isCustomized: true,
+              },
+            },
+          },
+        },
         organizer: {
           select: {
             id: true,
@@ -229,14 +255,53 @@ export async function getOrganizerEventById(req: Request, res: Response, next: N
       payoutDetails: sanitizePayoutDetails(event.organizer?.payoutDetails),
     };
 
+    const tierIds = event.ticketTiers.map((t) => t.id);
+    let waitlistStats: Record<string, { waiting: number; offered: number }> = {};
+    if (tierIds.length > 0) {
+      const [waitingCounts, offeredCounts] = await Promise.all([
+        prisma.ticketWaitlistEntry.groupBy({
+          by: ['ticketTierId'],
+          where: { ticketTierId: { in: tierIds }, status: 'WAITING' },
+          _count: { id: true },
+        }),
+        prisma.ticketWaitlistEntry.groupBy({
+          by: ['ticketTierId'],
+          where: { ticketTierId: { in: tierIds }, status: 'OFFERED' },
+          _count: { id: true },
+        }),
+      ]);
+      for (const w of waitingCounts) {
+        waitlistStats[w.ticketTierId] = {
+          waiting: w._count.id,
+          offered: waitlistStats[w.ticketTierId]?.offered ?? 0,
+        };
+      }
+      for (const o of offeredCounts) {
+        waitlistStats[o.ticketTierId] = {
+          waiting: waitlistStats[o.ticketTierId]?.waiting ?? 0,
+          offered: o._count.id,
+        };
+      }
+    }
+
+    const enrichedTicketTiers = event.ticketTiers.map((tier) => ({
+      ...tier,
+      waitlistWaitingCount: waitlistStats[tier.id]?.waiting ?? 0,
+      waitlistOfferedCount: waitlistStats[tier.id]?.offered ?? 0,
+    }));
+
+    const sanitizedEvent = {
+      ...event,
+      ticketTiers: enrichedTicketTiers,
+      passwordHash: undefined,
+      payoutDetails: sanitizedPayout,
+      organizer: sanitizedOrganizer,
+    };
+
     res.json({
       success: true,
       data: {
-        event: {
-          ...event,
-          payoutDetails: sanitizedPayout,
-          organizer: sanitizedOrganizer,
-        },
+        event: sanitizedEvent,
       },
     });
   } catch (error) {
@@ -297,8 +362,185 @@ export async function createOrganizerEvent(req: Request, res: Response, next: Ne
     const organizerId = req.user!.userId;
     const input = createEventSchema.parse(req.body);
 
-    // Auto-generate unique slug
     const baseSlug = slugify(input.title) || 'event';
+
+    let youtubeVideoId: string | null = null;
+    let youtubeVideoUrl: string | null = null;
+    if (input.youtubeVideoUrl) {
+      const vid = extractYouTubeVideoId(input.youtubeVideoUrl);
+      if (vid) {
+        youtubeVideoId = vid;
+        youtubeVideoUrl = normalizeYouTubeUrl(vid);
+      }
+    }
+
+    let passwordHash: string | null = null;
+    if (input.isPasswordProtected && input.password) {
+      passwordHash = await hashEventPassword(input.password);
+    }
+
+    if (input.recurrence) {
+      const occurrences = calculateOccurrences({
+        baseStartAt: input.startAt,
+        baseEndAt: input.endAt,
+        timezone: input.timezone,
+        rule: input.recurrence,
+      });
+
+      const result = await prisma.$transaction(async (tx) => {
+        let payoutDetailsId: string | null = null;
+        if (input.payoutDetails) {
+          const savedPayout = await saveOrganizerPayoutDetails(tx, organizerId, input.payoutDetails);
+          payoutDetailsId = savedPayout.id;
+        } else {
+          const existingPayout = await tx.organizerPayoutDetails.findUnique({
+            where: { userId: organizerId },
+          });
+          if (existingPayout) {
+            payoutDetailsId = existingPayout.id;
+          }
+        }
+
+        const series = await tx.eventSeries.create({
+          data: {
+            organizerId,
+            title: input.title,
+            frequency: input.recurrence!.frequency,
+            interval: input.recurrence!.interval ?? 1,
+            byWeekday: input.recurrence!.byWeekday ?? [],
+            startDate: new Date(input.startAt),
+            endDate: input.recurrence!.endDate ? new Date(input.recurrence!.endDate) : null,
+            count: input.recurrence!.count ?? occurrences.length,
+            timezone: input.timezone,
+            showOnExplore: input.showOnExplore,
+            hideGuestCount: input.hideGuestCount,
+            isPasswordProtected: input.isPasswordProtected,
+            passwordHash,
+            youtubeVideoId,
+            youtubeVideoUrl,
+          },
+        });
+
+        const createdEvents = [];
+        for (const occ of occurrences) {
+          const occSuffix = occ.occurrenceIndex === 1 ? '' : `-${formatOccurrenceSlugSuffix(occ.startAt, input.timezone)}`;
+          const candidateBaseSlug = `${baseSlug}${occSuffix}`;
+          let occSlug = candidateBaseSlug;
+          let counter = 1;
+          while (await tx.event.findUnique({ where: { slug: occSlug } })) {
+            counter++;
+            occSlug = `${candidateBaseSlug}-${counter}`;
+          }
+
+          const created = await tx.event.create({
+            data: {
+              slug: occSlug,
+              seriesId: series.id,
+              occurrenceIndex: occ.occurrenceIndex,
+              isCustomized: false,
+              organizerId,
+              title: input.title,
+              tagline: input.tagline,
+              description: input.description,
+              category: input.category,
+              status: input.status,
+              coverImageUrl: input.coverImageUrl,
+              coverImagePublicId: input.coverImagePublicId || null,
+              thumbnailUrl:
+                input.thumbnailUrl ||
+                (input.coverImagePublicId ? generateThumbnailUrl(input.coverImageUrl) : null),
+              venueName: input.venueName,
+              venueAddress: input.venueAddress,
+              city: input.city,
+              country: input.country,
+              startAt: occ.startAt,
+              endAt: occ.endAt,
+              timezone: input.timezone,
+              ageRestriction: input.ageRestriction,
+              dressCode: input.dressCode,
+              showOnExplore: input.showOnExplore,
+              hideGuestCount: input.hideGuestCount,
+              isPasswordProtected: input.isPasswordProtected,
+              passwordHash,
+              youtubeVideoId,
+              youtubeVideoUrl,
+              payoutDetailsId,
+              galleryImages: {
+                create: (input.galleryImages || []).map((img, i) => ({
+                  imageUrl: img.imageUrl,
+                  publicId: img.publicId || null,
+                  displayOrder: img.displayOrder !== undefined ? img.displayOrder : i,
+                })),
+              },
+              features: {
+                create: (input.features || []).map((feat, i) => ({
+                  name: feat.name,
+                  type: feat.type,
+                  imageUrl: feat.imageUrl || null,
+                  imagePublicId: feat.imagePublicId || null,
+                  description: feat.description || null,
+                  displayOrder: feat.displayOrder !== undefined ? feat.displayOrder : i,
+                })),
+              },
+              ticketTiers: {
+                create: input.ticketTiers.map((tier) => ({
+                  name: tier.name,
+                  description: tier.description,
+                  priceInCents: tier.priceInCents,
+                  currency: tier.currency,
+                  totalCapacity: tier.totalCapacity,
+                  minPerOrder: tier.minPerOrder,
+                  maxPerOrder: tier.maxPerOrder,
+                  salesStartAt: tier.salesStartAt ? new Date(tier.salesStartAt) : null,
+                  salesEndAt: tier.salesEndAt ? new Date(tier.salesEndAt) : null,
+                  status: tier.status,
+                  waitlistEnabled: tier.waitlistEnabled ?? false,
+                })),
+              },
+            },
+            include: {
+              ticketTiers: true,
+              galleryImages: { orderBy: { displayOrder: 'asc' } },
+              features: { orderBy: { displayOrder: 'asc' } },
+              payoutDetails: true,
+            },
+          });
+          createdEvents.push(created);
+        }
+
+        return {
+          primaryEvent: createdEvents[0],
+          series,
+          occurrences: createdEvents,
+        };
+      });
+
+      res.status(201).json({
+        success: true,
+        data: {
+          event: {
+            ...result.primaryEvent,
+            passwordHash: undefined,
+            payoutDetails: sanitizePayoutDetails(result.primaryEvent.payoutDetails),
+            series: {
+              ...result.series,
+              passwordHash: undefined,
+              occurrencesCount: result.occurrences.length,
+              occurrences: result.occurrences.map((e) => ({
+                id: e.id,
+                slug: e.slug,
+                startAt: e.startAt,
+                endAt: e.endAt,
+                occurrenceIndex: e.occurrenceIndex,
+                status: e.status,
+              })),
+            },
+          },
+        },
+      });
+      return;
+    }
+
     let slug = baseSlug;
     let counter = 1;
     while (await prisma.event.findUnique({ where: { slug } })) {
@@ -343,7 +585,30 @@ export async function createOrganizerEvent(req: Request, res: Response, next: Ne
           timezone: input.timezone,
           ageRestriction: input.ageRestriction,
           dressCode: input.dressCode,
+          showOnExplore: input.showOnExplore,
+          hideGuestCount: input.hideGuestCount,
+          isPasswordProtected: input.isPasswordProtected,
+          passwordHash,
+          youtubeVideoId,
+          youtubeVideoUrl,
           payoutDetailsId,
+          galleryImages: {
+            create: (input.galleryImages || []).map((img, i) => ({
+              imageUrl: img.imageUrl,
+              publicId: img.publicId || null,
+              displayOrder: img.displayOrder !== undefined ? img.displayOrder : i,
+            })),
+          },
+          features: {
+            create: (input.features || []).map((feat, i) => ({
+              name: feat.name,
+              type: feat.type,
+              imageUrl: feat.imageUrl || null,
+              imagePublicId: feat.imagePublicId || null,
+              description: feat.description || null,
+              displayOrder: feat.displayOrder !== undefined ? feat.displayOrder : i,
+            })),
+          },
           ticketTiers: {
             create: input.ticketTiers.map((tier) => ({
               name: tier.name,
@@ -356,11 +621,14 @@ export async function createOrganizerEvent(req: Request, res: Response, next: Ne
               salesStartAt: tier.salesStartAt ? new Date(tier.salesStartAt) : null,
               salesEndAt: tier.salesEndAt ? new Date(tier.salesEndAt) : null,
               status: tier.status,
+              waitlistEnabled: tier.waitlistEnabled ?? false,
             })),
           },
         },
         include: {
           ticketTiers: true,
+          galleryImages: { orderBy: { displayOrder: 'asc' } },
+          features: { orderBy: { displayOrder: 'asc' } },
           payoutDetails: true,
         },
       });
@@ -371,6 +639,7 @@ export async function createOrganizerEvent(req: Request, res: Response, next: Ne
       data: {
         event: {
           ...event,
+          passwordHash: undefined,
           payoutDetails: sanitizePayoutDetails(event.payoutDetails),
         },
       },
@@ -394,7 +663,11 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
 
     existingEvent = await prisma.event.findUnique({
       where: { id },
-      include: { ticketTiers: true },
+      include: {
+        ticketTiers: true,
+        galleryImages: { orderBy: { displayOrder: 'asc' } },
+        features: { orderBy: { displayOrder: 'asc' } },
+      },
     });
 
     if (!existingEvent) {
@@ -421,6 +694,68 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
       throw new BadRequestError('Event end time must be after the start time');
     }
 
+    // YouTube URL normalization & validation
+    let youtubeVideoId: string | null | undefined = undefined;
+    let youtubeVideoUrl: string | null | undefined = undefined;
+    if (input.youtubeVideoUrl !== undefined) {
+      if (!input.youtubeVideoUrl || input.youtubeVideoUrl.trim() === '') {
+        youtubeVideoId = null;
+        youtubeVideoUrl = null;
+      } else {
+        const videoId = extractYouTubeVideoId(input.youtubeVideoUrl.trim());
+        if (!videoId) {
+          throw new BadRequestError(
+            'Invalid YouTube video URL. Please provide a valid YouTube watch, youtu.be, or embed link.'
+          );
+        }
+        youtubeVideoId = videoId;
+        youtubeVideoUrl = normalizeYouTubeUrl(videoId);
+      }
+    }
+
+    // Password protection handling
+    let isPasswordProtected: boolean | undefined = undefined;
+    let passwordHash: string | null | undefined = undefined;
+    if (input.isPasswordProtected !== undefined) {
+      if (input.isPasswordProtected) {
+        if (input.password) {
+          passwordHash = await hashEventPassword(input.password);
+          isPasswordProtected = true;
+        } else if (existingEvent.isPasswordProtected && existingEvent.passwordHash) {
+          isPasswordProtected = true;
+          // Keep existing password hash
+        } else {
+          throw new BadRequestError('Password is required when enabling password protection');
+        }
+      } else {
+        isPasswordProtected = false;
+        passwordHash = null;
+      }
+    } else if (input.password) {
+      passwordHash = await hashEventPassword(input.password);
+      isPasswordProtected = true;
+    }
+
+    // Limits
+    if (input.galleryImages && input.galleryImages.length > 10) {
+      throw new BadRequestError('A maximum of 10 gallery images is allowed');
+    }
+    if (input.features && input.features.length > 50) {
+      throw new BadRequestError('A maximum of 50 features is allowed');
+    }
+
+    // Track removed gallery public IDs for cleanup after transaction
+    const oldGalleryPublicIds = (existingEvent.galleryImages || [])
+      .map((g: any) => g.publicId)
+      .filter(Boolean) as string[];
+    const newGalleryPublicIds = new Set(
+      (input.galleryImages || []).map((g) => g.publicId).filter(Boolean)
+    );
+    const removedGalleryPublicIds =
+      input.galleryImages !== undefined
+        ? oldGalleryPublicIds.filter((pid) => !newGalleryPublicIds.has(pid))
+        : [];
+
     const oldPublicId = existingEvent.coverImagePublicId;
     const isImageReplaced =
       (input.coverImagePublicId !== undefined && input.coverImagePublicId !== oldPublicId) ||
@@ -431,6 +766,138 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
       if (input.payoutDetails) {
         const savedPayout = await saveOrganizerPayoutDetails(tx, organizerId, input.payoutDetails);
         payoutDetailsId = savedPayout.id;
+      }
+
+      // If updating a series and applyToFuture is true, propagate changes to future occurrences
+      if (input.applyToFuture && existingEvent.seriesId) {
+        if (
+          input.recurrence ||
+          input.title ||
+          youtubeVideoId !== undefined ||
+          isPasswordProtected !== undefined ||
+          input.showOnExplore !== undefined ||
+          input.hideGuestCount !== undefined
+        ) {
+          await tx.eventSeries.update({
+            where: { id: existingEvent.seriesId },
+            data: {
+              ...(input.title && { title: input.title }),
+              ...(input.recurrence?.frequency && { frequency: input.recurrence.frequency }),
+              ...(input.recurrence?.interval && { interval: input.recurrence.interval }),
+              ...(input.recurrence?.byWeekday && { byWeekday: input.recurrence.byWeekday }),
+              ...(input.recurrence?.endDate !== undefined && {
+                endDate: input.recurrence.endDate ? new Date(input.recurrence.endDate) : null,
+              }),
+              ...(input.recurrence?.count !== undefined && { count: input.recurrence.count }),
+              ...(input.timezone && { timezone: input.timezone }),
+              ...(input.showOnExplore !== undefined && { showOnExplore: input.showOnExplore }),
+              ...(input.hideGuestCount !== undefined && { hideGuestCount: input.hideGuestCount }),
+              ...(isPasswordProtected !== undefined && { isPasswordProtected }),
+              ...(passwordHash !== undefined && { passwordHash }),
+              ...(youtubeVideoId !== undefined && { youtubeVideoId }),
+              ...(youtubeVideoUrl !== undefined && { youtubeVideoUrl }),
+            },
+          });
+        }
+
+        const futureOccurrences = await tx.event.findMany({
+          where: {
+            seriesId: existingEvent.seriesId,
+            startAt: { gte: existingEvent.startAt },
+            id: { not: id },
+          },
+          include: { ticketTiers: true },
+        });
+
+        for (const occ of futureOccurrences) {
+          await tx.event.update({
+            where: { id: occ.id },
+            data: {
+              ...(input.title !== undefined && { title: input.title }),
+              ...(input.tagline !== undefined && { tagline: input.tagline }),
+              ...(input.description !== undefined && { description: input.description }),
+              ...(input.category !== undefined && { category: input.category }),
+              ...(input.coverImageUrl !== undefined && { coverImageUrl: input.coverImageUrl }),
+              ...(input.coverImagePublicId !== undefined && { coverImagePublicId: input.coverImagePublicId }),
+              ...(input.thumbnailUrl !== undefined && {
+                thumbnailUrl:
+                  input.thumbnailUrl ||
+                  (input.coverImagePublicId ? generateThumbnailUrl(input.coverImageUrl || occ.coverImageUrl) : null),
+              }),
+              ...(input.venueName !== undefined && { venueName: input.venueName }),
+              ...(input.venueAddress !== undefined && { venueAddress: input.venueAddress }),
+              ...(input.city !== undefined && { city: input.city }),
+              ...(input.country !== undefined && { country: input.country }),
+              ...(input.timezone !== undefined && { timezone: input.timezone }),
+              ...(input.ageRestriction !== undefined && { ageRestriction: input.ageRestriction }),
+              ...(input.dressCode !== undefined && { dressCode: input.dressCode }),
+              ...(input.status !== undefined && { status: input.status }),
+              ...(input.showOnExplore !== undefined && { showOnExplore: input.showOnExplore }),
+              ...(input.hideGuestCount !== undefined && { hideGuestCount: input.hideGuestCount }),
+              ...(isPasswordProtected !== undefined && { isPasswordProtected }),
+              ...(passwordHash !== undefined && { passwordHash }),
+              ...(youtubeVideoId !== undefined && { youtubeVideoId }),
+              ...(youtubeVideoUrl !== undefined && { youtubeVideoUrl }),
+            },
+          });
+
+          // Sync gallery on future occurrences if updated
+          if (input.galleryImages !== undefined) {
+            await tx.eventGalleryImage.deleteMany({ where: { eventId: occ.id } });
+            if (input.galleryImages.length > 0) {
+              await tx.eventGalleryImage.createMany({
+                data: input.galleryImages.map((img, i) => ({
+                  eventId: occ.id,
+                  imageUrl: img.imageUrl,
+                  publicId: img.publicId || null,
+                  displayOrder: img.displayOrder !== undefined ? img.displayOrder : i,
+                })),
+              });
+            }
+          }
+
+          // Sync features on future occurrences if updated
+          if (input.features !== undefined) {
+            await tx.eventFeature.deleteMany({ where: { eventId: occ.id } });
+            if (input.features.length > 0) {
+              await tx.eventFeature.createMany({
+                data: input.features.map((feat, i) => ({
+                  eventId: occ.id,
+                  name: feat.name,
+                  type: feat.type,
+                  imageUrl: feat.imageUrl || null,
+                  imagePublicId: feat.imagePublicId || null,
+                  description: feat.description || null,
+                  displayOrder: feat.displayOrder !== undefined ? feat.displayOrder : i,
+                })),
+              });
+            }
+          }
+
+          // Safely sync tiers on future occurrences with 0 sales
+          if (input.ticketTiers) {
+            const occSales = occ.ticketTiers.reduce((acc: number, t: any) => acc + t.soldQuantity, 0);
+            if (occSales === 0) {
+              await tx.ticketTier.deleteMany({ where: { eventId: occ.id } });
+              await tx.ticketTier.createMany({
+                data: input.ticketTiers.map((tier) => ({
+                  eventId: occ.id,
+                  name: tier.name,
+                  description: tier.description,
+                  priceInCents: tier.priceInCents,
+                  currency: tier.currency,
+                  totalCapacity: tier.totalCapacity,
+                  minPerOrder: tier.minPerOrder,
+                  maxPerOrder: tier.maxPerOrder,
+                  salesStartAt: tier.salesStartAt ? new Date(tier.salesStartAt) : null,
+                  salesEndAt: tier.salesEndAt ? new Date(tier.salesEndAt) : null,
+                  status: tier.status,
+                  waitlistEnabled: tier.waitlistEnabled ?? false,
+                })),
+              });
+            }
+          }
+        }
       }
 
       // 1. Update event details
@@ -460,11 +927,51 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
           ...(input.ageRestriction !== undefined && { ageRestriction: input.ageRestriction }),
           ...(input.dressCode !== undefined && { dressCode: input.dressCode }),
           ...(input.status !== undefined && { status: input.status }),
+          ...(input.showOnExplore !== undefined && { showOnExplore: input.showOnExplore }),
+          ...(input.hideGuestCount !== undefined && { hideGuestCount: input.hideGuestCount }),
+          ...(isPasswordProtected !== undefined && { isPasswordProtected }),
+          ...(passwordHash !== undefined && { passwordHash }),
+          ...(youtubeVideoId !== undefined && { youtubeVideoId }),
+          ...(youtubeVideoUrl !== undefined && { youtubeVideoUrl }),
+          ...(existingEvent.seriesId && !input.applyToFuture ? { isCustomized: true } : {}),
           ...(payoutDetailsId ? { payoutDetailsId } : {}),
         },
       });
 
-      // 2. Manage ticket tiers if provided
+      // 2. Manage gallery images if provided
+      if (input.galleryImages !== undefined) {
+        await tx.eventGalleryImage.deleteMany({ where: { eventId: id } });
+        if (input.galleryImages.length > 0) {
+          await tx.eventGalleryImage.createMany({
+            data: input.galleryImages.map((img, i) => ({
+              eventId: id,
+              imageUrl: img.imageUrl,
+              publicId: img.publicId || null,
+              displayOrder: img.displayOrder !== undefined ? img.displayOrder : i,
+            })),
+          });
+        }
+      }
+
+      // 3. Manage features if provided
+      if (input.features !== undefined) {
+        await tx.eventFeature.deleteMany({ where: { eventId: id } });
+        if (input.features.length > 0) {
+          await tx.eventFeature.createMany({
+            data: input.features.map((feat, i) => ({
+              eventId: id,
+              name: feat.name,
+              type: feat.type,
+              imageUrl: feat.imageUrl || null,
+              imagePublicId: feat.imagePublicId || null,
+              description: feat.description || null,
+              displayOrder: feat.displayOrder !== undefined ? feat.displayOrder : i,
+            })),
+          });
+        }
+      }
+
+      // 4. Manage ticket tiers if provided
       if (input.ticketTiers) {
         const incomingTierIds = new Set(input.ticketTiers.filter((t) => t.id).map((t) => t.id));
 
@@ -501,6 +1008,7 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
                 salesStartAt: tier.salesStartAt ? new Date(tier.salesStartAt) : null,
                 salesEndAt: tier.salesEndAt ? new Date(tier.salesEndAt) : null,
                 status: tier.status,
+                ...(tier.waitlistEnabled !== undefined && { waitlistEnabled: tier.waitlistEnabled }),
               },
             });
           } else {
@@ -518,6 +1026,7 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
                 salesStartAt: tier.salesStartAt ? new Date(tier.salesStartAt) : null,
                 salesEndAt: tier.salesEndAt ? new Date(tier.salesEndAt) : null,
                 status: tier.status,
+                waitlistEnabled: tier.waitlistEnabled ?? false,
               },
             });
           }
@@ -530,12 +1039,34 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
           ticketTiers: {
             orderBy: { priceInCents: 'asc' },
           },
+          galleryImages: {
+            orderBy: { displayOrder: 'asc' },
+          },
+          features: {
+            orderBy: { displayOrder: 'asc' },
+          },
           payoutDetails: true,
+          series: {
+            include: {
+              events: {
+                orderBy: { startAt: 'asc' },
+                select: {
+                  id: true,
+                  slug: true,
+                  occurrenceIndex: true,
+                  startAt: true,
+                  endAt: true,
+                  status: true,
+                  isCustomized: true,
+                },
+              },
+            },
+          },
         },
       });
     });
 
-    // Safely delete replaced Cloudinary asset only if DB commit succeeded and no other event uses it
+    // Safely delete replaced Cloudinary cover asset only if DB commit succeeded and no other event uses it
     if (isImageReplaced && oldPublicId) {
       const referenceCount = await prisma.event.count({
         where: {
@@ -550,11 +1081,34 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
       }
     }
 
+    // Safely delete removed gallery assets
+    if (removedGalleryPublicIds.length > 0) {
+      for (const pid of removedGalleryPublicIds) {
+        const refCount = await prisma.eventGalleryImage.count({ where: { publicId: pid } });
+        if (refCount === 0) {
+          deleteCloudinaryAsset(pid).catch((err) =>
+            console.error(`Failed to delete removed gallery Cloudinary asset "${pid}":`, err)
+          );
+        }
+      }
+    }
+
+    if (input.ticketTiers && updatedEvent?.ticketTiers) {
+      for (const tier of updatedEvent.ticketTiers) {
+        if (tier.waitlistEnabled) {
+          processWaitlistForTier(tier.id).catch((err) =>
+            console.error(`Failed to process waitlist after updating tier ${tier.id}:`, err)
+          );
+        }
+      }
+    }
+
     res.json({
       success: true,
       data: {
         event: {
           ...updatedEvent,
+          passwordHash: undefined,
           payoutDetails: sanitizePayoutDetails(updatedEvent?.payoutDetails),
         },
       },
@@ -616,6 +1170,57 @@ export async function publishEvent(req: Request, res: Response, next: NextFuncti
       throw new BadRequestError('At least one active ticket tier with positive capacity is required to publish');
     }
 
+    const publishSeries = req.query.publishSeries === 'true' || req.body?.publishSeries === true;
+
+    if (publishSeries && event.seriesId) {
+      // Validate all occurrences before publishing
+      const seriesOccurrences = await prisma.event.findMany({
+        where: {
+          seriesId: event.seriesId,
+          startAt: { gte: new Date() },
+        },
+        include: { ticketTiers: true },
+      });
+
+      for (const occ of seriesOccurrences) {
+        if (!occ.title || occ.title.trim().length < 2) {
+          throw new BadRequestError(`Occurrence #${occ.occurrenceIndex || 1} has an invalid title`);
+        }
+        if (!occ.venueName) {
+          throw new BadRequestError(`Occurrence #${occ.occurrenceIndex || 1} requires venue name`);
+        }
+        const activeTiers = occ.ticketTiers.filter(
+          (t) => t.status !== TicketTierStatus.HIDDEN && t.totalCapacity > 0
+        );
+        if (activeTiers.length === 0) {
+          throw new BadRequestError(`Occurrence #${occ.occurrenceIndex || 1} requires at least one active ticket tier`);
+        }
+      }
+
+      await prisma.event.updateMany({
+        where: {
+          seriesId: event.seriesId,
+          startAt: { gte: new Date() },
+          status: { not: EventStatus.CANCELLED },
+        },
+        data: { status: EventStatus.PUBLISHED },
+      });
+
+      const updated = await prisma.event.findUnique({
+        where: { id },
+        include: { ticketTiers: true },
+      });
+
+      res.json({
+        success: true,
+        data: {
+          event: updated,
+          message: `All ${seriesOccurrences.length} series occurrences successfully published to Outside.vip public discovery!`,
+        },
+      });
+      return;
+    }
+
     const updated = await prisma.event.update({
       where: { id },
       data: { status: EventStatus.PUBLISHED },
@@ -651,6 +1256,32 @@ export async function unpublishEvent(req: Request, res: Response, next: NextFunc
       throw new ForbiddenError('You do not have permission to unpublish this event');
     }
 
+    const unpublishSeries = req.query.unpublishSeries === 'true' || req.body?.unpublishSeries === true;
+    if (unpublishSeries && event.seriesId) {
+      await prisma.event.updateMany({
+        where: {
+          seriesId: event.seriesId,
+          startAt: { gte: new Date() },
+          status: EventStatus.PUBLISHED,
+        },
+        data: { status: EventStatus.DRAFT },
+      });
+
+      const updated = await prisma.event.findUnique({
+        where: { id },
+        include: { ticketTiers: true },
+      });
+
+      res.json({
+        success: true,
+        data: {
+          event: updated,
+          message: 'All future occurrences in the series reverted to draft status.',
+        },
+      });
+      return;
+    }
+
     const updated = await prisma.event.update({
       where: { id },
       data: { status: EventStatus.DRAFT },
@@ -662,6 +1293,162 @@ export async function unpublishEvent(req: Request, res: Response, next: NextFunc
       data: {
         event: updated,
         message: 'Event unpublished and reverted to draft status.',
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function cancelOrganizerEvent(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const organizerId = req.user!.userId;
+    const { id } = req.params;
+
+    const event = await prisma.event.findUnique({
+      where: { id },
+      include: { series: true },
+    });
+
+    if (!event) {
+      throw new NotFoundError('Event not found');
+    }
+
+    if (event.organizerId !== organizerId && req.user!.role !== 'ADMIN') {
+      throw new ForbiddenError('You do not have permission to cancel this event');
+    }
+
+    const updated = await prisma.event.update({
+      where: { id },
+      data: { status: EventStatus.CANCELLED },
+      include: { ticketTiers: true },
+    });
+
+    await cancelWaitlistForEventIds([id]);
+
+    res.json({
+      success: true,
+      data: {
+        event: updated,
+        message: event.seriesId
+          ? `Occurrence #${event.occurrenceIndex || 1} has been cancelled. Other occurrences in the series remain unchanged.`
+          : 'Event has been cancelled.',
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function cancelOrganizerSeries(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const organizerId = req.user!.userId;
+    const { id } = req.params;
+
+    const series = await prisma.eventSeries.findUnique({
+      where: { id },
+      include: {
+        events: {
+          where: {
+            startAt: { gte: new Date() },
+            status: { not: EventStatus.CANCELLED },
+          },
+        },
+      },
+    });
+
+    if (!series) {
+      throw new NotFoundError('Event series not found');
+    }
+
+    if (series.organizerId !== organizerId && req.user!.role !== 'ADMIN') {
+      throw new ForbiddenError('You do not have permission to cancel this series');
+    }
+
+    const updateResult = await prisma.event.updateMany({
+      where: {
+        seriesId: id,
+        startAt: { gte: new Date() },
+        status: { not: EventStatus.CANCELLED },
+      },
+      data: {
+        status: EventStatus.CANCELLED,
+      },
+    });
+
+    const cancelledEventIds = series.events.map((e) => e.id);
+    await cancelWaitlistForEventIds(cancelledEventIds);
+
+    res.json({
+      success: true,
+      data: {
+        seriesId: id,
+        cancelledCount: updateResult.count,
+        message: `Cancelled ${updateResult.count} upcoming occurrence(s) in this series. Past events and history were preserved.`,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function getOrganizerSeries(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const organizerId = req.user!.userId;
+    const { id } = req.params;
+
+    const series = await prisma.eventSeries.findUnique({
+      where: { id },
+      include: {
+        events: {
+          orderBy: { startAt: 'asc' },
+          include: {
+            ticketTiers: {
+              select: {
+                id: true,
+                name: true,
+                priceInCents: true,
+                totalCapacity: true,
+                soldQuantity: true,
+                status: true,
+              },
+            },
+          },
+        },
+      },
+    });
+
+    if (!series) {
+      throw new NotFoundError('Event series not found');
+    }
+
+    if (series.organizerId !== organizerId && req.user!.role !== 'ADMIN') {
+      throw new ForbiddenError('You do not have permission to view this series');
+    }
+
+    const occurrences = series.events.map((e) => {
+      const totalCapacity = e.ticketTiers.reduce((acc, t) => acc + t.totalCapacity, 0);
+      const ticketsSold = e.ticketTiers.reduce((acc, t) => acc + t.soldQuantity, 0);
+      return {
+        id: e.id,
+        slug: e.slug,
+        occurrenceIndex: e.occurrenceIndex,
+        startAt: e.startAt,
+        endAt: e.endAt,
+        status: e.status,
+        isCustomized: e.isCustomized,
+        totalCapacity,
+        ticketsSold,
+      };
+    });
+
+    res.json({
+      success: true,
+      data: {
+        series: {
+          ...series,
+          occurrences,
+        },
       },
     });
   } catch (error) {

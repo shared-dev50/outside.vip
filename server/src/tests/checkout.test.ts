@@ -44,9 +44,24 @@ describe('Outside.vip Checkout, Atomic Reservations & Payments API', () => {
     }
 
     publishedEventId = event.id;
-    const activeTier = event.ticketTiers.find((t) => t.status === TicketTierStatus.ACTIVE && t.totalCapacity > 100);
+    let activeTier = event.ticketTiers.find(
+      (t) => t.status === TicketTierStatus.ACTIVE && t.totalCapacity > t.soldQuantity + t.reservedQuantity + 10
+    );
     if (!activeTier) {
-      throw new Error('Active ticket tier not found on seeded event');
+      activeTier = await prisma.ticketTier.create({
+        data: {
+          eventId: publishedEventId,
+          name: `Test Active Tier ${Date.now()}`,
+          priceInCents: 5000,
+          currency: 'USD',
+          totalCapacity: 500,
+          reservedQuantity: 0,
+          soldQuantity: 0,
+          minPerOrder: 1,
+          maxPerOrder: 10,
+          status: TicketTierStatus.ACTIVE,
+        },
+      });
     }
     activeTierId = activeTier.id;
 
@@ -831,6 +846,21 @@ describe('Outside.vip Checkout, Atomic Reservations & Payments API', () => {
 
   describe('5. Expired Reservation Cleanup', () => {
     it('automatically restores inventory for expired active reservations', async () => {
+      const cleanupTier = await prisma.ticketTier.create({
+        data: {
+          eventId: publishedEventId,
+          name: `Cleanup Tier ${Date.now()}`,
+          priceInCents: 2000,
+          currency: 'USD',
+          totalCapacity: 50,
+          reservedQuantity: 3,
+          soldQuantity: 0,
+          minPerOrder: 1,
+          maxPerOrder: 5,
+          status: 'ACTIVE',
+        },
+      });
+
       const order = await prisma.order.create({
         data: {
           orderNumber: `OUT-STALE-${Date.now()}`,
@@ -838,14 +868,14 @@ describe('Outside.vip Checkout, Atomic Reservations & Payments API', () => {
           status: OrderStatus.PENDING,
           customerEmail: 'stale@outside.vip',
           customerName: 'Stale Buyer',
-          totalInCents: 5000,
+          totalInCents: 6000,
           currency: 'USD',
           idempotencyKey: `idem_stale_${Date.now()}`,
           expiresAt: new Date(Date.now() - 5 * 60 * 1000),
           reservations: {
             create: [
               {
-                ticketTierId: activeTierId,
+                ticketTierId: cleanupTier.id,
                 quantity: 3,
                 expiresAt: new Date(Date.now() - 5 * 60 * 1000),
                 status: ReservationStatus.ACTIVE,
@@ -855,18 +885,13 @@ describe('Outside.vip Checkout, Atomic Reservations & Payments API', () => {
         },
       });
 
-      await prisma.ticketTier.update({
-        where: { id: activeTierId },
-        data: { reservedQuantity: { increment: 3 } },
-      });
-
-      const tierBefore = await prisma.ticketTier.findUnique({ where: { id: activeTierId } });
+      const tierBefore = await prisma.ticketTier.findUnique({ where: { id: cleanupTier.id } });
       const reservedBefore = tierBefore?.reservedQuantity || 0;
 
       const releasedCount = await releaseExpiredReservations();
       expect(releasedCount).toBeGreaterThanOrEqual(1);
 
-      const tierAfter = await prisma.ticketTier.findUnique({ where: { id: activeTierId } });
+      const tierAfter = await prisma.ticketTier.findUnique({ where: { id: cleanupTier.id } });
       expect(tierAfter?.reservedQuantity).toBe(reservedBefore - 3);
 
       const checkOrder = await prisma.order.findUnique({
