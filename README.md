@@ -301,19 +301,19 @@ We can verify an account as soon as they hit 15000 gross revenue.(This will be d
 
 10% = platform fee per ticket
 0.95 - service fee
-0.88 = stripe fee per transaction
+2.9% + 30 cents = stripe fee per transaction
 Total fee (Cost to buyer)
 
 Break down example
 Ticket price:   $20
 
-Service fee:     (10% of ticket fee + 0.95)  in this example the total will be $22.95
-10% + $0.95 per ticket
+Service fee: (10% of ticket price + 0.95) in this example the total will be $22.95
+10% + $0.95 per ticket ($2 + .95) = $22.95
 
 Processing fee:
-0.88c
+2.9% + 30 cents of total cost ($22.95 x 2.9%) + $0.30)
 
-Cost to buyer ($23.83)
+Cost to buyer ($23.92)
 
 
 ## Add this logic
