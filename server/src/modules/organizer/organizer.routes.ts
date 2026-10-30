@@ -22,8 +22,12 @@ import {
 } from './organizer.controller.js';
 import { handleGetOrganizerWaitlist } from '../waitlist/waitlist.controller.js';
 import { uploadCoverMiddleware } from '../../middleware/upload.js';
+import { financeRouter } from '../finance/finance.routes.js';
 
 export const organizerRouter = Router();
+
+// Mount Stripe-connected Finance routes
+organizerRouter.use('/finance', financeRouter);
 
 // Protect all organizer endpoints with auth & role middleware
 organizerRouter.use(requireAuth);

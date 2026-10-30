@@ -235,6 +235,157 @@ export interface PayoutDetailsInput {
   routingCode?: string | null;
 }
 
+export interface HumanReadableRequirement {
+  code: string;
+  description: string;
+}
+
+export interface SanitizedExternalAccount {
+  id: string;
+  bankName: string;
+  accountHolderName: string;
+  last4: string;
+  routingNumber: string | null;
+  currency: string;
+  isDefault: boolean;
+  status: string;
+}
+
+export interface StripeConnectedAccountStatus {
+  connected: boolean;
+  stripeAccountId: string | null;
+  connectionStatus?: 'connected' | 'not_connected' | 'invalid_or_inaccessible' | 'configuration_unavailable' | 'service_unavailable';
+  detailsSubmitted: boolean;
+  chargesEnabled: boolean;
+  payoutsEnabled: boolean;
+  sellTickets: {
+    enabled: boolean;
+    status: 'enabled' | 'action_required' | 'disabled';
+    message: string;
+  };
+  transferBalance: {
+    enabled: boolean;
+    status: 'enabled' | 'action_required' | 'disabled';
+    message: string;
+  };
+  requirements: {
+    currentlyDue: HumanReadableRequirement[];
+    eventuallyDue: HumanReadableRequirement[];
+    pastDue: HumanReadableRequirement[];
+    disabledReason: string | null;
+    pendingVerification: string[];
+    rawCurrentlyDue: string[];
+  };
+  payoutSchedule: {
+    interval: 'manual' | 'daily' | 'weekly' | 'monthly';
+    delayDays: number;
+    weeklyAnchor: string | null;
+    monthlyAnchor: number | null;
+  } | null;
+  externalAccounts: SanitizedExternalAccount[];
+  defaultCurrency: string;
+  country: string | null;
+}
+
+export interface StripeBalanceCurrencyItem {
+  amount: number;
+  currency: string;
+  sourceTypes?: Record<string, number>;
+}
+
+export interface StripeBalanceResponse {
+  currency?: string;
+  pendingInCents?: number;
+  availableInCents?: number;
+  netAvailableInCents?: number;
+  transferredInCents?: number;
+  lifetimeEarningsInCents?: number;
+  recoverableInCents?: number;
+  lastSettledAt?: string | null;
+  stripeBalance?: {
+    available: StripeBalanceCurrencyItem[];
+    pending: StripeBalanceCurrencyItem[];
+  } | null;
+  available?: StripeBalanceCurrencyItem[];
+  pending?: StripeBalanceCurrencyItem[];
+}
+
+export interface OrganizerTransferItem {
+  id: string;
+  transferNumber: string;
+  stripeTransferId: string | null;
+  amountInCents: number;
+  currency: string;
+  status: 'PENDING' | 'SUCCEEDED' | 'FAILED' | 'REVERSED';
+  sourceType: 'MANUAL_ORGANIZER_REQUEST' | 'ADMIN_INITIATED' | 'AUTOMATIC_SCHEDULED';
+  failureCode: string | null;
+  failureMessage: string | null;
+  createdAt: string;
+  initiatedBy?: {
+    id: string;
+    name: string;
+    email: string;
+    role: string;
+  } | null;
+}
+
+export interface FinancialLedgerEntryItem {
+  id: string;
+  entryType: string;
+  balanceType: string;
+  amountInCents: number;
+  currency: string;
+  description: string;
+  createdAt: string;
+  event?: { id: string; title: string; slug: string } | null;
+  order?: { id: string; orderNumber: string } | null;
+  stripeReferenceId?: string | null;
+}
+
+export interface WithdrawalRequestPayload {
+  amountInCents: number;
+  idempotencyKey?: string;
+  notes?: string;
+}
+
+export interface WithdrawalResponse {
+  transferId: string;
+  transferNumber: string;
+  stripeTransferId: string | null;
+  amountInCents: number;
+  currency: string;
+  status: string;
+  sourceType: string;
+  remainingAvailableInCents: number;
+  transferredInCents: number;
+  createdAt: string;
+}
+
+export interface StripePayoutItem {
+  id: string;
+  amount: number;
+  currency: string;
+  status: string;
+  arrivalDate: string | null;
+  created: string;
+  destination: string | null;
+  failureCode: string | null;
+  failureMessage: string | null;
+}
+
+export interface StripeDisputeItem {
+  id: string;
+  amount: number;
+  currency: string;
+  status: string;
+  reason: string;
+  created: string;
+  dueBy: string | null;
+  isChargeRefundable: boolean;
+}
+
+
+
 export interface OrderItem {
   id: string;
   orderId: string;

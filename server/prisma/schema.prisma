@@ -115,6 +115,52 @@ enum CheckInResult {
   CANCELLED_TICKET
 }
 
+enum LedgerEntryType {
+  TICKET_SALE_PENDING
+  TICKET_SALE_CLEARED
+  TRANSFER_INITIATED
+  TRANSFER_SUCCEEDED
+  TRANSFER_FAILED
+  REFUND_PENDING
+  REFUND_CLEARED
+  REFUND_POST_TRANSFER
+  DISPUTE_HOLD
+  DISPUTE_WON
+  DISPUTE_LOST
+  PLATFORM_FEE
+  SERVICE_FEE
+  STRIPE_PROCESSING_FEE
+  ADJUSTMENT
+}
+
+enum LedgerBalanceType {
+  PENDING
+  AVAILABLE
+  TRANSFERRED
+  PLATFORM_REVENUE
+  RECOVERABLE
+}
+
+enum TransferStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+  REVERSED
+}
+
+enum TransferSourceType {
+  MANUAL_ORGANIZER_REQUEST
+  ADMIN_INITIATED
+  AUTOMATIC_SCHEDULED
+}
+
+enum PayoutStatus {
+  PENDING
+  PAID
+  FAILED
+  CANCELLED
+}
+
 model User {
   id           String            @id @default(uuid())
   email        String            @unique
@@ -122,6 +168,7 @@ model User {
   name         String
   role         Role              @default(ATTENDEE)
   avatarUrl    String?
+  stripeAccountId String?        @unique
   createdAt    DateTime          @default(now())
   updatedAt    DateTime          @updatedAt
 
@@ -132,6 +179,11 @@ model User {
   orders       Order[]
   checkIns     CheckInLog[]      @relation("ScannerLogs")
   ticketsScanned Ticket[]        @relation("ScannerTickets")
+  balance      OrganizerBalance?
+  ledgerEntries FinancialLedgerEntry[] @relation("OrganizerLedger")
+  transfers    OrganizerTransfer[] @relation("OrganizerTransfers")
+  initiatedTransfers OrganizerTransfer[] @relation("InitiatedTransfers")
+  connectedPayouts ConnectedPayout[] @relation("OrganizerPayouts")
 
   @@index([email])
 }
@@ -202,6 +254,7 @@ model Event {
   waitlistOffers  TicketWaitlistOffer[]
   payoutDetailsId String?
   payoutDetails   OrganizerPayoutDetails? @relation(fields: [payoutDetailsId], references: [id], onDelete: SetNull)
+  ledgerEntries   FinancialLedgerEntry[]
 
   seriesId        String?
   series          EventSeries?  @relation("SeriesEvents", fields: [seriesId], references: [id], onDelete: SetNull)
@@ -349,6 +402,7 @@ model Order {
   reservations     TicketReservation[]
   transactions     PaymentTransaction[]
   waitlistOffers   TicketWaitlistOffer[]
+  ledgerEntries    FinancialLedgerEntry[]
 
   @@index([orderNumber])
   @@index([customerEmail])
@@ -521,5 +575,106 @@ model TicketWaitlistOffer {
   @@index([tokenHash])
   @@index([expiresAt, status])
   @@index([entryId])
+}
+
+model OrganizerBalance {
+  id                        String   @id @default(uuid())
+  userId                    String   @unique
+  user                      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  pendingBalanceInCents     Int      @default(0)
+  availableBalanceInCents   Int      @default(0)
+  transferredBalanceInCents Int      @default(0)
+  currency                  String   @default("USD")
+  
+  createdAt                 DateTime @default(now())
+  updatedAt                 DateTime @updatedAt
+
+  @@index([userId])
+}
+
+model FinancialLedgerEntry {
+  id                 String            @id @default(uuid())
+  organizerId        String
+  organizer          User              @relation("OrganizerLedger", fields: [organizerId], references: [id], onDelete: Restrict)
+  eventId            String?
+  event              Event?            @relation(fields: [eventId], references: [id], onDelete: SetNull)
+  orderId            String?
+  order              Order?            @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  transferId         String?
+  transfer           OrganizerTransfer? @relation(fields: [transferId], references: [id], onDelete: SetNull)
+  
+  type               LedgerEntryType
+  amountInCents      Int
+  currency           String            @default("USD")
+  balanceType        LedgerBalanceType
+  
+  stripeReferenceId  String?
+  description        String
+  metadata           Json?
+  
+  createdAt          DateTime          @default(now())
+
+  @@index([organizerId, createdAt])
+  @@index([eventId])
+  @@index([orderId])
+  @@index([transferId])
+  @@index([stripeReferenceId])
+  @@index([type])
+}
+
+model OrganizerTransfer {
+  id                 String             @id @default(uuid())
+  transferNumber     String             @unique // e.g. "TRF-2026-92813"
+  organizerId        String
+  organizer          User               @relation("OrganizerTransfers", fields: [organizerId], references: [id], onDelete: Restrict)
+  stripeAccountId    String
+  
+  amountInCents      Int
+  currency           String             @default("USD")
+  status             TransferStatus     @default(PENDING)
+  stripeTransferId   String?            @unique // tr_...
+  
+  sourceType         TransferSourceType @default(MANUAL_ORGANIZER_REQUEST)
+  initiatedByUserId  String
+  initiatedByUser    User               @relation("InitiatedTransfers", fields: [initiatedByUserId], references: [id], onDelete: Restrict)
+  
+  failureCode        String?
+  failureMessage     String?
+  idempotencyKey     String             @unique
+  
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+
+  ledgerEntries      FinancialLedgerEntry[]
+
+  @@index([organizerId, createdAt])
+  @@index([status])
+  @@index([stripeTransferId])
+  @@index([transferNumber])
+}
+
+model ConnectedPayout {
+  id                    String       @id @default(uuid())
+  organizerId           String
+  organizer             User         @relation("OrganizerPayouts", fields: [organizerId], references: [id], onDelete: Restrict)
+  stripeAccountId       String
+  stripePayoutId        String       @unique // po_...
+  
+  amountInCents         Int
+  currency              String       @default("USD")
+  status                PayoutStatus @default(PENDING)
+  arrivalDate           DateTime?
+  destinationBankMasked String?
+  failureCode           String?
+  failureMessage        String?
+  
+  createdAt             DateTime     @default(now())
+  updatedAt             DateTime     @updatedAt
+
+  @@index([organizerId, createdAt])
+  @@index([stripeAccountId])
+  @@index([stripePayoutId])
+  @@index([status])
 }
 

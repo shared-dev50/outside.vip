@@ -1,7 +1,27 @@
 import Stripe from 'stripe';
-import { Prisma, PaymentProvider, PaymentStatus, OrderStatus, ReservationStatus, TicketStatus, WaitlistOfferStatus, WaitlistEntryStatus } from '@prisma/client';
+import {
+  Prisma,
+  PaymentProvider,
+  PaymentStatus,
+  OrderStatus,
+  ReservationStatus,
+  TicketStatus,
+  WaitlistOfferStatus,
+  WaitlistEntryStatus,
+  TransferStatus,
+  PayoutStatus,
+  LedgerEntryType,
+  LedgerBalanceType,
+} from '@prisma/client';
 import { nanoid } from 'nanoid';
 import { prisma } from '../../db/prisma.js';
+import {
+  recordTicketSalePending,
+  settleOrderEarnings,
+  recordActualStripeFee,
+  recordRefundLedger,
+  recordDisputeLedger,
+} from '../finance/ledger.service.js';
 
 export async function processStripeWebhookEvent(
   event: Stripe.Event
@@ -27,6 +47,50 @@ export async function processStripeWebhookEvent(
         case 'payment_intent.payment_failed': {
           const paymentIntent = event.data.object as Stripe.PaymentIntent;
           await handlePaymentIntentFailed(tx, paymentIntent);
+          break;
+        }
+
+        case 'charge.updated': {
+          const charge = event.data.object as Stripe.Charge;
+          await handleChargeUpdated(tx, charge);
+          break;
+        }
+
+        case 'charge.refunded': {
+          const charge = event.data.object as Stripe.Charge;
+          await handleChargeRefunded(tx, charge);
+          break;
+        }
+
+        case 'charge.dispute.created':
+        case 'charge.dispute.updated':
+        case 'charge.dispute.closed': {
+          const dispute = event.data.object as Stripe.Dispute;
+          await handleDisputeEvent(tx, event.type, dispute);
+          break;
+        }
+
+        case 'transfer.created':
+        case 'transfer.updated':
+        case 'transfer.reversed': {
+          const transfer = event.data.object as Stripe.Transfer;
+          await handleTransferEvent(tx, event.type, transfer);
+          break;
+        }
+
+        case 'account.updated': {
+          const account = event.data.object as Stripe.Account;
+          await handleAccountUpdated(tx, account);
+          break;
+        }
+
+        case 'payout.created':
+        case 'payout.updated':
+        case 'payout.paid':
+        case 'payout.failed': {
+          const payout = event.data.object as Stripe.Payout;
+          const stripeAccountId = (event as any).account as string | undefined;
+          await handlePayoutEvent(tx, event.type, payout, stripeAccountId);
           break;
         }
 
@@ -212,6 +276,18 @@ export async function handlePaymentIntentSucceeded(
       },
     });
   }
+
+  // 7. Record financial ledger entries and organizer earnings
+  const latestChargeId = typeof paymentIntent.latest_charge === 'string'
+    ? paymentIntent.latest_charge
+    : (paymentIntent.latest_charge as Stripe.Charge)?.id;
+
+  await recordTicketSalePending(tx, {
+    orderId: order.id,
+    paymentIntentId: paymentIntent.id,
+    stripeChargeId: latestChargeId,
+    autoSettle: false,
+  });
 }
 
 export async function handlePaymentIntentFailed(
@@ -254,4 +330,271 @@ export async function handlePaymentIntentFailed(
       },
     },
   });
+}
+
+async function handleChargeUpdated(
+  tx: Prisma.TransactionClient,
+  charge: Stripe.Charge
+): Promise<void> {
+  const paymentIntentId = typeof charge.payment_intent === 'string'
+    ? charge.payment_intent
+    : (charge.payment_intent as Stripe.PaymentIntent)?.id;
+
+  const orderId = charge.metadata?.orderId as string | undefined;
+
+  let order = orderId
+    ? await tx.order.findUnique({ where: { id: orderId } })
+    : null;
+
+  if (!order && paymentIntentId) {
+    order = await tx.order.findFirst({
+      where: { paymentReference: paymentIntentId },
+    });
+  }
+
+  if (order) {
+    // Settle earnings when charge is confirmed / succeeded
+    if (charge.status === 'succeeded') {
+      await settleOrderEarnings(tx, {
+        orderId: order.id,
+        stripeChargeId: charge.id,
+      });
+    }
+
+    // Reconcile actual Stripe fee if balance transaction is included
+    if (charge.balance_transaction) {
+      const balanceTx = typeof charge.balance_transaction === 'object'
+        ? (charge.balance_transaction as Stripe.BalanceTransaction)
+        : null;
+
+      if (balanceTx && typeof balanceTx.fee === 'number') {
+        await recordActualStripeFee(tx, {
+          stripeChargeId: charge.id,
+          actualFeeInCents: balanceTx.fee,
+          currency: charge.currency,
+          orderId: order.id,
+        });
+      }
+    }
+  }
+}
+
+async function handleChargeRefunded(
+  tx: Prisma.TransactionClient,
+  charge: Stripe.Charge
+): Promise<void> {
+  const paymentIntentId = typeof charge.payment_intent === 'string'
+    ? charge.payment_intent
+    : (charge.payment_intent as Stripe.PaymentIntent)?.id;
+
+  const orderId = charge.metadata?.orderId as string | undefined;
+
+  let order = orderId
+    ? await tx.order.findUnique({ where: { id: orderId } })
+    : null;
+
+  if (!order && paymentIntentId) {
+    order = await tx.order.findFirst({
+      where: { paymentReference: paymentIntentId },
+    });
+  }
+
+  if (!order) {
+    console.warn(`[ChargeRefunded] Order not found for charge ${charge.id}`);
+    return;
+  }
+
+  const stripeRefundId = charge.refunds?.data?.[0]?.id;
+  await recordRefundLedger(tx, {
+    orderId: order.id,
+    amountInCents: charge.amount_refunded,
+    stripeRefundId,
+    stripeChargeId: charge.id,
+    reason: 'Stripe charge refunded',
+  });
+}
+
+async function handleDisputeEvent(
+  tx: Prisma.TransactionClient,
+  eventType: string,
+  dispute: Stripe.Dispute
+): Promise<void> {
+  const chargeId = typeof dispute.charge === 'string'
+    ? dispute.charge
+    : (dispute.charge as Stripe.Charge)?.id;
+
+  let order = chargeId
+    ? await tx.order.findFirst({
+        where: {
+          transactions: {
+            some: { providerTransactionId: chargeId },
+          },
+        },
+      })
+    : null;
+
+  let status: 'needs_response' | 'under_review' | 'won' | 'lost' | 'warning_needs_response' = 'needs_response';
+  if (dispute.status === 'won') {
+    status = 'won';
+  } else if (dispute.status === 'lost') {
+    status = 'lost';
+  } else if (dispute.status === 'under_review') {
+    status = 'under_review';
+  }
+
+  await recordDisputeLedger(tx, {
+    stripeDisputeId: dispute.id,
+    stripeChargeId: chargeId,
+    orderId: order?.id,
+    amountInCents: dispute.amount,
+    status,
+    reason: dispute.reason,
+  });
+}
+
+async function handleTransferEvent(
+  tx: Prisma.TransactionClient,
+  eventType: string,
+  transfer: Stripe.Transfer
+): Promise<void> {
+  if (eventType === 'transfer.reversed') {
+    const existing = await tx.organizerTransfer.findUnique({
+      where: { stripeTransferId: transfer.id },
+    });
+
+    if (existing && existing.status !== TransferStatus.REVERSED) {
+      await tx.organizerTransfer.update({
+        where: { id: existing.id },
+        data: { status: TransferStatus.REVERSED },
+      });
+
+      // Record reversal in ledger
+      await tx.financialLedgerEntry.create({
+        data: {
+          type: LedgerEntryType.ADJUSTMENT,
+          balanceType: LedgerBalanceType.TRANSFERRED,
+          amountInCents: -existing.amountInCents,
+          currency: existing.currency.toUpperCase(),
+          organizerId: existing.organizerId,
+          transferId: existing.id,
+          stripeReferenceId: transfer.id,
+          description: `Stripe transfer reversed for transfer #${existing.transferNumber}`,
+          metadata: {
+            transferId: existing.id,
+            transferNumber: existing.transferNumber,
+            stripeTransferId: transfer.id,
+          },
+        },
+      });
+    }
+  }
+}
+
+async function handlePayoutEvent(
+  tx: Prisma.TransactionClient,
+  eventType: string,
+  payout: Stripe.Payout,
+  stripeAccountId?: string
+): Promise<void> {
+  if (!stripeAccountId) {
+    return;
+  }
+
+  const user = await tx.user.findFirst({
+    where: { stripeAccountId },
+  });
+
+  if (!user) {
+    return;
+  }
+
+  let status: PayoutStatus = PayoutStatus.PENDING;
+  if (payout.status === 'paid') {
+    status = PayoutStatus.PAID;
+  } else if (payout.status === 'failed') {
+    status = PayoutStatus.FAILED;
+  } else if (payout.status === 'canceled') {
+    status = PayoutStatus.CANCELLED;
+  }
+
+  const arrivalDate = payout.arrival_date ? new Date(payout.arrival_date * 1000) : null;
+  const failureCode = payout.failure_code || null;
+  const failureMessage = payout.failure_message || null;
+
+  // Masked bank account details from payout destination where available
+  const destinationBankMasked = (payout as any).destination_details?.card?.last4
+    ? `•••• ${(payout as any).destination_details?.card?.last4}`
+    : null;
+
+  await tx.connectedPayout.upsert({
+    where: { stripePayoutId: payout.id },
+    update: {
+      status,
+      arrivalDate,
+      failureCode,
+      failureMessage,
+      destinationBankMasked,
+    },
+    create: {
+      stripePayoutId: payout.id,
+      organizerId: user.id,
+      stripeAccountId,
+      amountInCents: payout.amount,
+      currency: payout.currency.toUpperCase(),
+      status,
+      arrivalDate,
+      failureCode,
+      failureMessage,
+      destinationBankMasked,
+    },
+  });
+}
+
+async function handleAccountUpdated(
+  tx: Prisma.TransactionClient,
+  account: Stripe.Account
+): Promise<void> {
+  const user = await tx.user.findUnique({
+    where: { stripeAccountId: account.id },
+  });
+
+  if (!user) {
+    return;
+  }
+
+  // If Stripe account has bank account, reflect safe masked details in OrganizerPayoutDetails
+  const bankAccounts = (account.external_accounts?.data || []).filter(
+    (e) => e.object === 'bank_account'
+  ) as Stripe.BankAccount[];
+
+  if (bankAccounts.length > 0) {
+    const defaultBank =
+      bankAccounts.find((b) => (b as any).default_for_currency) || bankAccounts[0];
+
+    const masked = `•••• •••• •••• ${defaultBank.last4 || '••••'}`;
+    const last4 = defaultBank.last4 || '';
+
+    const existingPayout = await tx.organizerPayoutDetails.findUnique({
+      where: { userId: user.id },
+    });
+
+    if (existingPayout) {
+      await tx.organizerPayoutDetails.update({
+        where: { userId: user.id },
+        data: {
+          accountHolderName: defaultBank.account_holder_name || existingPayout.accountHolderName,
+          bankName: defaultBank.bank_name || existingPayout.bankName,
+          bankCountry: defaultBank.country || existingPayout.bankCountry,
+          accountCurrency: defaultBank.currency
+            ? defaultBank.currency.toUpperCase()
+            : existingPayout.accountCurrency,
+          accountNumberMasked: masked,
+          accountNumberLast4: last4,
+          routingCode: defaultBank.routing_number
+            ? `••••${defaultBank.routing_number.slice(-4)}`
+            : existingPayout.routingCode,
+        },
+      });
+    }
+  }
 }

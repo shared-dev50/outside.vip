@@ -15,6 +15,14 @@ import {
   JoinWaitlistResult,
   WaitlistOfferInfo,
   OrganizerWaitlistResponse,
+  StripeConnectedAccountStatus,
+  StripeBalanceResponse,
+  StripePayoutItem,
+  StripeDisputeItem,
+  OrganizerTransferItem,
+  FinancialLedgerEntryItem,
+  WithdrawalRequestPayload,
+  WithdrawalResponse,
 } from '../types';
 
 /**
@@ -399,6 +407,87 @@ export const api = {
     declineOffer: (token: string) =>
       request<{ success: boolean; message: string }>(`/waitlist/offers/${token}/decline`, {
         method: 'POST',
+      }),
+  },
+  finance: {
+    getStatus: () =>
+      request<StripeConnectedAccountStatus>('/organizer/finance/account'),
+    createOnboardingLink: (payload?: { returnUrl?: string; refreshUrl?: string; reconnect?: boolean }) =>
+      request<{ url: string; stripeAccountId: string }>('/organizer/finance/onboarding-link', {
+        method: 'POST',
+        body: JSON.stringify(payload || {}),
+      }),
+    createLoginLink: (payload?: { returnUrl?: string }) =>
+      request<{ url: string }>('/organizer/finance/login-link', {
+        method: 'POST',
+        body: JSON.stringify(payload || {}),
+      }),
+    getBalance: () =>
+      request<StripeBalanceResponse>('/organizer/finance/balance'),
+    getPayouts: (limit?: number) =>
+      request<{ payouts: StripePayoutItem[] }>(
+        `/organizer/finance/payouts${limit ? `?limit=${limit}` : ''}`
+      ),
+    getDisputes: (limit?: number) =>
+      request<{ disputes: StripeDisputeItem[] }>(
+        `/organizer/finance/disputes${limit ? `?limit=${limit}` : ''}`
+      ),
+    withdraw: (payload: WithdrawalRequestPayload) =>
+      request<WithdrawalResponse>('/organizer/finance/withdraw', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }),
+    getTransfers: (page?: number, limit?: number) => {
+      const params = new URLSearchParams();
+      if (page) params.append('page', page.toString());
+      if (limit) params.append('limit', limit.toString());
+      const query = params.toString() ? `?${params.toString()}` : '';
+      return request<{
+        total: number;
+        page: number;
+        limit: number;
+        totalPages: number;
+        transfers: OrganizerTransferItem[];
+      }>(`/organizer/finance/transfers${query}`);
+    },
+    getLedger: (options?: { page?: number; limit?: number; eventId?: string }) => {
+      const params = new URLSearchParams();
+      if (options?.page) params.append('page', options.page.toString());
+      if (options?.limit) params.append('limit', options.limit.toString());
+      if (options?.eventId) params.append('eventId', options.eventId);
+      const query = params.toString() ? `?${params.toString()}` : '';
+      return request<{
+        total: number;
+        page: number;
+        limit: number;
+        totalPages: number;
+        entries: FinancialLedgerEntryItem[];
+      }>(`/organizer/finance/ledger${query}`);
+    },
+    reconcile: () =>
+      request<{
+        isReconciled: boolean;
+        discrepancies: string[];
+        balanceRecord: any;
+        ledgerTotals: any;
+      }>('/organizer/finance/reconcile'),
+    updatePayoutSchedule: (payload: {
+      interval: 'manual' | 'daily' | 'weekly' | 'monthly';
+      weeklyAnchor?: string;
+      monthlyAnchor?: number;
+      delayDays?: number;
+    }) =>
+      request<{
+        success: boolean;
+        payoutSchedule: {
+          interval: string;
+          delayDays: number;
+          weeklyAnchor: string | null;
+          monthlyAnchor: number | null;
+        };
+      }>('/organizer/finance/payout-schedule', {
+        method: 'PATCH',
+        body: JSON.stringify(payload),
       }),
   },
 };

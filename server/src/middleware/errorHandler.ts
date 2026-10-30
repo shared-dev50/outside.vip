@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import { ZodError } from 'zod';
 import { Prisma } from '@prisma/client';
 import { AppError } from '../utils/errors.js';
+import { sanitizeErrorMessage } from '../modules/finance/stripeError.js';
 
 export function errorHandler(
   err: unknown,
@@ -15,8 +16,9 @@ export function errorHandler(
     res.status(err.statusCode).json({
       success: false,
       error: {
-        message: err.message,
+        message: sanitizeErrorMessage(err.message),
         statusCode: err.statusCode,
+        code: err.code || (err.statusCode === 404 ? 'NOT_FOUND' : 'BAD_REQUEST'),
       },
     });
     return;
