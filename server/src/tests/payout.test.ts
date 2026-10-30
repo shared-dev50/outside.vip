@@ -19,7 +19,7 @@ describe('Outside.vip Payout & Organisation Details', () => {
   let otherOrganizerUserId: string;
 
   beforeAll(async () => {
-    // 1. Authenticate seeded organizer
+    // Authenticate seeded organizer
     const organizerLogin = await request(app).post('/api/auth/login').send({
       email: 'sol@outside.vip',
       password: 'Outside2026!',
@@ -28,7 +28,7 @@ describe('Outside.vip Payout & Organisation Details', () => {
     organizerToken = organizerLogin.body.data.token;
     organizerUserId = organizerLogin.body.data.user.id;
 
-    // 2. Authenticate seeded attendee
+    // Authenticate seeded attendee
     const attendeeLogin = await request(app).post('/api/auth/login').send({
       email: 'alex@outside.vip',
       password: 'Outside2026!',
@@ -36,7 +36,7 @@ describe('Outside.vip Payout & Organisation Details', () => {
     expect(attendeeLogin.status).toBe(200);
     attendeeToken = attendeeLogin.body.data.token;
 
-    // 3. Create or authenticate a second organizer for access control tests
+    // Create or authenticate a second organizer for access control tests
     const otherEmail = 'second_organizer_test@outside.vip';
     let otherUser = await prisma.user.findUnique({ where: { email: otherEmail } });
     if (!otherUser) {
@@ -415,14 +415,14 @@ describe('Outside.vip Payout & Organisation Details', () => {
     });
 
     it('Each organizer retrieves only their own payout details from /api/organizer/payout-details', async () => {
-      // 1. Sol requests their payout details
+      // Sol requests their payout details
       const solRes = await request(app)
         .get('/api/organizer/payout-details')
         .set('Authorization', `Bearer ${organizerToken}`);
       expect(solRes.status).toBe(200);
       expect(solRes.body.data.payoutDetails.userId).toBe(organizerUserId);
 
-      // 2. Second organizer requests their payout details (initially null or their own)
+      // Second organizer requests their payout details (initially null or their own)
       const secondRes = await request(app)
         .get('/api/organizer/payout-details')
         .set('Authorization', `Bearer ${otherOrganizerToken}`);

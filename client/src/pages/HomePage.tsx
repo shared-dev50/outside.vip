@@ -17,7 +17,6 @@ export const HomePage: React.FC = () => {
     };
   }, []);
 
-  // Query published events from API
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ['homepage-events'],
     queryFn: () =>
@@ -29,11 +28,9 @@ export const HomePage: React.FC = () => {
 
   const allEvents = data?.events || [];
 
-  // Active elevated card index (Card index 1 is elevated by default, mirroring reference Card 2)
   const [elevatedIndex, setElevatedIndex] = useState<number>(1);
   const [currentPage, setCurrentPage] = useState<number>(0);
 
-  // Cards per page for desktop shelf view (4 posters matching the screenshot)
   const CARDS_PER_VIEW = 4;
   const maxPages = Math.ceil(Math.max(1, allEvents.length) / CARDS_PER_VIEW);
   const visibleEvents = allEvents.slice(
@@ -43,9 +40,7 @@ export const HomePage: React.FC = () => {
 
   return (
     <div className="relative min-h-screen bg-[#FAF8F5] text-stone-900 overflow-x-hidden selection:bg-stone-900 selection:text-white">
-      {/* 1. Subtle Background Graphic Elements (Topographic Contours & Dot Grids) */}
       <div className="absolute inset-0 pointer-events-none overflow-hidden select-none" aria-hidden="true">
-        {/* Top-Left Topographic Contour Waves */}
         <svg
           className="absolute -top-10 -left-10 w-80 sm:w-96 h-80 sm:h-96 opacity-35 text-[#D8D2C5]"
           viewBox="0 0 400 400"
@@ -60,7 +55,6 @@ export const HomePage: React.FC = () => {
           <path d="M-50,220 C120,200 200,300 360,260 C440,240 460,320 490,420" />
         </svg>
 
-        {/* Top-Right Architectural Mesh Lines */}
         <svg
           className="absolute -top-6 -right-10 w-72 sm:w-88 h-72 sm:h-88 opacity-30 text-[#D8D2C5]"
           viewBox="0 0 350 350"
@@ -74,14 +68,12 @@ export const HomePage: React.FC = () => {
           <path d="M10,-20 C80,150 160,210 370,280" />
         </svg>
 
-        {/* Upper Left Dot Matrix Grid */}
         <div className="absolute top-12 left-6 sm:left-14 grid grid-cols-4 gap-2 opacity-40 text-stone-400 font-mono text-[9px]">
           {Array.from({ length: 16 }).map((_, i) => (
             <span key={i}>+</span>
           ))}
         </div>
 
-        {/* Upper Right Dot Matrix Grid */}
         <div className="absolute top-16 right-8 sm:right-20 grid grid-cols-4 gap-2.5 opacity-35 text-stone-400 font-mono text-[9px]">
           {Array.from({ length: 16 }).map((_, i) => (
             <span key={i}>+</span>
@@ -89,23 +81,17 @@ export const HomePage: React.FC = () => {
         </div>
       </div>
 
-      {/* Main Content Container */}
       <div className="relative z-10 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-20 sm:pt-24 lg:pt-28 pb-6 space-y-8 sm:space-y-12">
-        {/* 2. Top Minimal Header: Pill Tag & Stencil Title */}
         <section className="text-center space-y-3 pt-2">
-          {/* Subtle Category / Pill Tag */}
           <div className="inline-flex items-center gap-2 px-3.5 py-1 rounded-full bg-[#EFECE5]/80 border border-[#DDD7CB]/70 text-[#7A7165] text-[10px] sm:text-[11px] font-mono uppercase tracking-[0.22em] font-bold shadow-xs">
             <span className="w-1.5 h-1.5 rounded-full bg-[#96846D]" />
             <span>CURATED EVENTS & EXPERIENCES</span>
           </div>
 
-          {/* Monumental Stencil Statement Headline */}
           <StencilHeadline subtitle="FIND SOMETHING WORTH SHOWING UP FOR" />
         </section>
 
-        {/* 3. The Poster Gallery Shelf (The Core Visual Attraction) */}
         <section className="space-y-4">
-          {/* Loading Skeleton Shelf */}
           {isLoading && (
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 pt-6">
               {[1, 2, 3, 4].map((i) => (
@@ -123,7 +109,6 @@ export const HomePage: React.FC = () => {
             </div>
           )}
 
-          {/* Error State */}
           {error && (
             <div className="p-8 rounded-lg bg-[#EFECE5] border border-stone-300 text-center space-y-3 max-w-md mx-auto my-12">
               <p className="text-stone-900 font-bold text-sm">Unable to load event showcase</p>
@@ -138,10 +123,8 @@ export const HomePage: React.FC = () => {
             </div>
           )}
 
-          {/* Render Curated Poster Cards */}
           {!isLoading && allEvents.length > 0 && (
             <div>
-              {/* Desktop & Tablet: 4-Card Gallery Row with Elevating Hero */}
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5 sm:gap-6 lg:gap-7 items-end pt-4 sm:pt-8">
                 {visibleEvents.map((event, idx) => {
                   const globalIdx = currentPage * CARDS_PER_VIEW + idx;
@@ -155,15 +138,12 @@ export const HomePage: React.FC = () => {
                       isElevated={isElevated}
                       onHover={() => setElevatedIndex(globalIdx)}
                       onLeave={() => {
-                        // Reset to default card (index 1) if not hovering
-                        // or keep last hovered to preserve organic interaction
-                      }}
+                                      }}
                     />
                   );
                 })}
               </div>
 
-              {/* Architectural Baseline with Tick Marks (Mirroring Reference) */}
               <div className="hidden lg:block w-full border-t border-stone-300/80 mt-4 relative">
                 <div className="grid grid-cols-4 w-full">
                   {visibleEvents.map((_, i) => (
@@ -175,7 +155,6 @@ export const HomePage: React.FC = () => {
                 </div>
               </div>
 
-              {/* Multi-page controls if catalogue has > 4 events */}
               {allEvents.length > CARDS_PER_VIEW && (
                 <div className="flex items-center justify-between pt-4 text-xs font-mono text-stone-500">
                   <div className="flex items-center gap-2">
@@ -208,7 +187,6 @@ export const HomePage: React.FC = () => {
             </div>
           )}
 
-          {/* Empty State */}
           {!isLoading && allEvents.length === 0 && (
             <div className="p-12 text-center text-stone-500 text-xs font-mono uppercase tracking-wider">
               No live public events found in catalogue.
@@ -216,7 +194,6 @@ export const HomePage: React.FC = () => {
           )}
         </section>
 
-        {/* 4. Minimal Explore Link */}
         <section className="text-center pt-2 pb-2">
           <Link
             to="/events"
@@ -228,7 +205,6 @@ export const HomePage: React.FC = () => {
         </section>
       </div>
 
-      {/* 5. Angled Crossing Festival Straps / Tape Ribbons (Mirroring Reference) */}
       <TapeRibbons className="mt-4 sm:mt-8" />
     </div>
   );

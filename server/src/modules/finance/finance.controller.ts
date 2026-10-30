@@ -76,14 +76,7 @@ export async function handleCreateLoginLink(
   }
 }
 
-/**
- * Returns complete Posh-inspired balances:
- * - Pending balance (awaiting settlement)
- * - Available balance (eligible for transfer)
- * - Transferred balance (moved to Express)
- * - Lifetime earnings & any recoverable liabilities
- * - Stripe Express balance if connected
- */
+// Returns organizer ledger balances and Stripe Express account balance
 export async function handleGetBalance(
   req: Request,
   res: Response,
@@ -117,9 +110,7 @@ export async function handleGetBalance(
   }
 }
 
-/**
- * Initiates an organizer manual withdrawal to their Stripe Express account.
- */
+// Manual withdrawal to Stripe Express account
 export async function handleExecuteWithdrawal(
   req: Request,
   res: Response,
@@ -144,9 +135,7 @@ export async function handleExecuteWithdrawal(
   }
 }
 
-/**
- * Admin-initiated withdrawal on behalf of an organizer.
- */
+// Admin-initiated withdrawal on behalf of an organizer
 export async function handleAdminWithdrawal(
   req: Request,
   res: Response,
@@ -172,9 +161,7 @@ export async function handleAdminWithdrawal(
   }
 }
 
-/**
- * Returns organizer transfer history (platform -> Express connected account).
- */
+// Platform-to-Express transfer history
 export async function handleGetTransfers(
   req: Request,
   res: Response,
@@ -194,9 +181,7 @@ export async function handleGetTransfers(
   }
 }
 
-/**
- * Returns organizer ledger entries.
- */
+// Organizer financial ledger audit trail
 export async function handleGetLedger(
   req: Request,
   res: Response,
@@ -217,9 +202,7 @@ export async function handleGetLedger(
   }
 }
 
-/**
- * Returns connected account bank payouts (Express account -> Bank).
- */
+// Express-to-bank payout history
 export async function handleGetPayouts(
   req: Request,
   res: Response,

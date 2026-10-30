@@ -23,13 +23,9 @@ export function normalizeOrigin(origin: string): string {
   }
 }
 
-/**
- * Compiles all permitted origins from configuration and defaults.
- */
 export function getAllAllowedOrigins(): Set<string> {
   const origins = new Set<string>();
 
-  // 1. Mandatory production frontend origins
   const defaultProductionOrigins = [
     'https://outside-vip.vercel.app',
     'https://outside.vip',
@@ -40,7 +36,6 @@ export function getAllAllowedOrigins(): Set<string> {
     if (normalized) origins.add(normalized);
   }
 
-  // 2. Local development origins
   const defaultLocalOrigins = [
     'http://localhost:5173',
     'http://127.0.0.1:5173',
@@ -54,13 +49,11 @@ export function getAllAllowedOrigins(): Set<string> {
     if (normalized) origins.add(normalized);
   }
 
-  // 3. Configured CLIENT_URL from environment
   if (env.CLIENT_URL) {
     const normalizedClient = normalizeOrigin(env.CLIENT_URL);
     if (normalizedClient) origins.add(normalizedClient);
   }
 
-  // 4. Configured ALLOWED_ORIGINS list (comma- or space-separated)
   if (env.ALLOWED_ORIGINS) {
     const customOrigins = env.ALLOWED_ORIGINS.split(/[\s,]+/);
     for (const item of customOrigins) {
@@ -72,12 +65,9 @@ export function getAllAllowedOrigins(): Set<string> {
   return origins;
 }
 
-// Regex matching official Outside.vip Vercel preview deployments (e.g. outside-vip-git-main-xxx.vercel.app)
+// Outside.vip Vercel preview deployments (e.g. outside-vip-git-main-xxx.vercel.app)
 const VERCEL_PREVIEW_PATTERN = /^https:\/\/outside-vip(-[a-z0-9-]+)?\.vercel\.app$/i;
 
-/**
- * Validates whether an origin is allowed to access the Outside.vip API.
- */
 export function isOriginAllowed(
   requestOrigin: string,
   allowedOrigins: Set<string> = getAllAllowedOrigins()
@@ -87,12 +77,10 @@ export function isOriginAllowed(
   const normalized = normalizeOrigin(requestOrigin);
   if (!normalized) return false;
 
-  // Direct match against allowed origin set
   if (allowedOrigins.has(normalized)) {
     return true;
   }
 
-  // Match against Vercel deployment pattern
   if (VERCEL_PREVIEW_PATTERN.test(normalized)) {
     return true;
   }

@@ -88,7 +88,6 @@ export const OrganizerWaitlistModal: React.FC<OrganizerWaitlistModalProps> = ({
         className="w-full max-w-4xl max-h-[90vh] bg-white rounded-2xl border border-stone-200 shadow-2xl flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-200"
         onClick={(e) => e.stopPropagation()}
       >
-        {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-stone-100 bg-[#FAF8F5]">
           <div className="flex items-center gap-3">
             <div className="w-9 h-9 rounded-xl bg-stone-900 text-white flex items-center justify-center shadow-2xs">
@@ -129,7 +128,6 @@ export const OrganizerWaitlistModal: React.FC<OrganizerWaitlistModalProps> = ({
           </div>
         </div>
 
-        {/* Modal Body */}
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
           {isLoading ? (
             <div className="p-16 text-center space-y-3">
@@ -145,7 +143,6 @@ export const OrganizerWaitlistModal: React.FC<OrganizerWaitlistModalProps> = ({
             </div>
           ) : (
             <>
-              {/* Tier Summaries */}
               <div className="space-y-2">
                 <h4 className="text-xs font-mono uppercase font-bold text-stone-700 tracking-wider">
                   Tier Queues &amp; Allocations
@@ -189,7 +186,6 @@ export const OrganizerWaitlistModal: React.FC<OrganizerWaitlistModalProps> = ({
                 </div>
               </div>
 
-              {/* Entries Table */}
               <div className="space-y-2">
                 <div className="flex items-center justify-between">
                   <h4 className="text-xs font-mono uppercase font-bold text-stone-700 tracking-wider">
@@ -280,7 +276,6 @@ export const OrganizerWaitlistModal: React.FC<OrganizerWaitlistModalProps> = ({
           )}
         </div>
 
-        {/* Footer */}
         <div className="px-6 py-3 border-t border-stone-200 bg-[#FAF8F5] flex justify-end">
           <button
             type="button"

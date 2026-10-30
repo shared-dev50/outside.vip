@@ -39,17 +39,14 @@ export async function executeWithdrawal(
 ): Promise<OrganizerTransferResult> {
   const { userId, amountInCents, idempotencyKey, initiatedByUserId, isAdmin = false, notes } = input;
 
-  // 1. Amount validation
   if (!Number.isInteger(amountInCents) || amountInCents <= 0) {
     throw new BadRequestError('Withdrawal amount must be a positive integer in cents.', 'INVALID_WITHDRAWAL_AMOUNT');
   }
 
-  // Minimum withdrawal amount: $1.00 (100 cents)
   if (amountInCents < 100) {
     throw new BadRequestError('Minimum withdrawal amount is $1.00 USD.', 'WITHDRAWAL_BELOW_MINIMUM');
   }
 
-  // 2. Verify user and connected account exist
   const user = await prisma.user.findUnique({
     where: { id: userId },
     select: {
@@ -72,7 +69,6 @@ export async function executeWithdrawal(
     );
   }
 
-  // 3. Verify Stripe configuration is active
   if (!env.STRIPE_SECRET_KEY || env.STRIPE_SECRET_KEY === 'sk_test_placeholder') {
     throw new ServiceUnavailableError(
       'Withdrawals are temporarily unavailable while platform Stripe configuration is being completed.',
@@ -80,7 +76,6 @@ export async function executeWithdrawal(
     );
   }
 
-  // 4. Verify connected account can receive transfers via Stripe API
   let account: Stripe.Account;
   try {
     account = await stripe.accounts.retrieve(user.stripeAccountId);
@@ -99,7 +94,6 @@ export async function executeWithdrawal(
     throw new ServiceUnavailableError(classified.safeMessage, classified.code);
   }
 
-  // Check if payouts/transfers are enabled or requirements are overdue
   const canReceiveTransfers = account.payouts_enabled || account.charges_enabled || account.details_submitted;
   if (!canReceiveTransfers) {
     throw new BadRequestError(
@@ -108,11 +102,9 @@ export async function executeWithdrawal(
     );
   }
 
-  // 5. Unique transfer tracking
   const clientKey = idempotencyKey || `withdr_${nanoid(20)}`;
   const fullIdempotencyKey = `tx_${userId}_${clientKey}`;
 
-  // Check if an existing transfer was already recorded with this idempotency key
   const existingTransfer = await prisma.organizerTransfer.findUnique({
     where: { idempotencyKey: fullIdempotencyKey },
   });
@@ -141,13 +133,11 @@ export async function executeWithdrawal(
     }
   }
 
-  // 6. Execute atomic balance check and reservation with row-level lock
   const transferRecord = await prisma.$transaction(
     async (tx) => {
-      // Ensure balance row exists
       await getOrCreateOrganizerBalance(tx, userId);
 
-      // Lock balance row using FOR UPDATE to prevent concurrent race conditions
+      // Lock balance row to prevent concurrent race conditions on withdrawals
       const [lockedBalance] = await tx.$queryRaw<
         Array<{
           id: string;
@@ -185,7 +175,6 @@ export async function executeWithdrawal(
 
       const transferNumber = `TRF-${new Date().getFullYear()}-${nanoid(8).toUpperCase()}`;
 
-      // Record transfer in PENDING status
       return await tx.organizerTransfer.create({
         data: {
           transferNumber,
@@ -203,7 +192,6 @@ export async function executeWithdrawal(
     { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted }
   );
 
-  // 7. Call Stripe API to initiate the transfer
   let stripeTransfer: Stripe.Transfer;
   try {
     stripeTransfer = await stripe.transfers.create(
@@ -224,7 +212,7 @@ export async function executeWithdrawal(
       { idempotencyKey: `stripe_${transferRecord.idempotencyKey}` }
     );
   } catch (error: any) {
-    // Record failure in transfer record and do NOT deduct from organizer available balance
+    // Mark transfer as failed without deducting from available balance
     logStripeDiagnostic('executeWithdrawal:transfers.create', error, {
       userId,
       stripeAccountId: user.stripeAccountId,
@@ -251,9 +239,8 @@ export async function executeWithdrawal(
     );
   }
 
-  // 8. Stripe transfer succeeded! Finalize DB state in transaction
+  // Update balance and record transfer success in a transaction
   const updatedResult = await prisma.$transaction(async (tx) => {
-    // Re-lock balance row
     await tx.$queryRaw`
       SELECT id FROM "OrganizerBalance" WHERE "userId" = ${userId} FOR UPDATE
     `;
@@ -274,7 +261,6 @@ export async function executeWithdrawal(
       },
     });
 
-    // Create ledger entry
     await tx.financialLedgerEntry.create({
       data: {
         type: LedgerEntryType.TRANSFER_SUCCEEDED,

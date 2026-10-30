@@ -52,12 +52,10 @@ export const ScannerPage: React.FC = () => {
   const [checkInCount, setCheckInCount] = useState(342);
   const [isValidating, setIsValidating] = useState(false);
 
-  // Camera state
   const [cameraStatus, setCameraStatus] = useState<CameraStatus>('idle');
   const [cameraErrorMessage, setCameraErrorMessage] = useState<string | null>(null);
   const [facingMode, setFacingMode] = useState<'environment' | 'user'>('environment');
 
-  // Scanner refs for stream & animation lifecycle
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -76,7 +74,6 @@ export const ScannerPage: React.FC = () => {
     scanStatusRef.current = scanStatus;
   }, [scanStatus]);
 
-  // Load available events dynamically and check ?event= / ?slug= in URL
   useEffect(() => {
     let isMounted = true;
     const fetchEvents = async () => {
@@ -120,8 +117,7 @@ export const ScannerPage: React.FC = () => {
           });
         }
       } catch {
-        // Organizer endpoint may return 401 if unauthenticated
-      } finally {
+            } finally {
         if (isMounted) setIsLoadingEvents(false);
       }
     };
@@ -141,9 +137,6 @@ export const ScannerPage: React.FC = () => {
     };
   }, []);
 
-  /**
-   * Stop camera stream and cancel animation frames.
-   */
   const stopCamera = useCallback(() => {
     if (animationFrameRef.current) {
       cancelAnimationFrame(animationFrameRef.current);
@@ -167,13 +160,8 @@ export const ScannerPage: React.FC = () => {
     setCameraErrorMessage(null);
   }, []);
 
-  /**
-   * Request camera permission and start video feed.
-   * Prefers rear-facing camera ('environment') on mobile devices.
-   */
   const startCamera = useCallback(async (preferredFacing: 'environment' | 'user' = facingMode) => {
-    // Teardown any prior stream first
-    if (streamRef.current) {
+      if (streamRef.current) {
       streamRef.current.getTracks().forEach((t) => t.stop());
       streamRef.current = null;
     }
@@ -181,8 +169,7 @@ export const ScannerPage: React.FC = () => {
     setCameraStatus('requesting');
     setCameraErrorMessage(null);
 
-    // Secure context check
-    if (typeof window !== 'undefined') {
+      if (typeof window !== 'undefined') {
       const isLocalhost =
         window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
       if (!window.isSecureContext && !isLocalhost) {
@@ -192,8 +179,7 @@ export const ScannerPage: React.FC = () => {
       }
     }
 
-    // MediaDevices API existence check
-    if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
+      if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
       setCameraStatus('unsupported');
       setCameraErrorMessage(
         'Your browser does not support camera access. Please use Safari, Chrome, Edge, or Firefox.'
@@ -232,8 +218,7 @@ export const ScannerPage: React.FC = () => {
       isScanningPausedRef.current = false;
       lastScannedRef.current = null;
 
-      // Attach stream to video element
-      if (videoRef.current) {
+          if (videoRef.current) {
         videoRef.current.srcObject = stream;
         videoRef.current.setAttribute('playsinline', 'true');
         videoRef.current.muted = true;
@@ -250,26 +235,17 @@ export const ScannerPage: React.FC = () => {
     }
   }, [facingMode]);
 
-  /**
-   * Toggle between front and rear cameras.
-   */
   const toggleFacingMode = () => {
     const nextMode = facingMode === 'environment' ? 'user' : 'environment';
     startCamera(nextMode);
   };
 
-  /**
-   * Ensure camera tracks are stopped when leaving page.
-   */
   useEffect(() => {
     return () => {
       stopCamera();
     };
   }, [stopCamera]);
 
-  /**
-   * Reconnect existing active stream to video element when returning to idle scan view.
-   */
   useEffect(() => {
     if (scanStatus === 'idle' && cameraStatus === 'active' && streamRef.current && videoRef.current) {
       if (videoRef.current.srcObject !== streamRef.current) {
@@ -282,9 +258,6 @@ export const ScannerPage: React.FC = () => {
     }
   }, [scanStatus, cameraStatus]);
 
-  /**
-   * Fallback simulator for offline/demo tests.
-   */
   const handleLocalFallback = (trimmed: string) => {
     if (trimmed === 'tkt_sec_7a9f2e3b8c1d4e5f') {
       setScanStatus('valid');
@@ -311,9 +284,6 @@ export const ScannerPage: React.FC = () => {
     }
   };
 
-  /**
-   * Submits scanned or manually entered token to backend validation API.
-   */
   const handleValidateToken = async (token: string, overrideGateId?: string) => {
     const trimmed = extractTicketToken(token);
     if (!trimmed || isValidatingRef.current) return;
@@ -379,17 +349,13 @@ export const ScannerPage: React.FC = () => {
           note: message || 'You do not have permission to check in tickets at this gate. Please sign in with an organizer account.',
         });
       } else {
-        // Fallback for offline or local demo simulations
-        handleLocalFallback(trimmed);
+              handleLocalFallback(trimmed);
       }
     } finally {
       setIsValidating(false);
     }
   };
 
-  /**
-   * Continuous QR detection loop. Runs while cameraStatus === 'active' and viewfinder is displayed.
-   */
   useEffect(() => {
     if (cameraStatus !== 'active') return;
 
@@ -422,8 +388,7 @@ export const ScannerPage: React.FC = () => {
             }
           }
         } catch {
-          // Graceful skip on single frame read error
-        }
+                }
       }
 
       if (isMounted && cameraStatus === 'active') {
@@ -442,9 +407,6 @@ export const ScannerPage: React.FC = () => {
     };
   }, [cameraStatus]);
 
-  /**
-   * Reset scanner state for the next attendee while keeping camera active.
-   */
   const resetScanner = () => {
     setScanStatus('idle');
     setTicketMeta(null);
@@ -455,10 +417,8 @@ export const ScannerPage: React.FC = () => {
 
   return (
     <div className="max-w-3xl mx-auto px-4 py-10 space-y-8">
-      {/* Hidden processing canvas for frame decoding */}
       <canvas ref={canvasRef} className="hidden" aria-hidden="true" />
 
-      {/* Header */}
       <div className="text-center space-y-2">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-gray-100 border border-gray-200 text-gray-700 text-xs font-mono uppercase tracking-wider font-semibold">
           <ShieldCheck className="w-3.5 h-3.5" />
@@ -472,7 +432,6 @@ export const ScannerPage: React.FC = () => {
         </p>
       </div>
 
-      {/* Event Selection & Live Count Bar */}
       <div className="p-4 rounded-2xl bg-white border border-gray-200 shadow-sm flex flex-col sm:flex-row items-center justify-between gap-4">
         <div className="w-full sm:w-auto flex-1">
           <div className="flex items-center justify-between sm:justify-start gap-2 mb-1">
@@ -511,13 +470,10 @@ export const ScannerPage: React.FC = () => {
         </div>
       </div>
 
-      {/* Scanner Viewfinder / Test Area */}
       <div className="bg-white rounded-2xl p-6 sm:p-8 space-y-6 border border-gray-200 shadow-sm">
         {scanStatus === 'idle' ? (
           <div className="space-y-6">
-            {/* Viewfinder box */}
             <div className="relative aspect-square sm:aspect-[16/10] rounded-xl bg-gray-900 border-2 border-dashed border-gray-300 flex flex-col items-center justify-center text-center overflow-hidden">
-              {/* State A: Camera is Active - Display Live Video Stream */}
               {cameraStatus === 'active' && (
                 <>
                   <video
@@ -528,18 +484,15 @@ export const ScannerPage: React.FC = () => {
                     className="w-full h-full object-cover"
                   />
 
-                  {/* Corner Target Reticles */}
                   <div className="absolute inset-0 pointer-events-none">
                     <div className="absolute top-4 left-4 w-7 h-7 border-t-2 border-l-2 border-emerald-400" />
                     <div className="absolute top-4 right-4 w-7 h-7 border-t-2 border-r-2 border-emerald-400" />
                     <div className="absolute bottom-4 left-4 w-7 h-7 border-b-2 border-l-2 border-emerald-400" />
                     <div className="absolute bottom-4 right-4 w-7 h-7 border-b-2 border-r-2 border-emerald-400" />
 
-                    {/* Animated Scanning Beam */}
                     <div className="absolute left-8 right-8 h-0.5 bg-gradient-to-r from-transparent via-emerald-400 to-transparent animate-qr-scan shadow-[0_0_12px_#34d399]" />
                   </div>
 
-                  {/* Top Bar with Live Indicator & Camera Controls */}
                   <div className="absolute top-3 inset-x-3 flex items-center justify-between pointer-events-auto">
                     <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-black/60 backdrop-blur-md text-white text-[11px] font-mono font-medium border border-white/10">
                       <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
@@ -566,7 +519,6 @@ export const ScannerPage: React.FC = () => {
                     </div>
                   </div>
 
-                  {/* Bottom Guide Prompt */}
                   <div className="absolute bottom-3 inset-x-0 text-center pointer-events-none">
                     <span className="px-3.5 py-1 rounded-full bg-black/60 backdrop-blur-md text-gray-200 text-xs font-medium border border-white/10">
                       Hold attendee ticket QR code inside viewfinder
@@ -575,7 +527,6 @@ export const ScannerPage: React.FC = () => {
                 </>
               )}
 
-              {/* State B: Requesting Permissions */}
               {cameraStatus === 'requesting' && (
                 <div className="p-6 text-center text-white space-y-3">
                   <Loader2 className="w-8 h-8 animate-spin mx-auto text-emerald-400" />
@@ -588,7 +539,6 @@ export const ScannerPage: React.FC = () => {
                 </div>
               )}
 
-              {/* State C: Permission Denied */}
               {cameraStatus === 'permission_denied' && (
                 <div className="p-6 text-center text-white space-y-3 max-w-sm">
                   <div className="w-12 h-12 rounded-2xl bg-amber-500/20 text-amber-400 flex items-center justify-center mx-auto border border-amber-500/30">
@@ -612,7 +562,6 @@ export const ScannerPage: React.FC = () => {
                 </div>
               )}
 
-              {/* State D: No Camera Detected */}
               {cameraStatus === 'not_found' && (
                 <div className="p-6 text-center text-white space-y-3 max-w-sm">
                   <div className="w-12 h-12 rounded-2xl bg-gray-800 text-gray-400 flex items-center justify-center mx-auto border border-gray-700">
@@ -635,7 +584,6 @@ export const ScannerPage: React.FC = () => {
                 </div>
               )}
 
-              {/* State E: Camera In Use */}
               {cameraStatus === 'in_use' && (
                 <div className="p-6 text-center text-white space-y-3 max-w-sm">
                   <div className="w-12 h-12 rounded-2xl bg-amber-500/20 text-amber-400 flex items-center justify-center mx-auto border border-amber-500/30">
@@ -658,7 +606,6 @@ export const ScannerPage: React.FC = () => {
                 </div>
               )}
 
-              {/* State F: Unsupported / Insecure Context / Error */}
               {(cameraStatus === 'unsupported' || cameraStatus === 'insecure' || cameraStatus === 'error') && (
                 <div className="p-6 text-center text-white space-y-3 max-w-sm">
                   <div className="w-12 h-12 rounded-2xl bg-rose-500/20 text-rose-400 flex items-center justify-center mx-auto border border-rose-500/30">
@@ -685,7 +632,6 @@ export const ScannerPage: React.FC = () => {
                 </div>
               )}
 
-              {/* State G: Idle - Ready for User to Start Camera */}
               {cameraStatus === 'idle' && (
                 <div className="p-6 text-center flex flex-col items-center justify-center space-y-3">
                   <div className="w-16 h-16 rounded-2xl bg-white/10 backdrop-blur shadow-sm flex items-center justify-center text-white mb-1 border border-white/10">
@@ -706,7 +652,6 @@ export const ScannerPage: React.FC = () => {
                     Start Camera
                   </button>
 
-                  {/* Corner lines preview */}
                   <div className="absolute top-4 left-4 w-6 h-6 border-t-2 border-l-2 border-gray-600" />
                   <div className="absolute top-4 right-4 w-6 h-6 border-t-2 border-r-2 border-gray-600" />
                   <div className="absolute bottom-4 left-4 w-6 h-6 border-b-2 border-l-2 border-gray-600" />
@@ -715,7 +660,6 @@ export const ScannerPage: React.FC = () => {
               )}
             </div>
 
-            {/* Manual Entry Fallback & Seed Tokens */}
             <div className="space-y-3 pt-2">
               <div className="flex items-center gap-2 text-xs font-mono uppercase text-gray-500 font-semibold">
                 <Keyboard className="w-4 h-4" />
@@ -746,7 +690,6 @@ export const ScannerPage: React.FC = () => {
                 </button>
               </div>
 
-              {/* Quick test buttons for verification */}
               <div className="p-4 rounded-xl bg-gray-50 border border-gray-200 space-y-2">
                 <span className="text-[11px] font-mono uppercase text-gray-500 block font-semibold">
                   Test Pass Credentials:
@@ -778,7 +721,6 @@ export const ScannerPage: React.FC = () => {
             </div>
           </div>
         ) : (
-          /* Result Badge Displays */
           <div className="py-8 text-center space-y-6">
             {scanStatus === 'valid' && (
               <div className="space-y-4">

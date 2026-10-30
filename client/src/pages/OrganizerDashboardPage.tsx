@@ -52,7 +52,6 @@ export const OrganizerDashboardPage: React.FC = () => {
     setTimeout(() => setNotification(null), 4000);
   };
 
-  // 1. Fetch Dashboard Stats
   const {
     data: stats,
     isLoading: isLoadingStats,
@@ -63,7 +62,6 @@ export const OrganizerDashboardPage: React.FC = () => {
     enabled: Boolean(user && (user.role === 'ORGANIZER' || user.role === 'ADMIN')),
   });
 
-  // 2. Fetch Organizer Events
   const {
     data: eventsData,
     isLoading: isLoadingEvents,
@@ -74,7 +72,6 @@ export const OrganizerDashboardPage: React.FC = () => {
     enabled: Boolean(user && (user.role === 'ORGANIZER' || user.role === 'ADMIN')),
   });
 
-  // Mutations for publish & unpublish
   const publishMutation = useMutation({
     mutationFn: (eventId: string) => api.organizer.publishEvent(eventId),
     onSuccess: (data) => {
@@ -122,7 +119,6 @@ export const OrganizerDashboardPage: React.FC = () => {
     deleteMutation.mutate(eventToDelete.id);
   };
 
-  // Auth gate if user is not logged in or not an organizer
   if (!user || (user.role !== 'ORGANIZER' && user.role !== 'ADMIN')) {
     return (
       <div className="min-h-screen bg-[#FAF8F5] text-stone-900 flex items-center justify-center p-4 selection:bg-stone-900 selection:text-white">
@@ -183,9 +179,7 @@ export const OrganizerDashboardPage: React.FC = () => {
 
   return (
     <div className="relative min-h-screen bg-[#FAF8F5] text-stone-900 selection:bg-stone-900 selection:text-white overflow-x-hidden">
-      {/* Subtle Background Graphic Contours (matching Outside.vip visual language) */}
       <div className="absolute inset-0 pointer-events-none overflow-hidden select-none" aria-hidden="true">
-        {/* Top-Left Topographic Contour Waves */}
         <svg
           className="absolute -top-10 -left-10 w-80 sm:w-96 h-80 sm:h-96 opacity-25 text-[#D8D2C5]"
           viewBox="0 0 400 400"
@@ -200,7 +194,6 @@ export const OrganizerDashboardPage: React.FC = () => {
           <path d="M-50,220 C120,200 200,300 360,260 C440,240 460,320 490,420" />
         </svg>
 
-        {/* Top-Right Architectural Mesh Lines */}
         <svg
           className="absolute -top-6 -right-10 w-72 sm:w-88 h-72 sm:h-88 opacity-20 text-[#D8D2C5]"
           viewBox="0 0 350 350"
@@ -214,7 +207,6 @@ export const OrganizerDashboardPage: React.FC = () => {
           <path d="M10,-20 C80,150 160,210 370,280" />
         </svg>
 
-        {/* Upper Left Dot Matrix Grid */}
         <div className="absolute top-10 left-6 sm:left-12 grid grid-cols-4 gap-2 opacity-30 text-stone-400 font-mono text-[9px]">
           {Array.from({ length: 16 }).map((_, i) => (
             <span key={i}>+</span>
@@ -222,7 +214,6 @@ export const OrganizerDashboardPage: React.FC = () => {
         </div>
       </div>
 
-      {/* Top Banner Notifications */}
       {notification && (
         <div className="fixed top-20 right-4 z-50 max-w-md animate-in slide-in-from-top-2">
           <div
@@ -248,9 +239,7 @@ export const OrganizerDashboardPage: React.FC = () => {
         </div>
       )}
 
-      {/* Main Wide Container */}
       <div className="relative z-10 max-w-[1536px] mx-auto px-4 sm:px-6 lg:px-8 xl:px-10 py-8 sm:py-10 space-y-8">
-        {/* Top Header Bar */}
         <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 pb-6 border-b border-stone-200/90">
           <div>
             <div className="flex items-center gap-2 mb-1.5">
@@ -300,9 +289,7 @@ export const OrganizerDashboardPage: React.FC = () => {
           </div>
         </div>
 
-        {/* Real Summary Metrics Cards */}
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3.5 sm:gap-4">
-          {/* 1. Total Events */}
           <div className="p-4 sm:p-5 rounded-2xl bg-white border border-stone-200/90 shadow-xs hover:border-stone-300 transition-colors space-y-2">
             <div className="flex items-center justify-between text-stone-500">
               <span className="text-[10px] sm:text-[11px] font-mono uppercase tracking-wider font-semibold">
@@ -318,7 +305,6 @@ export const OrganizerDashboardPage: React.FC = () => {
             </div>
           </div>
 
-          {/* 2. Published */}
           <div className="p-4 sm:p-5 rounded-2xl bg-white border border-stone-200/90 shadow-xs hover:border-stone-300 transition-colors space-y-2">
             <div className="flex items-center justify-between text-stone-500">
               <span className="text-[10px] sm:text-[11px] font-mono uppercase tracking-wider font-semibold">
@@ -334,7 +320,6 @@ export const OrganizerDashboardPage: React.FC = () => {
             </div>
           </div>
 
-          {/* 3. Drafts */}
           <div className="p-4 sm:p-5 rounded-2xl bg-white border border-stone-200/90 shadow-xs hover:border-stone-300 transition-colors space-y-2">
             <div className="flex items-center justify-between text-stone-500">
               <span className="text-[10px] sm:text-[11px] font-mono uppercase tracking-wider font-semibold">
@@ -350,7 +335,6 @@ export const OrganizerDashboardPage: React.FC = () => {
             </div>
           </div>
 
-          {/* 4. Tickets Sold */}
           <div className="p-4 sm:p-5 rounded-2xl bg-white border border-stone-200/90 shadow-xs hover:border-stone-300 transition-colors space-y-2">
             <div className="flex items-center justify-between text-stone-500">
               <span className="text-[10px] sm:text-[11px] font-mono uppercase tracking-wider font-semibold">
@@ -366,7 +350,6 @@ export const OrganizerDashboardPage: React.FC = () => {
             </div>
           </div>
 
-          {/* 5. Revenue */}
           <div className="col-span-2 sm:col-span-3 lg:col-span-1 p-4 sm:p-5 rounded-2xl bg-white border border-stone-200/90 shadow-xs hover:border-stone-300 transition-colors space-y-2">
             <div className="flex items-center justify-between text-stone-500">
               <span className="text-[10px] sm:text-[11px] font-mono uppercase tracking-wider font-semibold">
@@ -383,9 +366,7 @@ export const OrganizerDashboardPage: React.FC = () => {
           </div>
         </div>
 
-        {/* Filter and Search Bar */}
         <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 pt-2">
-          {/* Status Tabs */}
           <div className="flex items-center p-1 rounded-xl bg-[#EFECE5]/80 border border-[#DDD7CB]/80 text-xs font-mono shadow-2xs">
             <button
               onClick={() => setFilterStatus('ALL')}
@@ -421,7 +402,6 @@ export const OrganizerDashboardPage: React.FC = () => {
             </button>
           </div>
 
-          {/* Search box */}
           <div className="relative w-full sm:w-80">
             <Search className="w-4 h-4 text-stone-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
             <input
@@ -434,7 +414,6 @@ export const OrganizerDashboardPage: React.FC = () => {
           </div>
         </div>
 
-        {/* Events Table Container (Expanded Desktop Width & Fluid Responsiveness) */}
         <div className="bg-white rounded-2xl border border-stone-200/90 overflow-hidden shadow-xs">
           {isLoadingEvents ? (
             <div className="p-16 text-center space-y-3">
@@ -444,7 +423,6 @@ export const OrganizerDashboardPage: React.FC = () => {
               </div>
             </div>
           ) : filteredEvents.length === 0 ? (
-            /* Empty State */
             <div className="p-12 sm:p-16 text-center space-y-5 max-w-lg mx-auto">
               <div className="w-14 h-14 rounded-2xl bg-[#EFECE5] border border-[#DDD7CB] flex items-center justify-center mx-auto text-stone-700 shadow-2xs">
                 <Sparkles className="w-7 h-7" />
@@ -506,7 +484,6 @@ export const OrganizerDashboardPage: React.FC = () => {
                         key={evt.id}
                         className="hover:bg-stone-50/70 transition-colors group"
                       >
-                        {/* Event Thumbnail & Title */}
                         <td className="px-6 py-4.5 align-middle">
                           <div className="flex items-center gap-3.5">
                             <div className="w-14 h-14 rounded-xl overflow-hidden bg-stone-100 border border-stone-200/80 shrink-0 relative shadow-2xs">
@@ -537,7 +514,6 @@ export const OrganizerDashboardPage: React.FC = () => {
                           </div>
                         </td>
 
-                        {/* Date & Location */}
                         <td className="px-6 py-4.5 align-middle text-stone-700">
                           <div className="space-y-1">
                             <div className="font-semibold text-stone-900 flex items-center gap-1.5 whitespace-nowrap">
@@ -558,7 +534,6 @@ export const OrganizerDashboardPage: React.FC = () => {
                           </div>
                         </td>
 
-                        {/* Status Badge */}
                         <td className="px-6 py-4.5 align-middle">
                           {isPublished ? (
                             <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[10px] font-mono uppercase tracking-wider font-bold bg-emerald-50 text-emerald-800 border border-emerald-300/80 shadow-2xs">
@@ -573,7 +548,6 @@ export const OrganizerDashboardPage: React.FC = () => {
                           )}
                         </td>
 
-                        {/* Inventory / Tickets Sold */}
                         <td className="px-6 py-4.5 align-middle">
                           <div className="space-y-1.5 max-w-[180px]">
                             <div className="flex justify-between font-mono text-[11px]">
@@ -599,15 +573,12 @@ export const OrganizerDashboardPage: React.FC = () => {
                           </div>
                         </td>
 
-                        {/* Real Revenue */}
                         <td className="px-6 py-4.5 align-middle font-mono font-bold text-sm text-stone-900 whitespace-nowrap">
                           {evt.revenueFormatted || '$0'}
                         </td>
 
-                        {/* Actions */}
                         <td className="px-6 py-4.5 align-middle text-right">
                           <div className="flex items-center justify-end gap-1.5 whitespace-nowrap">
-                            {/* View Waitlist */}
                             <button
                               type="button"
                               onClick={() => setWaitlistEvent(evt)}
@@ -617,7 +588,6 @@ export const OrganizerDashboardPage: React.FC = () => {
                               <Clock className="w-3.5 h-3.5 text-amber-600" />
                             </button>
 
-                            {/* Preview Mode */}
                             <Link
                               to={`/organizer/events/${evt.id}/preview`}
                               className="p-2 rounded-lg bg-stone-100/80 hover:bg-stone-200/80 text-stone-600 hover:text-stone-900 border border-stone-200/90 transition-colors shadow-2xs"
@@ -626,7 +596,6 @@ export const OrganizerDashboardPage: React.FC = () => {
                               <Eye className="w-3.5 h-3.5" />
                             </Link>
 
-                            {/* Edit Event */}
                             <Link
                               to={`/organizer/events/${evt.id}/edit`}
                               className="p-2 rounded-lg bg-stone-100/80 hover:bg-stone-200/80 text-stone-600 hover:text-stone-900 border border-stone-200/90 transition-colors shadow-2xs"
@@ -635,7 +604,6 @@ export const OrganizerDashboardPage: React.FC = () => {
                               <Edit3 className="w-3.5 h-3.5" />
                             </Link>
 
-                            {/* Publish / Unpublish Action Button */}
                             {isPublished ? (
                               <button
                                 onClick={() => unpublishMutation.mutate(evt.id)}
@@ -656,7 +624,6 @@ export const OrganizerDashboardPage: React.FC = () => {
                               </button>
                             )}
 
-                            {/* View Live (if published) */}
                             {isPublished && (
                               <Link
                                 to={`/events/${evt.slug}`}
@@ -667,7 +634,6 @@ export const OrganizerDashboardPage: React.FC = () => {
                               </Link>
                             )}
 
-                            {/* Delete Draft (only if draft and 0 sold) */}
                             {!isPublished && sold === 0 && (
                               <button
                                 onClick={() => setEventToDelete(evt)}
@@ -689,7 +655,6 @@ export const OrganizerDashboardPage: React.FC = () => {
         </div>
       </div>
 
-      {/* Confirmation Modal for Delete */}
       {eventToDelete && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-stone-950/40 backdrop-blur-sm animate-in fade-in">
           <div className="max-w-md w-full bg-white border border-stone-200/90 rounded-2xl p-6 space-y-4 shadow-2xl">
@@ -734,7 +699,6 @@ export const OrganizerDashboardPage: React.FC = () => {
         </div>
       )}
 
-      {/* Organizer Waitlist Modal */}
       <OrganizerWaitlistModal
         isOpen={Boolean(waitlistEvent)}
         onClose={() => setWaitlistEvent(null)}

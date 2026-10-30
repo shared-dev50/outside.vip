@@ -11,10 +11,7 @@ import { joinWaitlistSchema } from './waitlist.schema.js';
 import { NotFoundError, ForbiddenError, UnauthorizedError } from '../../utils/errors.js';
 import { verifyEventAccessToken } from '../events/passwordAccess.service.js';
 
-/**
- * POST /api/events/:slug/waitlist
- * Allows an attendee to join the waitlist for a sold-out ticket tier.
- */
+// POST /api/events/:slug/waitlist
 export async function handleJoinWaitlist(
   req: Request,
   res: Response,
@@ -75,10 +72,7 @@ export async function handleJoinWaitlist(
   }
 }
 
-/**
- * GET /api/waitlist/offers/:token
- * Looks up offer status and details for an offered ticket purchaser.
- */
+// GET /api/waitlist/offers/:token
 export async function handleLookupWaitlistOffer(
   req: Request,
   res: Response,
@@ -97,10 +91,7 @@ export async function handleLookupWaitlistOffer(
   }
 }
 
-/**
- * POST /api/waitlist/offers/:token/decline
- * Allows an attendee to decline their ticket offer and release inventory.
- */
+// POST /api/waitlist/offers/:token/decline
 export async function handleDeclineWaitlistOffer(
   req: Request,
   res: Response,
@@ -120,11 +111,7 @@ export async function handleDeclineWaitlistOffer(
   }
 }
 
-/**
- * POST /api/waitlist/maintenance
- * Triggers an immediate sweep of expired offers and reservations.
- * Useful for cron or external webhook integrations.
- */
+// POST /api/waitlist/maintenance (cron endpoint)
 export async function handleWaitlistMaintenance(
   req: Request,
   res: Response,
@@ -152,10 +139,7 @@ export async function handleWaitlistMaintenance(
   }
 }
 
-/**
- * GET /api/organizer/events/:id/waitlist
- * Returns waitlist entries and tier stats for an organizer's event.
- */
+// GET /api/organizer/events/:id/waitlist
 export async function handleGetOrganizerWaitlist(
   req: Request,
   res: Response,

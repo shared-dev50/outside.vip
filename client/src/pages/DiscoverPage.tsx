@@ -6,7 +6,6 @@ import { EventCategory } from '../types';
 import { Search, X, ChevronDown, ChevronLeft, ChevronRight, SlidersHorizontal, RefreshCw } from 'lucide-react';
 import { EventCard } from '../components/events/EventCard';
 
-// Filter tabs combining timeframes and categories inspired by the screenshot reference
 interface FilterTab {
   id: string;
   label: string;
@@ -31,7 +30,6 @@ const FILTER_TABS: FilterTab[] = [
 export const DiscoverPage: React.FC = () => {
   const [searchParams, setSearchParams] = useSearchParams();
 
-  // Read state from URL query parameters
   const initialSearch = searchParams.get('search') || '';
   const initialCategory = (searchParams.get('category') as EventCategory) || undefined;
   const initialCity = searchParams.get('city') || '';
@@ -47,7 +45,6 @@ export const DiscoverPage: React.FC = () => {
 
   const CARDS_PER_PAGE = 8;
 
-  // Sync state with URL params
   useEffect(() => {
     const params = new URLSearchParams();
     if (searchTerm.trim()) params.set('search', searchTerm.trim());
@@ -59,7 +56,6 @@ export const DiscoverPage: React.FC = () => {
     setCurrentPage(0);
   }, [searchTerm, selectedCategory, selectedCity, timeFilter, sortBy, setSearchParams]);
 
-  // Query events from API
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ['events-discover', searchTerm, selectedCategory, selectedCity, timeFilter, sortBy],
     queryFn: () =>
@@ -72,7 +68,6 @@ export const DiscoverPage: React.FC = () => {
       }),
   });
 
-  // Query distinct cities
   const { data: citiesData } = useQuery({
     queryKey: ['cities'],
     queryFn: () => api.events.cities(),
@@ -95,7 +90,6 @@ export const DiscoverPage: React.FC = () => {
       (sortBy && sortBy !== 'date_asc')
   );
 
-  // Dynamic Headline generation based on screenshot: "BROWSING CONCERTS IN", "BROWSING FESTIVALS IN", etc.
   const getHeadlinePrefix = () => {
     if (selectedCategory === 'MUSIC') return 'BROWSING CONCERTS IN';
     if (selectedCategory === 'FESTIVAL') return 'BROWSING FESTIVALS IN';
@@ -113,7 +107,6 @@ export const DiscoverPage: React.FC = () => {
     (currentPage + 1) * CARDS_PER_PAGE
   );
 
-  // Identify active tab
   const getActiveTabId = () => {
     if (selectedCategory) {
       const match = FILTER_TABS.find((t) => t.categoryValue === selectedCategory);
@@ -143,17 +136,13 @@ export const DiscoverPage: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-[#FAF8F5] text-stone-900 pb-20 selection:bg-stone-900 selection:text-white">
-      {/* Main Discover Layout Container */}
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-8 sm:pt-12 space-y-7">
-        {/* 1. Header Row (Matching Reference: Big Bold Title + City Dropdown Selector) */}
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-6 pb-2">
-          {/* Left: Giant Bold Headline with Location Dropdown inline */}
           <div className="flex flex-wrap items-center gap-3 sm:gap-4">
             <h1 className="font-display font-black text-3xl sm:text-5xl lg:text-6xl uppercase tracking-tight text-stone-900 leading-none">
               {getHeadlinePrefix()}
             </h1>
 
-            {/* Location Selector Dropdown Pill (Matching Reference) */}
             <div className="relative inline-block">
               <select
                 value={selectedCity}
@@ -172,9 +161,7 @@ export const DiscoverPage: React.FC = () => {
             </div>
           </div>
 
-          {/* Right: Sleek Search Bar & Sort Dropdown */}
           <div className="flex items-center gap-3 w-full lg:w-auto">
-            {/* Search Input */}
             <div className="relative flex-1 lg:w-64">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-stone-400" />
               <input
@@ -195,7 +182,6 @@ export const DiscoverPage: React.FC = () => {
               )}
             </div>
 
-            {/* Sort Selector */}
             <select
               value={sortBy}
               onChange={(e) => setSortBy(e.target.value)}
@@ -210,7 +196,6 @@ export const DiscoverPage: React.FC = () => {
           </div>
         </div>
 
-        {/* 2. Filter Tabs Bar (Matching Screenshot Reference: Clean Underline Tab Bar) */}
         <div className="border-b border-stone-200/90">
           <div className="flex items-center gap-6 sm:gap-8 overflow-x-auto scrollbar-none pb-0 text-sm">
             {FILTER_TABS.map((tab) => {
@@ -235,7 +220,6 @@ export const DiscoverPage: React.FC = () => {
           </div>
         </div>
 
-        {/* Active Filters Summary Tag */}
         {hasActiveFilters && (
           <div className="flex items-center justify-between text-xs font-mono text-stone-600 pt-1">
             <span>
@@ -250,7 +234,6 @@ export const DiscoverPage: React.FC = () => {
           </div>
         )}
 
-        {/* 3. Loading Skeleton State */}
         {isLoading && (
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6 pt-2">
             {[1, 2, 3, 4, 5, 6, 7, 8].map((i) => (
@@ -265,7 +248,6 @@ export const DiscoverPage: React.FC = () => {
           </div>
         )}
 
-        {/* 4. Error State */}
         {error && (
           <div className="p-8 rounded-lg bg-white border border-stone-300 text-center space-y-3 max-w-md mx-auto my-12 shadow-xs">
             <p className="text-stone-900 font-bold text-sm">Unable to load event catalogue</p>
@@ -280,7 +262,6 @@ export const DiscoverPage: React.FC = () => {
           </div>
         )}
 
-        {/* 5. Event Showcase Grid (Matching Reference Layout) */}
         {!isLoading && !error && (
           <div>
             {allEvents.length === 0 ? (
@@ -301,16 +282,13 @@ export const DiscoverPage: React.FC = () => {
               </div>
             ) : (
               <div className="space-y-8">
-                {/* 4-column responsive grid matching screenshot */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-5 sm:gap-6">
                   {pagedEvents.map((event) => (
                     <EventCard key={event.id} event={event} aspectRatio="16/10" />
                   ))}
                 </div>
 
-                {/* 6. Bottom Controls (Matching Screenshot Reference: Dots on left, Circular Arrows on right) */}
                 <div className="flex items-center justify-between pt-6 border-t border-stone-200/90">
-                  {/* Dot Indicators on bottom left */}
                   <div className="flex items-center gap-2">
                     {Array.from({ length: totalPages }).map((_, idx) => (
                       <button
@@ -326,7 +304,6 @@ export const DiscoverPage: React.FC = () => {
                     ))}
                   </div>
 
-                  {/* Circular Navigation Arrows on bottom right */}
                   <div className="flex items-center gap-2">
                     <button
                       onClick={() => setCurrentPage((p) => Math.max(0, p - 1))}

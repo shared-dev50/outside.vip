@@ -15,9 +15,6 @@ import {
 } from 'lucide-react';
 import { api } from '../lib/api';
 
-/**
- * Renders a crisp, high-contrast, scannable QR code matching Outside.vip passes.
- */
 const TicketQrCode: React.FC<{ token: string; size?: number }> = ({ token, size = 112 }) => {
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
 
@@ -121,7 +118,6 @@ export const OrderConfirmationPage: React.FC = () => {
     }
   };
 
-  // 1. Loading State
   if (isLoading) {
     return (
       <div className="max-w-3xl mx-auto px-4 sm:px-6 py-10 space-y-8 animate-pulse">
@@ -138,7 +134,6 @@ export const OrderConfirmationPage: React.FC = () => {
     );
   }
 
-  // 2. Error / Unauthorized State
   if (error || !order) {
     return (
       <div className="max-w-md mx-auto px-4 py-20 text-center space-y-4">
@@ -186,7 +181,6 @@ export const OrderConfirmationPage: React.FC = () => {
         </Link>
       </div>
 
-      {/* Confirmation Banner */}
       <div className="p-8 rounded-2xl bg-white border border-gray-200 shadow-sm text-center space-y-3">
         <div
           className={`w-14 h-14 rounded-full mx-auto flex items-center justify-center border ${
@@ -227,7 +221,6 @@ export const OrderConfirmationPage: React.FC = () => {
         </div>
       </div>
 
-      {/* Download Error Banner */}
       {downloadError && (
         <div className="p-4 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -243,7 +236,6 @@ export const OrderConfirmationPage: React.FC = () => {
         </div>
       )}
 
-      {/* Digital Ticket Passes */}
       <div className="space-y-6">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <h2 className="font-display font-bold text-xl text-gray-900 flex items-center gap-2">
@@ -302,7 +294,6 @@ export const OrderConfirmationPage: React.FC = () => {
             className="rounded-2xl bg-white border border-gray-200 shadow-sm overflow-hidden"
           >
             <div className="grid grid-cols-1 md:grid-cols-12 divide-y md:divide-y-0 md:divide-x divide-gray-200">
-              {/* Ticket Left Info */}
               <div className="p-6 md:p-8 md:col-span-8 space-y-6 flex flex-col justify-between">
                 <div className="space-y-4">
                   <div className="flex items-center justify-between">
@@ -367,9 +358,7 @@ export const OrderConfirmationPage: React.FC = () => {
                 </div>
               </div>
 
-              {/* Ticket Right QR Pass */}
               <div className="p-6 md:p-8 md:col-span-4 bg-gray-50 flex flex-col items-center justify-center text-center space-y-3">
-                {/* Visual Scannable QR Code Display */}
                 <div className="p-3 rounded-2xl bg-white border border-gray-200 shadow-sm flex items-center justify-center">
                   <TicketQrCode token={tkt.ticketToken} size={112} />
                 </div>

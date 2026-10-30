@@ -50,14 +50,12 @@ export const PosterCard: React.FC<PosterCardProps> = ({
         animationDelay: `${index * 80}ms`,
       }}
     >
-      {/* Outer Card / Pedestal Frame */}
       <div
         className={`rounded-sm transition-all duration-500 ease-out p-2.5 sm:p-3 relative ${isElevated
             ? 'bg-[#EAE4D9] border border-[#DDD5C7] shadow-[0_25px_45px_-12px_rgba(40,30,20,0.22)]'
             : 'bg-transparent border border-transparent hover:bg-[#F2ECE1]/60 hover:border-[#E2DAD0]'
           }`}
       >
-        {/* 1. Poster Image Frame with authentic aspect ratio */}
         <div className="relative aspect-[3/4] w-full overflow-hidden bg-stone-900 border border-stone-800/80 shadow-inner">
           <img
             src={event.coverImageUrl}
@@ -70,7 +68,6 @@ export const PosterCard: React.FC<PosterCardProps> = ({
             }}
           />
 
-          {/* Sold out overlay tag */}
           {event.isSoldOut && (
             <div className="absolute top-2.5 right-2.5 z-10">
               <span className="px-2 py-0.5 rounded bg-black/90 text-white font-mono text-[10px] font-bold uppercase tracking-wider">
@@ -79,18 +76,14 @@ export const PosterCard: React.FC<PosterCardProps> = ({
             </div>
           )}
 
-          {/* Subtle inner vignette */}
           <div className="absolute inset-0 pointer-events-none border border-black/10" />
         </div>
 
-        {/* 2. Structured Information Below Poster (Mirroring Reference) */}
         <div className="pt-3 pb-3 sm:pb-3.5 space-y-1">
-          {/* Date: "12 NOVEMBER || 2026" */}
           <div className="font-display font-black text-xs sm:text-sm tracking-wider text-stone-900 uppercase">
             {formatPosterDate(event.startAt)}
           </div>
 
-          {/* Venue & City */}
           <div className="flex items-center justify-between text-[11px] font-mono uppercase tracking-widest text-stone-600 font-bold truncate">
             <span className="truncate max-w-[170px]">{venueLabel}</span>
             <span className="text-[10px] text-stone-500 font-normal">
@@ -99,7 +92,6 @@ export const PosterCard: React.FC<PosterCardProps> = ({
           </div>
         </div>
 
-        {/* 3. Four-point sparkle icon (✦) on elevated hero card (as in reference Card 2) */}
         {isElevated && (
           <div className="absolute bottom-1.5 sm:bottom-2 right-2.5 sm:right-3 text-[#96846D] pointer-events-none select-none text-[11px] leading-none">
             ✦

@@ -15,7 +15,7 @@ describe('Event Presentation & Page Configuration Features', () => {
   let protectedEventSlug: string;
 
   beforeAll(async () => {
-    // 1. Authenticate seeded organizer
+    // Authenticate seeded organizer
     const organizerLogin = await request(app).post('/api/auth/login').send({
       email: 'sol@outside.vip',
       password: 'Outside2026!',
@@ -23,7 +23,7 @@ describe('Event Presentation & Page Configuration Features', () => {
     expect(organizerLogin.status).toBe(200);
     organizerToken = organizerLogin.body.data.token;
 
-    // 2. Authenticate seeded attendee
+    // Authenticate seeded attendee
     const attendeeLogin = await request(app).post('/api/auth/login').send({
       email: 'alex@outside.vip',
       password: 'Outside2026!',
@@ -56,10 +56,8 @@ describe('Event Presentation & Page Configuration Features', () => {
     }
   });
 
-  // =========================================================================
-  // 1. YouTube Extraction & Normalization Unit Tests
-  // =========================================================================
-  describe('YouTube URL validation and parsing', () => {
+    // YouTube Extraction & Normalization Unit Tests
+    describe('YouTube URL validation and parsing', () => {
     it('should extract 11-char video ID from standard watch URL', () => {
       expect(extractYouTubeVideoId('https://www.youtube.com/watch?v=dQw4w9WgXcQ')).toBe('dQw4w9WgXcQ');
       expect(normalizeYouTubeUrl('https://www.youtube.com/watch?v=dQw4w9WgXcQ')).toBe('https://www.youtube.com/watch?v=dQw4w9WgXcQ');
@@ -85,10 +83,8 @@ describe('Event Presentation & Page Configuration Features', () => {
     });
   });
 
-  // =========================================================================
-  // 2. Multiple Gallery Images & Event Features Persistence
-  // =========================================================================
-  describe('Event Gallery Images & Event Features', () => {
+    // Multiple Gallery Images & Event Features Persistence
+    describe('Event Gallery Images & Event Features', () => {
     it('POST /api/organizer/events creates an event with gallery images, features, and YouTube video', async () => {
       const payload = {
         title: 'FESTIVAL OF SOUND & VISION 2026',
@@ -239,10 +235,8 @@ describe('Event Presentation & Page Configuration Features', () => {
     });
   });
 
-  // =========================================================================
-  // 3. Explore Visibility (showOnExplore)
-  // =========================================================================
-  describe('Page settings: Explore visibility (showOnExplore)', () => {
+    // Explore Visibility (showOnExplore)
+    describe('Page settings: Explore visibility (showOnExplore)', () => {
     it('creates an event with showOnExplore=false and publishes it', async () => {
       const res = await request(app)
         .post('/api/organizer/events')
@@ -314,10 +308,8 @@ describe('Event Presentation & Page Configuration Features', () => {
     });
   });
 
-  // =========================================================================
-  // 4. Guestlist and Attendee-Count Privacy (hideGuestCount)
-  // =========================================================================
-  describe('Guestlist and attendee-count privacy (hideGuestCount)', () => {
+    // Guestlist and Attendee-Count Privacy (hideGuestCount)
+    describe('Guestlist and attendee-count privacy (hideGuestCount)', () => {
     it('returns calculated guestCount when hideGuestCount is false', async () => {
       // Publish the first event which has hideGuestCount: false
       const pubRes = await request(app)
@@ -351,10 +343,8 @@ describe('Event Presentation & Page Configuration Features', () => {
     });
   });
 
-  // =========================================================================
-  // 5. Password-Protected Events
-  // =========================================================================
-  describe('Password-protected events enforcement', () => {
+    // Password-Protected Events
+    describe('Password-protected events enforcement', () => {
     it('creates a password-protected event with bcrypt hash and never leaks hash', async () => {
       const res = await request(app)
         .post('/api/organizer/events')

@@ -41,8 +41,7 @@ describe('Automatic Ticket Waitlist System', () => {
   beforeAll(async () => {
     resetSentWaitlistEmails();
 
-    // 1. Authenticate organizer
-    const orgLogin = await request(app).post('/api/auth/login').send({
+        const orgLogin = await request(app).post('/api/auth/login').send({
       email: 'sol@outside.vip',
       password: 'Outside2026!',
     });
@@ -50,15 +49,14 @@ describe('Automatic Ticket Waitlist System', () => {
     organizerToken = orgLogin.body.data.token;
     organizerUserId = orgLogin.body.data.user.id;
 
-    // 2. Authenticate attendee
-    const attLogin = await request(app).post('/api/auth/login').send({
+        const attLogin = await request(app).post('/api/auth/login').send({
       email: 'alex@outside.vip',
       password: 'Outside2026!',
     });
     expect(attLogin.status).toBe(200);
     attendeeToken = attLogin.body.data.token;
 
-    // 3. Create a test event with a sold-out tier with waitlist enabled and another with waitlist disabled
+    // Create a test event with a sold-out tier with waitlist enabled and another with waitlist disabled
     const eventRes = await request(app)
       .post('/api/organizer/events')
       .set('Authorization', `Bearer ${organizerToken}`)
@@ -116,12 +114,11 @@ describe('Automatic Ticket Waitlist System', () => {
       data: { soldQuantity: 5 },
     });
 
-    // Publish event
-    await request(app)
+        await request(app)
       .post(`/api/organizer/events/${testEventId}/publish`)
       .set('Authorization', `Bearer ${organizerToken}`);
 
-    // 4. Create a recurring event with 2 occurrences to test occurrence isolation
+    // Create a recurring event with 2 occurrences to test occurrence isolation
     const seriesRes = await request(app)
       .post('/api/organizer/events')
       .set('Authorization', `Bearer ${organizerToken}`)
@@ -205,10 +202,8 @@ describe('Automatic Ticket Waitlist System', () => {
     }
   });
 
-  // =========================================================================
-  // 1. Registration Validation & Duplicate Prevention
-  // =========================================================================
-  describe('1. Registration Validation & Duplicate Prevention', () => {
+    // Registration Validation & Duplicate Prevention
+    describe('1. Registration Validation & Duplicate Prevention', () => {
     it('rejects waitlist join if tier does not have waitlist enabled', async () => {
       const res = await request(app)
         .post(`/api/events/${testEventSlug}/waitlist`)
@@ -307,10 +302,8 @@ describe('Automatic Ticket Waitlist System', () => {
     });
   });
 
-  // =========================================================================
-  // 2. FIFO Queue Policy & Head-of-Line Fair Queue
-  // =========================================================================
-  describe('2. FIFO Queue Policy & Head-of-Line Fair Queue', () => {
+    // FIFO Queue Policy & Head-of-Line Fair Queue
+    describe('2. FIFO Queue Policy & Head-of-Line Fair Queue', () => {
     it('maintains strict FIFO order and queues subsequent registrations', async () => {
       // Second customer: needs 1 ticket
       const reg2 = await request(app)
@@ -390,10 +383,8 @@ describe('Automatic Ticket Waitlist System', () => {
     });
   });
 
-  // =========================================================================
-  // 3. Timed Offer Lifecycle, Expiry & Token Security
-  // =========================================================================
-  describe('3. Timed Offer Lifecycle, Expiry & Token Security', () => {
+    // Timed Offer Lifecycle, Expiry & Token Security
+    describe('3. Timed Offer Lifecycle, Expiry & Token Security', () => {
     let offerToken: string;
     let customer2Token: string;
 
@@ -497,10 +488,8 @@ describe('Automatic Ticket Waitlist System', () => {
     });
   });
 
-  // =========================================================================
-  // 4. Checkout Integration & Stripe Webhook Fulfillment
-  // =========================================================================
-  describe('4. Checkout Integration & Stripe Webhook Fulfillment', () => {
+    // Checkout Integration & Stripe Webhook Fulfillment
+    describe('4. Checkout Integration & Stripe Webhook Fulfillment', () => {
     let customer3Token: string;
     let createdOrderNumber: string;
 
@@ -616,10 +605,8 @@ describe('Automatic Ticket Waitlist System', () => {
     });
   });
 
-  // =========================================================================
-  // 5. Recurring Events & Occurrence Isolation
-  // =========================================================================
-  describe('5. Recurring Events & Occurrence Isolation', () => {
+    // Recurring Events & Occurrence Isolation
+    describe('5. Recurring Events & Occurrence Isolation', () => {
     it('keeps occurrence waitlists completely isolated from sibling occurrences', async () => {
       // Register for Occurrence B
       const regOccB = await request(app)
@@ -671,10 +658,8 @@ describe('Automatic Ticket Waitlist System', () => {
     });
   });
 
-  // =========================================================================
-  // 6. Organiser Management & Authorization
-  // =========================================================================
-  describe('6. Organiser Management & Authorization', () => {
+    // Organiser Management & Authorization
+    describe('6. Organiser Management & Authorization', () => {
     it('returns waitlist summary and entries for authorized event organizer', async () => {
       const res = await request(app)
         .get(`/api/organizer/events/${testEventId}/waitlist`)
@@ -771,10 +756,8 @@ describe('Automatic Ticket Waitlist System', () => {
     });
   });
 
-  // =========================================================================
-  // 7. Advanced Concurrency, Active Checkout Protection & Maintenance Security
-  // =========================================================================
-  describe('7. Advanced Concurrency, Active Checkout Protection & Maintenance Security', () => {
+    // Advanced Concurrency, Active Checkout Protection & Maintenance Security
+    describe('7. Advanced Concurrency, Active Checkout Protection & Maintenance Security', () => {
     let testTierId: string;
     let customerToken: string;
     let checkoutOrderNumber: string;
@@ -800,7 +783,7 @@ describe('Automatic Ticket Waitlist System', () => {
     });
 
     it('protects in-progress checkout: does not expire an offer when an active checkout order is pending even if offer window elapsed', async () => {
-      // 1. Join waitlist
+      // Join waitlist
       await request(app)
         .post(`/api/events/${testEventSlug}/waitlist`)
         .send({
@@ -810,13 +793,13 @@ describe('Automatic Ticket Waitlist System', () => {
           quantity: 2,
         });
 
-      // 2. Generate offer
+      // Generate offer
       await processWaitlistForTier(testTierId);
       const email = sentWaitlistEmails.find((e) => e.to === 'activebuyer@outside.vip')!;
       expect(email).toBeDefined();
       customerToken = email.claimUrl.match(/offerToken=(wlot_[A-Za-z0-9_-]+)/)![1];
 
-      // 3. Initiate checkout session
+      // Initiate checkout session
       const sessionRes = await request(app)
         .post('/api/checkout/create-session')
         .send({
@@ -830,23 +813,23 @@ describe('Automatic Ticket Waitlist System', () => {
       expect(sessionRes.status).toBe(201);
       checkoutOrderNumber = sessionRes.body.data.orderNumber;
 
-      // 4. Simulate offer's 30-minute window passing while order reservation is still actively alive
+      // Simulate offer's 30-minute window passing while order reservation is still actively alive
       await prisma.ticketWaitlistOffer.update({
         where: { tokenHash: hashOfferToken(customerToken) },
         data: { expiresAt: new Date(Date.now() - 5 * 60 * 1000) },
       });
 
-      // 5. Run maintenance sweep
+      // Run maintenance sweep
       const sweepRes = await runWaitlistMaintenancePass();
       expect(sweepRes.expiredOffers).toBe(0); // Protected by active checkout!
 
-      // 6. Verify offer is STILL PENDING and can be looked up
+      // Verify offer is STILL PENDING and can be looked up
       const lookupRes = await request(app).get(`/api/waitlist/offers/${customerToken}`);
       expect(lookupRes.status).toBe(200);
       expect(lookupRes.body.data.valid).toBe(true);
       expect(lookupRes.body.data.expired).toBe(false);
 
-      // 7. Complete Stripe payment successfully
+      // Complete Stripe payment successfully
       const order = await prisma.order.findUniqueOrThrow({
         where: { orderNumber: checkoutOrderNumber },
       });

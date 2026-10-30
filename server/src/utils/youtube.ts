@@ -19,7 +19,6 @@ export function extractYouTubeVideoId(rawUrl?: string | null): string | null {
   try {
     const parsed = new URL(trimmed);
 
-    // Enforce safe protocols
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
       return null;
     }
@@ -41,7 +40,6 @@ export function extractYouTubeVideoId(rawUrl?: string | null): string | null {
     let videoId: string | null = null;
 
     if (isShortHost) {
-      // youtu.be/XXXXXXXXXXX
       const pathParts = parsed.pathname.split('/').filter(Boolean);
       if (pathParts.length > 0) {
         videoId = pathParts[0];
@@ -63,7 +61,7 @@ export function extractYouTubeVideoId(rawUrl?: string | null): string | null {
 
     if (!videoId) return null;
 
-    // YouTube video IDs are strictly 11 characters of [a-zA-Z0-9_-]
+    // Standard 11-char YouTube identifier
     const validIdRegex = /^[a-zA-Z0-9_-]{11}$/;
     if (!validIdRegex.test(videoId)) {
       return null;
@@ -75,9 +73,6 @@ export function extractYouTubeVideoId(rawUrl?: string | null): string | null {
   }
 }
 
-/**
- * Normalizes a validated YouTube video ID or URL into standard canonical watch URL.
- */
 export function normalizeYouTubeUrl(input?: string | null): string | null {
   if (!input || typeof input !== 'string') return null;
   const trimmed = input.trim();

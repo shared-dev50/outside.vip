@@ -35,9 +35,6 @@ export interface ImageValidationResult {
   error?: string;
 }
 
-/**
- * Validate image buffer using true magic bytes and size constraints
- */
 export function validateImageBuffer(buffer: Buffer): ImageValidationResult {
   if (!buffer || buffer.length === 0) {
     return { isValid: false, error: 'No image data received or file is empty.' };
@@ -50,12 +47,12 @@ export function validateImageBuffer(buffer: Buffer): ImageValidationResult {
     };
   }
 
-  // 1. JPEG Magic bytes: FF D8 FF
+  // JPEG: FF D8 FF
   if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
     return { isValid: true, mimeType: 'image/jpeg' };
   }
 
-  // 2. PNG Magic bytes: 89 50 4E 47 0D 0A 1A 0A
+  // PNG: 89 50 4E 47 0D 0A 1A 0A
   if (
     buffer.length >= 8 &&
     buffer[0] === 0x89 &&
@@ -70,7 +67,7 @@ export function validateImageBuffer(buffer: Buffer): ImageValidationResult {
     return { isValid: true, mimeType: 'image/png' };
   }
 
-  // 3. WebP Magic bytes: "RIFF" .... "WEBP"
+  // WebP: RIFF...WEBP
   if (
     buffer.length >= 12 &&
     buffer.toString('ascii', 0, 4) === 'RIFF' &&
@@ -85,9 +82,6 @@ export function validateImageBuffer(buffer: Buffer): ImageValidationResult {
   };
 }
 
-/**
- * Generate signed upload parameters for direct client-to-Cloudinary upload
- */
 export function generateSignedUploadParams(folder: string = CLOUDINARY_FOLDER) {
   if (!isCloudinaryConfigured()) {
     throw new Error(
@@ -113,9 +107,6 @@ export function generateSignedUploadParams(folder: string = CLOUDINARY_FOLDER) {
   };
 }
 
-/**
- * Generate an optimized thumbnail URL for an event cover
- */
 export function generateThumbnailUrl(secureUrl: string): string {
   if (secureUrl.includes('/upload/')) {
     return secureUrl.replace('/upload/', '/upload/c_fill,g_auto,w_600,h_400,q_auto,f_auto/');
@@ -132,9 +123,6 @@ export interface UploadResult {
   height: number;
 }
 
-/**
- * Upload an image buffer directly to Cloudinary using a stream
- */
 export async function uploadImageBuffer(
   buffer: Buffer,
   folder: string = CLOUDINARY_FOLDER
@@ -182,10 +170,7 @@ export async function uploadImageBuffer(
   });
 }
 
-/**
- * Delete a Cloudinary asset by public ID safely
- * Ensures public ID starts with the dedicated folder to avoid accidental or malicious deletions
- */
+// Only delete assets inside the designated event covers folder
 export async function deleteCloudinaryAsset(publicId?: string | null): Promise<boolean> {
   if (!isCloudinaryConfigured()) return false;
   if (!publicId || typeof publicId !== 'string') return false;

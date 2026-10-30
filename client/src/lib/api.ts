@@ -25,30 +25,22 @@ import {
   WithdrawalResponse,
 } from '../types';
 
-/**
- * Normalizes the API base URL to ensure proper endpoint composition.
- * Handles full URLs with or without trailing /api, trailing slashes,
- * and falls back to '/api' for local Vite dev proxy.
- */
 export function resolveApiBaseUrl(rawUrl?: string): string {
   const url = (rawUrl ?? '').trim();
   if (!url) {
     return '/api';
   }
 
-  // Strip trailing slashes
   const clean = url.replace(/\/+$/, '');
 
   if (!clean || clean === '/api') {
     return '/api';
   }
 
-  // If already ends with /api, return as is
   if (clean.endsWith('/api')) {
     return clean;
   }
 
-  // Otherwise append /api
   return `${clean}/api`;
 }
 
@@ -56,7 +48,6 @@ export function buildApiUrl(endpoint: string, base: string = API_BASE): string {
   const cleanBase = base.replace(/\/+$/, '');
   let path = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
 
-  // Prevent duplicate /api if the endpoint already starts with /api
   if (path === '/api') {
     path = '';
   } else if (path.startsWith('/api/')) {
@@ -244,7 +235,7 @@ export const api = {
           ? window.localStorage.getItem('outside_token')
           : null;
 
-      // 1. Attempt signed direct-upload to Cloudinary from browser
+      // Direct upload to Cloudinary
       try {
         const signData = await request<{
           cloudName: string;
@@ -283,7 +274,7 @@ export const api = {
 
         return { secure_url, public_id, thumbnailUrl };
       } catch (directUploadErr: any) {
-        // 2. Fall back to secure server-authorized upload endpoint
+        // Fallback: upload via server
         const serverFormData = new FormData();
         serverFormData.append('image', file);
 

@@ -139,7 +139,6 @@ export const EventPreviewPage: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-white text-gray-900 pb-24">
-      {/* 1. High-Visibility Organizer Preview Sticky Header */}
       <div className="sticky top-0 z-50 bg-[#08090C] text-white border-b border-white/10 shadow-2xl">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3 flex flex-col sm:flex-row items-center justify-between gap-3">
           <div className="flex items-center gap-3">
@@ -206,7 +205,6 @@ export const EventPreviewPage: React.FC = () => {
         </div>
       </div>
 
-      {/* Toast Notification */}
       {notification && (
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mt-4">
           <div
@@ -231,12 +229,9 @@ export const EventPreviewPage: React.FC = () => {
         </div>
       )}
 
-      {/* 2. Public Page Faithful Rendering */}
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-10 items-start">
-          {/* Left Column: Cover, Title, Details, Description, Organizer */}
           <div className="lg:col-span-7 space-y-6">
-            {/* Event Cover Image */}
             <div className="relative aspect-[16/10] rounded-xl overflow-hidden bg-gray-100 border border-gray-200 shadow-sm">
               <img
                 src={event.coverImageUrl}
@@ -254,7 +249,6 @@ export const EventPreviewPage: React.FC = () => {
               </div>
             </div>
 
-            {/* Title & Tagline */}
             <div className="space-y-2">
               <h1 className="font-display font-extrabold text-2xl sm:text-3xl md:text-4xl text-gray-900 tracking-tight leading-tight">
                 {event.title}
@@ -266,7 +260,6 @@ export const EventPreviewPage: React.FC = () => {
               )}
             </div>
 
-            {/* Schedule & Venue Box */}
             <div className="p-4 rounded-xl bg-gray-50 border border-gray-200 grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
               <div className="space-y-1">
                 <div className="text-gray-400 font-medium flex items-center gap-1.5 uppercase tracking-wider text-[11px]">
@@ -320,7 +313,6 @@ export const EventPreviewPage: React.FC = () => {
               </div>
             </div>
 
-            {/* Organizer Card */}
             <div className="p-4 rounded-xl border border-gray-200 flex items-center justify-between gap-3 text-xs">
               <div className="flex items-center gap-3">
                 {event.organizer.avatarUrl ? (
@@ -348,7 +340,6 @@ export const EventPreviewPage: React.FC = () => {
               </div>
             </div>
 
-            {/* Description Narrative */}
             <div className="space-y-3 pt-2">
               <h2 className="font-bold text-lg text-gray-900">About this event</h2>
               <div className="text-gray-700 text-sm leading-relaxed whitespace-pre-line font-normal">
@@ -356,7 +347,6 @@ export const EventPreviewPage: React.FC = () => {
               </div>
             </div>
 
-            {/* Event Policies */}
             <div className="p-4 rounded-xl bg-gray-50 border border-gray-200 space-y-2 text-xs text-gray-600">
               <div className="font-semibold text-gray-900">Important Information & Door Policy</div>
               <div className="grid grid-cols-2 gap-2 text-xs pt-1">
@@ -373,7 +363,6 @@ export const EventPreviewPage: React.FC = () => {
             </div>
           </div>
 
-          {/* Right Column: Ticket Tiers Panel */}
           <div className="lg:col-span-5 space-y-4">
             <div className="border border-gray-200 rounded-xl p-5 sm:p-6 space-y-5 sticky top-20 bg-white shadow-sm">
               <div className="flex items-center justify-between pb-3 border-b border-gray-100">
@@ -424,7 +413,6 @@ export const EventPreviewPage: React.FC = () => {
                             </div>
                           </div>
 
-                          {/* Stepper Preview */}
                           <div className="flex items-center gap-1.5 bg-gray-50 border border-gray-200 rounded-md p-1 shrink-0">
                             <button
                               type="button"
@@ -453,7 +441,6 @@ export const EventPreviewPage: React.FC = () => {
                 </div>
               )}
 
-              {/* Checkout Calculation Summary */}
               {totalTickets > 0 && (
                 <div className="pt-3 border-t border-gray-100 space-y-3 text-xs">
                   <div className="flex items-center justify-between text-sm font-bold text-gray-900">

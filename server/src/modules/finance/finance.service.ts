@@ -211,7 +211,6 @@ export async function getConnectedAccountStatus(
     throw new NotFoundError('Organizer user not found');
   }
 
-  // Check platform Stripe secret key configuration
   if (!env.STRIPE_SECRET_KEY || env.STRIPE_SECRET_KEY === 'sk_test_placeholder') {
     return buildDisconnectedStatus(
       'configuration_unavailable',
@@ -220,7 +219,6 @@ export async function getConnectedAccountStatus(
     );
   }
 
-  // Case 1: No connected Stripe account
   if (!user.stripeAccountId) {
     return buildDisconnectedStatus(
       'not_connected',
@@ -362,9 +360,8 @@ export async function getConnectedAccountStatus(
 
     const classified = classifyStripeError(error);
 
-    // Case 2: Invalid or inaccessible connected account
+    // Do not silently recreate a new account on read errors; surface safe status for user reconnection
     if (classified.category === 'invalid_or_inaccessible') {
-      // Do NOT silently create a new account in the background. Return the safe state so UI can guide the user.
       return buildDisconnectedStatus(
         'invalid_or_inaccessible',
         'The previously connected Stripe account is no longer valid or accessible. Please reconnect your Stripe account to resume ticket sales.',
@@ -372,7 +369,6 @@ export async function getConnectedAccountStatus(
       );
     }
 
-    // Case 3: Platform Stripe configuration problem
     if (classified.category === 'configuration_unavailable') {
       return buildDisconnectedStatus(
         'configuration_unavailable',
@@ -381,7 +377,6 @@ export async function getConnectedAccountStatus(
       );
     }
 
-    // Case 4: Temporary Stripe API / network failure
     if (classified.category === 'service_unavailable') {
       throw new ServiceUnavailableError(classified.safeMessage, classified.code);
     }

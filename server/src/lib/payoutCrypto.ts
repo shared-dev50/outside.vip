@@ -19,17 +19,13 @@ export function maskAccountNumber(rawNumber: string): string {
   return `•••• •••• •••• ${last4}`;
 }
 
-/**
- * Extracts the last 4 characters of an account number.
- */
 export function getAccountNumberLast4(rawNumber: string): string {
   const digitsOnly = rawNumber.trim().replace(/\s+/g, '');
   return digitsOnly.slice(-4);
 }
 
 /**
- * Encrypts an account number using AES-256-GCM.
- * Never stores plain text account numbers in the database.
+ * Encrypts an account number using AES-256-GCM before database storage.
  */
 export function encryptAccountNumber(rawNumber: string): string {
   const iv = crypto.randomBytes(12);
@@ -43,9 +39,6 @@ export function encryptAccountNumber(rawNumber: string): string {
   return `${iv.toString('hex')}:${authTag.toString('hex')}:${encrypted}`;
 }
 
-/**
- * Decrypts an AES-256-GCM encrypted account number.
- */
 export function decryptAccountNumber(encryptedString: string): string {
   const parts = encryptedString.split(':');
   if (parts.length !== 3) {

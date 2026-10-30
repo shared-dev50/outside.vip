@@ -47,7 +47,6 @@ export async function releaseExpiredReservations(
     return 0;
   }
 
-  // Group released quantities by ticket tier
   const tierQuantityMap = new Map<string, number>();
   const reservationIds: string[] = [];
   const orderIds: string[] = [];
@@ -59,7 +58,6 @@ export async function releaseExpiredReservations(
     tierQuantityMap.set(reservation.ticketTierId, current + reservation.quantity);
   }
 
-  // Restore inventory on tiers
   for (const [tierId, qty] of tierQuantityMap.entries()) {
     await prismaClient.ticketTier.update({
       where: { id: tierId },
@@ -71,13 +69,11 @@ export async function releaseExpiredReservations(
     });
   }
 
-  // Mark reservations as RELEASED
   await prismaClient.ticketReservation.updateMany({
     where: { id: { in: reservationIds } },
     data: { status: ReservationStatus.RELEASED },
   });
 
-  // Mark pending orders as EXPIRED
   await prismaClient.order.updateMany({
     where: {
       id: { in: orderIds },
@@ -86,7 +82,7 @@ export async function releaseExpiredReservations(
     data: { status: OrderStatus.EXPIRED },
   });
 
-  // Also mark any waitlist offers attached to these expired orders as EXPIRED
+  // Also expire linked waitlist offers
   const linkedExpiredOffers = await prismaClient.ticketWaitlistOffer.findMany({
     where: {
       orderId: { in: orderIds },
@@ -109,7 +105,6 @@ export async function releaseExpiredReservations(
     });
   }
 
-  // Advance waitlist queue for tiers that received released inventory
   for (const tierId of tierQuantityMap.keys()) {
     processWaitlistForTier(tierId).catch((err) => {
       console.error(`Error advancing waitlist after releasing reservations for tier ${tierId}:`, err);
@@ -127,12 +122,10 @@ export async function createCheckoutSession(
   input: CreateCheckoutSessionInput,
   authenticatedUserId?: string
 ): Promise<CheckoutResult> {
-  // 1. Release any expired holds so inventory is fresh
   await releaseExpiredReservations();
 
   const { eventId, items, customerEmail, customerName, customerPhone, idempotencyKey: clientIdempotency, offerToken } = input;
 
-  // 2. Fetch event and validate status
   const event = await prisma.event.findUnique({
     where: { id: eventId },
     include: {
@@ -216,7 +209,6 @@ export async function createCheckoutSession(
   });
 
   if (existingOrder && existingOrder.status === OrderStatus.PENDING && existingOrder.expiresAt > now) {
-    // If a PaymentIntent was already created, retrieve it and return its client secret
     if (existingOrder.paymentReference) {
       try {
         const paymentIntent = await stripe.paymentIntents.retrieve(existingOrder.paymentReference);
@@ -233,12 +225,11 @@ export async function createCheckoutSession(
           };
         }
       } catch {
-        // If retrieve fails, proceed to generate new payment intent
+        // Proceed with a fresh session if retrieving the previous intent fails
       }
     }
   }
 
-  // 3. Validate requested items against event ticket tiers
   const requestedTierMap = new Map<string, number>();
   for (const item of items) {
     if (requestedTierMap.has(item.ticketTierId)) {
@@ -287,9 +278,8 @@ export async function createCheckoutSession(
     throw new BadRequestError('All ticket tiers in a single checkout must share the same currency');
   }
 
-  // 4. Atomic PostgreSQL Transaction with row-level locking
-  // Stripe requires Checkout Session expires_at to be at least 30 minutes in the future.
-  // We use 30 minutes + 60s buffer (31 minutes / 1860s) to safely exceed the minimum and absorb clock skew.
+  // Stripe requires session expiry to be at least 30 minutes in the future.
+  // 30m + 60s buffer absorbs clock skew.
   const reservationHoldMinutes = 30;
   const expiresAt = new Date(Date.now() + (reservationHoldMinutes * 60 + 60) * 1000);
   const orderNumber = `OUT-${now.getFullYear()}-${Math.floor(10000 + Math.random() * 90000)}`;
@@ -300,7 +290,7 @@ export async function createCheckoutSession(
   try {
     reservationResult = await prisma.$transaction(
       async (tx) => {
-        // Lock the requested tier rows for update
+        // Lock tier rows to prevent overselling on concurrent checkouts
         const lockedTiers = await tx.$queryRaw<
           Array<{
             id: string;
@@ -320,7 +310,6 @@ export async function createCheckoutSession(
 
         const lockedMap = new Map(lockedTiers.map((t) => [t.id, t]));
 
-        // Calculate verified subtotal and total tickets strictly from database prices
         let ticketSubtotalInCents = 0;
         let totalTicketQuantity = 0;
         const orderItemsData = [];
@@ -361,8 +350,8 @@ export async function createCheckoutSession(
             status: ReservationStatus.ACTIVE,
           });
 
-          // If purchasing through waitlist offer, the tickets were already reserved.
-          // If buyer bought fewer tickets than offered, release the difference back.
+          // Waitlist tickets were already held in reservedQuantity.
+          // If the buyer took fewer than offered, release the difference back.
           if (isOfferItem) {
             if (item.quantity < verifiedOffer.quantity) {
               const diff = verifiedOffer.quantity - item.quantity;
@@ -376,7 +365,6 @@ export async function createCheckoutSession(
               });
             }
           } else {
-            // Atomically increment reserved quantity on tier for general purchases
             await tx.ticketTier.update({
               where: { id: item.ticketTierId },
               data: {
@@ -388,10 +376,8 @@ export async function createCheckoutSession(
           }
         }
 
-        // Authoritatively compute fee breakdown (10% platform, $0.95 service, 2.9% + $0.30 Stripe gross-up)
         const feeBreakdown = calculateCheckoutFeeBreakdown(ticketSubtotalInCents, totalTicketQuantity);
 
-        // Create the pending order record
         const order = await tx.order.create({
           data: {
             orderNumber,
@@ -422,7 +408,6 @@ export async function createCheckoutSession(
           },
         });
 
-        // Link waitlist offer to order
         if (verifiedOffer) {
           await tx.ticketWaitlistOffer.update({
             where: { id: verifiedOffer.id },
@@ -448,7 +433,6 @@ export async function createCheckoutSession(
   const createdOrder = reservationResult.order;
   const createdFeeBreakdown = reservationResult.feeBreakdown;
 
-  // 5. Create Stripe PaymentIntent
   try {
     const paymentIntent = await stripe.paymentIntents.create(
       {
@@ -479,7 +463,6 @@ export async function createCheckoutSession(
       throw new Error('Stripe PaymentIntent client secret missing in provider response');
     }
 
-    // Attach Stripe PaymentIntent ID to order
     await prisma.order.update({
       where: { id: createdOrder.id },
       data: { paymentReference: paymentIntent.id },
@@ -498,10 +481,9 @@ export async function createCheckoutSession(
   } catch (stripeError) {
     console.error('Stripe PaymentIntent creation failed; initiating reservation rollback:', stripeError);
 
-    // Rollback reservation atomically so stock is not locked up
+    // Roll back reservations on payment setup failure
     await prisma.$transaction(async (tx) => {
       for (const item of createdOrder.items) {
-        // If not an offer item, decrement the reserved quantity that was added
         if (!verifiedOffer || verifiedOffer.ticketTierId !== item.ticketTierId) {
           await tx.ticketTier.update({
             where: { id: item.ticketTierId },
@@ -512,7 +494,6 @@ export async function createCheckoutSession(
             },
           });
         } else if (item.quantity < verifiedOffer.quantity) {
-          // If offer item and difference was decremented, re-increment back
           const diff = verifiedOffer.quantity - item.quantity;
           await tx.ticketTier.update({
             where: { id: item.ticketTierId },
@@ -543,7 +524,6 @@ export async function createCheckoutSession(
       });
     });
 
-    // Advance waitlist if inventory was released
     for (const item of createdOrder.items) {
       processWaitlistForTier(item.ticketTierId).catch(() => {});
     }

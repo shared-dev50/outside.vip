@@ -5,9 +5,7 @@ export const Footer: React.FC = () => {
   return (
     <footer className="border-t border-stone-200/80 bg-[#FAF9F6] text-stone-600">
       <div className="max-w-7xl xl:max-w-[1536px] mx-auto px-4 sm:px-6 lg:px-8 xl:px-10 py-12 sm:py-16">
-        {/* Main Footer Grid: Editorial Brand Area & Structured Navigation */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-10 lg:gap-16 items-start">
-          {/* Brand Area (Spans 6 cols on desktop) */}
           <div className="lg:col-span-7 space-y-4">
             <Link
               to="/"
@@ -29,9 +27,7 @@ export const Footer: React.FC = () => {
             </div>
           </div>
 
-          {/* Navigation Area (Spans 5 cols on desktop, 2 distinct groups) */}
           <div className="lg:col-span-5 grid grid-cols-2 gap-8 sm:gap-10">
-            {/* Group 1: Explore */}
             <div className="space-y-3">
               <h2 className="font-mono text-[11px] uppercase tracking-[0.2em] font-bold text-stone-400">
                 Explore
@@ -48,7 +44,6 @@ export const Footer: React.FC = () => {
               </ul>
             </div>
 
-            {/* Group 2: For Organizers */}
             <div className="space-y-3">
               <h2 className="font-mono text-[11px] uppercase tracking-[0.2em] font-bold text-stone-400">
                 For Organizers
@@ -75,7 +70,6 @@ export const Footer: React.FC = () => {
           </div>
         </div>
 
-        {/* Bottom Bar: Copyright & Subtle Brand Sign-Off */}
         <div className="mt-12 sm:mt-16 pt-6 border-t border-stone-200/60 flex flex-col sm:flex-row items-center justify-between gap-3 text-[11px] font-mono text-stone-400">
           <div>
             &copy; 2026 Outside.vip

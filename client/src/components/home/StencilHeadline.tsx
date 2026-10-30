@@ -6,10 +6,6 @@ interface StencilHeadlineProps {
   subtitle?: string;
 }
 
-/**
- * StencilHeadline renders the editorial brand headline for Outside.vip.
- * Crisp, responsive, fully selectable typography with balanced tracking and scale.
- */
 export const StencilHeadline: React.FC<StencilHeadlineProps> = ({
   className = '',
   title = "OUTSIDE AWAITS",
@@ -17,7 +13,6 @@ export const StencilHeadline: React.FC<StencilHeadlineProps> = ({
 }) => {
   return (
     <div className={`w-full max-w-5xl mx-auto text-center space-y-3 ${className}`}>
-      {/* Primary Brand Headline — High-impact, crisply scaled, and 100% selectable */}
       <h1 className="font-display font-black text-3xl sm:text-5xl md:text-6xl lg:text-7xl tracking-tight text-stone-900 uppercase select-text">
         {title}
       </h1>

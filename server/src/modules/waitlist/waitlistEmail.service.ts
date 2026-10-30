@@ -24,20 +24,13 @@ export interface SentEmailRecord {
   sentAt: Date;
 }
 
-// In-memory log of sent emails for testing, auditing, and fallback observation
+// In-memory log of sent emails for testing and fallback observation
 export const sentWaitlistEmails: SentEmailRecord[] = [];
 
-/**
- * Resets the in-memory sent emails list (primarily used for test isolation).
- */
 export function resetSentWaitlistEmails(): void {
   sentWaitlistEmails.length = 0;
 }
 
-/**
- * Sends a ticket waitlist offer notification to the customer.
- * Uses the configured EMAIL_FROM address and formats a clean, branded email.
- */
 export async function sendWaitlistOfferEmail(
   payload: WaitlistOfferEmailPayload
 ): Promise<{ success: boolean; messageId?: string; error?: string }> {

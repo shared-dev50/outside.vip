@@ -19,9 +19,6 @@ export type CameraErrorType =
   | 'insecure'
   | 'unknown';
 
-/**
- * Maps raw browser getUserMedia exceptions into user-friendly diagnostic states and messages.
- */
 export function getCameraErrorDetails(err: any): { type: CameraErrorType; message: string } {
   const name = err?.name || '';
   if (name === 'NotAllowedError' || name === 'PermissionDeniedError') {
@@ -83,15 +80,11 @@ export function getCameraErrorDetails(err: any): { type: CameraErrorType; messag
   };
 }
 
-/**
- * Extracts the clean ticket secret token from decoded QR payloads.
- * Handles raw tokens, URLs (e.g. ?token=...), JSON objects, and paths.
- */
 export function extractTicketToken(scannedText: string): string {
   if (!scannedText) return '';
   const trimmed = scannedText.trim();
 
-  // 1. JSON payload
+  // JSON payload
   if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
     try {
       const parsed = JSON.parse(trimmed);
@@ -104,7 +97,7 @@ export function extractTicketToken(scannedText: string): string {
     } catch {}
   }
 
-  // 2. URL payload
+  // URL payload
   if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
     try {
       const url = new URL(trimmed);
@@ -128,9 +121,6 @@ export function extractTicketToken(scannedText: string): string {
   return trimmed;
 }
 
-/**
- * Determines whether a scanned token is a duplicate within the cooldown window.
- */
 export function isDuplicateScan(
   token: string,
   lastScanned: { token: string; timestamp: number } | null,
@@ -141,9 +131,6 @@ export function isDuplicateScan(
   return Date.now() - lastScanned.timestamp < cooldownMs;
 }
 
-/**
- * Decodes a single video frame using native BarcodeDetector if available, falling back to jsQR.
- */
 export async function decodeVideoFrame(
   video: HTMLVideoElement,
   offscreenCanvas?: HTMLCanvasElement
@@ -158,7 +145,7 @@ export async function decodeVideoFrame(
     return null;
   }
 
-  // 1. Prefer native hardware-accelerated BarcodeDetector if supported
+  // Hardware-accelerated BarcodeDetector if available
   if (typeof window !== 'undefined' && 'BarcodeDetector' in window) {
     try {
       const detector = new (window as any).BarcodeDetector({ formats: ['qr_code'] });
@@ -166,12 +153,10 @@ export async function decodeVideoFrame(
       if (barcodes.length > 0 && barcodes[0].rawValue) {
         return barcodes[0].rawValue;
       }
-    } catch {
-      // Continue to jsQR fallback below
-    }
+    } catch {}
   }
 
-  // 2. Fall back to jsQR via canvas getImageData
+  // Fall back to jsQR
   const canvas = offscreenCanvas || document.createElement('canvas');
   if (canvas.width !== width || canvas.height !== height) {
     canvas.width = width;

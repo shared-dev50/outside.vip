@@ -8,11 +8,11 @@ interface RateLimitRecord {
   lockedUntil?: number;
 }
 
-// In-memory rate limiting store for password attempts per slug:ip
+// In-memory rate limiting per slug:ip
 const attemptsMap = new Map<string, RateLimitRecord>();
 
 const MAX_FAILED_ATTEMPTS = 5;
-const LOCKOUT_DURATION_MS = 15 * 60 * 1000; // 15 minutes lockout
+const LOCKOUT_DURATION_MS = 15 * 60 * 1000;
 
 export interface EventAccessTokenPayload {
   eventId: string;
@@ -21,9 +21,6 @@ export interface EventAccessTokenPayload {
   exp?: number;
 }
 
-/**
- * Checks rate limiting for password attempts and throws TooManyRequestsError if locked.
- */
 export function checkPasswordRateLimit(key: string): void {
   const record = attemptsMap.get(key);
   if (!record) return;
@@ -36,15 +33,11 @@ export function checkPasswordRateLimit(key: string): void {
         `Too many incorrect password attempts. Please try again in ${remainingMinutes} minute(s).`
       );
     } else {
-      // Lockout expired, reset counter
       attemptsMap.delete(key);
     }
   }
 }
 
-/**
- * Records a failed password attempt and locks out if threshold exceeded.
- */
 export function recordFailedPasswordAttempt(key: string): number {
   const record = attemptsMap.get(key) || { failedAttempts: 0 };
   record.failedAttempts += 1;
@@ -61,23 +54,14 @@ export function recordFailedPasswordAttempt(key: string): number {
   return MAX_FAILED_ATTEMPTS - record.failedAttempts;
 }
 
-/**
- * Clears failed attempts upon successful password entry.
- */
 export function clearPasswordRateLimit(key: string): void {
   attemptsMap.delete(key);
 }
 
-/**
- * Securely hashes an event access password.
- */
 export async function hashEventPassword(password: string): Promise<string> {
   return bcrypt.hash(password, 10);
 }
 
-/**
- * Verifies a plaintext password against the stored bcrypt hash.
- */
 export async function verifyEventPasswordMatch(
   plaintext: string,
   storedHash?: string | null
@@ -86,9 +70,6 @@ export async function verifyEventPasswordMatch(
   return bcrypt.compare(plaintext, storedHash);
 }
 
-/**
- * Issues a 24-hour signed JWT granting access to the password-protected event.
- */
 export function signEventAccessToken(eventId: string): string {
   return jwt.sign(
     {
@@ -100,9 +81,6 @@ export function signEventAccessToken(eventId: string): string {
   );
 }
 
-/**
- * Verifies whether the provided token grants access to the specified event.
- */
 export function verifyEventAccessToken(
   token?: string | null,
   eventId?: string

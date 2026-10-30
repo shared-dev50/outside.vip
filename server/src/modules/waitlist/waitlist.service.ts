@@ -19,16 +19,10 @@ import { sendWaitlistOfferEmail } from './waitlistEmail.service.js';
 
 export const OFFER_EXPIRY_MINUTES = 30;
 
-/**
- * Generates an unguessable high-entropy bearer token for waitlist offers.
- */
 export function generateOfferToken(): string {
   return `wlot_${nanoid(36)}`;
 }
 
-/**
- * Computes the SHA-256 hash of a bearer token for safe database persistence and lookup.
- */
 export function hashOfferToken(rawToken: string): string {
   return crypto.createHash('sha256').update(rawToken.trim()).digest('hex');
 }
@@ -42,9 +36,6 @@ export interface JoinWaitlistInput {
   quantity: number;
 }
 
-/**
- * Registers an attendee for an event ticket tier's FIFO waitlist.
- */
 export async function joinWaitlist(input: JoinWaitlistInput) {
   const normalizedEmail = input.customerEmail.trim().toLowerCase();
   const trimmedName = input.customerName.trim();
@@ -53,7 +44,6 @@ export async function joinWaitlist(input: JoinWaitlistInput) {
     throw new BadRequestError('Customer name is required');
   }
 
-  // 1. Validate ticket tier and event eligibility
   const tier = await prisma.ticketTier.findUnique({
     where: { id: input.ticketTierId },
     include: {
@@ -96,7 +86,6 @@ export async function joinWaitlist(input: JoinWaitlistInput) {
     );
   }
 
-  // 2. Prevent duplicate active registrations for normalized email & ticket tier
   const existingActiveEntry = await prisma.ticketWaitlistEntry.findFirst({
     where: {
       ticketTierId: input.ticketTierId,
@@ -113,7 +102,6 @@ export async function joinWaitlist(input: JoinWaitlistInput) {
     );
   }
 
-  // 3. Create entry in WAITING status
   const entry = await prisma.ticketWaitlistEntry.create({
     data: {
       eventId: tier.eventId,
@@ -126,12 +114,11 @@ export async function joinWaitlist(input: JoinWaitlistInput) {
     },
   });
 
-  // 4. In case inventory is already available, trigger queue processing
+  // Check if available inventory can satisfy the queue immediately
   await processWaitlistForTier(tier.id).catch((err) => {
     console.error(`Error processing waitlist immediately after join for tier ${tier.id}:`, err);
   });
 
-  // 5. Calculate queue position (count waiting entries created on or before this entry)
   const position = await prisma.ticketWaitlistEntry.count({
     where: {
       ticketTierId: tier.id,
@@ -163,19 +150,17 @@ export interface ProcessWaitlistResult {
 }
 
 /**
- * Evaluates FIFO waitlist entries for a ticket tier and creates timed purchase offers
- * if inventory is genuinely available.
- * 
- * Queue Policy:
- * 1. Strict FIFO ordering based on creation timestamp.
- * 2. Head-of-line fairness: if available capacity is less than the quantity requested
- *    by the next customer in line, we DO NOT skip them to satisfy a smaller request behind them.
- * 3. Inventory is atomically held in tier.reservedQuantity during the offer window (30 mins).
+ * Evaluates FIFO waitlist entries for a ticket tier and creates timed purchase offers.
+ *
+ * Rules:
+ * - Strict FIFO order by creation timestamp.
+ * - Head-of-line fairness: if available capacity is less than the quantity requested
+ *   by the next customer, do not skip them to satisfy a smaller request behind them.
+ * - Inventory is held in tier.reservedQuantity during the offer window (30 mins).
  */
 export async function processWaitlistForTier(
   ticketTierId: string
 ): Promise<ProcessWaitlistResult> {
-  // Use a serializable or atomic row-locked transaction to prevent race conditions across concurrent workers
   const txResult = await prisma.$transaction(async (tx) => {
     const tier = await tx.ticketTier.findUnique({
       where: { id: ticketTierId },
@@ -200,7 +185,6 @@ export async function processWaitlistForTier(
       return { ticketTierId, offersCreated: 0, availableRemaining: 0, createdOffersList: [] };
     }
 
-    // Fetch waiting entries in FIFO order
     const waitingEntries = await tx.ticketWaitlistEntry.findMany({
       where: {
         ticketTierId,
@@ -237,8 +221,7 @@ export async function processWaitlistForTier(
     for (const entry of waitingEntries) {
       if (currentAvailable <= 0) break;
 
-      // If the next waiting customer requested more tickets than are currently available,
-      // stop processing. Do not jump the line for smaller orders behind them.
+      // Do not jump the line if the next customer requested more tickets than available
       if (entry.quantity > currentAvailable) {
         break;
       }
@@ -247,7 +230,6 @@ export async function processWaitlistForTier(
       const tokenHash = hashOfferToken(rawToken);
       const expiresAt = new Date(Date.now() + OFFER_EXPIRY_MINUTES * 60 * 1000);
 
-      // 1. Increment reservedQuantity on the tier
       await tx.ticketTier.update({
         where: { id: ticketTierId },
         data: {
@@ -255,7 +237,6 @@ export async function processWaitlistForTier(
         },
       });
 
-      // 2. Transition entry status to OFFERED
       await tx.ticketWaitlistEntry.update({
         where: { id: entry.id },
         data: {
@@ -263,7 +244,6 @@ export async function processWaitlistForTier(
         },
       });
 
-      // 3. Create offer record
       const offer = await tx.ticketWaitlistOffer.create({
         data: {
           entryId: entry.id,
@@ -296,7 +276,7 @@ export async function processWaitlistForTier(
     };
   });
 
-  // Dispatches emails after transaction commits
+  // Send notification emails after transaction commits
   for (const item of txResult.createdOffersList) {
     const claimUrl = `${env.CLIENT_URL}/events/${item.tier.event.slug}?offerToken=${item.rawToken}`;
     const declineUrl = `${env.CLIENT_URL}/events/${item.tier.event.slug}?declineOffer=${item.rawToken}`;
@@ -399,15 +379,13 @@ export async function lookupWaitlistOffer(rawToken: string) {
 
   const now = new Date();
 
-  // If the customer has initiated checkout and their checkout reservation hold is still active,
-  // do NOT expire the offer: allow them to finish checkout within their 15-minute checkout reservation hold.
+  // Keep offer active if the user is currently completing checkout
   const isActivelyCheckingOut = Boolean(
     offer.order &&
     offer.order.status === OrderStatus.PENDING &&
     offer.order.expiresAt > now
   );
 
-  // If offer is pending but past its expiry time (and not actively checking out), mark it expired
   if (offer.status === WaitlistOfferStatus.PENDING && offer.expiresAt < now && !isActivelyCheckingOut) {
     await prisma.$transaction(async (tx) => {
       await tx.ticketWaitlistOffer.update({
@@ -488,10 +466,6 @@ export async function lookupWaitlistOffer(rawToken: string) {
   };
 }
 
-/**
- * Handles explicit declining of a waitlist offer by the customer.
- * Releases the reserved tickets and immediately triggers waitlist advancement.
- */
 export async function declineWaitlistOffer(rawToken: string) {
   if (!rawToken || typeof rawToken !== 'string') {
     throw new BadRequestError('Offer token is required');
@@ -530,7 +504,6 @@ export async function declineWaitlistOffer(rawToken: string) {
     });
   });
 
-  // Advance queue to next eligible customer immediately
   await processWaitlistForTier(offer.ticketTierId).catch(() => { });
 
   return {
@@ -577,15 +550,13 @@ export async function sweepExpiredOffers(): Promise<{
   const affectedTierIds = new Set<string>();
 
   for (const offer of expiredOffers) {
-    // If the customer has initiated checkout and their checkout reservation hold is still active,
-    // do NOT expire the offer: allow them to finish checkout within their checkout hold window.
+    // Keep offer active while checkout is in progress
     if (offer.order && offer.order.status === OrderStatus.PENDING && offer.order.expiresAt > now) {
       continue;
     }
 
     try {
       await prisma.$transaction(async (tx) => {
-        // Atomic conditional update to guard against concurrent worker sweeps
         const updated = await tx.ticketWaitlistOffer.updateMany({
           where: {
             id: offer.id,
@@ -600,9 +571,8 @@ export async function sweepExpiredOffers(): Promise<{
             data: { status: WaitlistEntryStatus.EXPIRED },
           });
 
-          // Only decrement reservedQuantity if checkout was never initiated.
-          // If checkout was initiated, releaseExpiredReservations() handles restoring
-          // reservedQuantity when the order expires, preventing double-decrements.
+          // Only decrement if checkout was never initiated.
+          // If checkout started, releaseExpiredReservations() restores reservedQuantity when the order expires.
           if (!offer.orderId) {
             await tx.ticketTier.update({
               where: { id: offer.ticketTierId },
@@ -620,7 +590,6 @@ export async function sweepExpiredOffers(): Promise<{
     }
   }
 
-  // Advance waitlist for all affected tiers
   let advancedCount = 0;
   for (const tierId of affectedTierIds) {
     try {
@@ -639,9 +608,6 @@ export async function sweepExpiredOffers(): Promise<{
   };
 }
 
-/**
- * Retrieves waitlist entries, offers, and summary metrics for an organizer's event.
- */
 export async function getOrganizerWaitlist(
   eventId: string,
   organizerId: string,
@@ -705,7 +671,6 @@ export async function getOrganizerWaitlist(
     }),
   ]);
 
-  // Aggregate tier summary stats
   const tierSummaries = tiers.map((tier) => {
     const tierEntries = entries.filter((e) => e.ticketTierId === tier.id);
     return {
@@ -729,10 +694,7 @@ export async function getOrganizerWaitlist(
   };
 }
 
-/**
- * Safely cancels active waitlist entries and pending offers for a list of event IDs (e.g. on event or occurrence cancellation).
- * Unrelated occurrences/events are completely unaffected.
- */
+// Cancels active waitlist entries and pending offers when an event/occurrence is cancelled.
 export async function cancelWaitlistForEventIds(eventIds: string[], tx?: Prisma.TransactionClient): Promise<void> {
   if (eventIds.length === 0) return;
   const db = tx ?? prisma;
@@ -744,7 +706,6 @@ export async function cancelWaitlistForEventIds(eventIds: string[], tx?: Prisma.
   if (tiers.length === 0) return;
   const tierIds = tiers.map((t) => t.id);
 
-  // 1. Mark pending offers as CANCELLED
   await db.ticketWaitlistOffer.updateMany({
     where: {
       ticketTierId: { in: tierIds },
@@ -755,7 +716,6 @@ export async function cancelWaitlistForEventIds(eventIds: string[], tx?: Prisma.
     },
   });
 
-  // 2. Mark WAITING and OFFERED entries as CANCELLED
   await db.ticketWaitlistEntry.updateMany({
     where: {
       ticketTierId: { in: tierIds },
@@ -766,7 +726,6 @@ export async function cancelWaitlistForEventIds(eventIds: string[], tx?: Prisma.
     },
   });
 
-  // 3. Recalculate reservedQuantity for each tier
   for (const tierId of tierIds) {
     const reservations = await db.ticketReservation.aggregate({
       where: {

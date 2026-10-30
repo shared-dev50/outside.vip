@@ -123,10 +123,8 @@ export const CreateEventPage: React.FC = () => {
   const queryClient = useQueryClient();
   const { user, quickLoginAs } = useAuth();
 
-  // Wizard Step (1: Details & Artwork, 2: Date & Location, 3: Tickets & Policies, 4: Discovery Preview)
   const [currentStep, setCurrentStep] = useState<WizardStep>(1);
 
-  // Step 1: Details & Artwork Form State
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [category, setCategory] = useState<EventCategory>('MUSIC');
@@ -135,13 +133,11 @@ export const CreateEventPage: React.FC = () => {
   const [isUploadingImage, setIsUploadingImage] = useState(false);
   const [imageUploadError, setImageUploadError] = useState<string | null>(null);
 
-  // Event Gallery State (Step 1)
   const [galleryImages, setGalleryImages] = useState<EventGalleryImage[]>([]);
   const [isUploadingGallery, setIsUploadingGallery] = useState(false);
   const [galleryUploadError, setGalleryUploadError] = useState<string | null>(null);
   const [galleryUrlInput, setGalleryUrlInput] = useState('');
 
-  // Page Settings & Media (Step 4)
   const [youtubeVideoUrl, setYoutubeVideoUrl] = useState('');
   const [showOnExplore, setShowOnExplore] = useState(true);
   const [hideGuestCount, setHideGuestCount] = useState(false);
@@ -149,7 +145,6 @@ export const CreateEventPage: React.FC = () => {
   const [password, setPassword] = useState('');
   const [showPasswordText, setShowPasswordText] = useState(false);
 
-  // Event Features State (Step 4)
   const [features, setFeatures] = useState<EventFeature[]>([]);
   const [isAddingFeature, setIsAddingFeature] = useState(false);
   const [newFeatureName, setNewFeatureName] = useState('');
@@ -160,12 +155,10 @@ export const CreateEventPage: React.FC = () => {
   const [featureUploadError, setFeatureUploadError] = useState<string | null>(null);
 
 
-  // Step 2: Date & Location Form State
   const [startAt, setStartAt] = useState('2026-11-20T20:00');
   const [endAt, setEndAt] = useState('2026-11-21T04:00');
   const [timezone, setTimezone] = useState('Africa/Nairobi');
 
-  // Recurrence Configuration State
   const [isRecurring, setIsRecurring] = useState(false);
   const [recurrenceFrequency, setRecurrenceFrequency] = useState<RecurrenceFrequency>('WEEKLY');
   const [recurrenceInterval, setRecurrenceInterval] = useState(1);
@@ -175,27 +168,22 @@ export const CreateEventPage: React.FC = () => {
   const [recurrenceEndDate, setRecurrenceEndDate] = useState('2026-12-31T23:59');
   const [applyToFuture, setApplyToFuture] = useState(false);
 
-  // Venue State
   const [venueName, setVenueName] = useState('');
   const [venueAddress, setVenueAddress] = useState('');
   const [city, setCity] = useState('Nairobi');
   const [country, setCountry] = useState('Kenya');
 
-  // Step 3: Policies Form State
   const [ageRestriction, setAgeRestriction] = useState('18+');
   const [dressCode, setDressCode] = useState('');
   const [doorPolicy, setDoorPolicy] = useState('');
 
-  // Status & Edit Tracking
   const [currentStatus, setCurrentStatus] = useState<'DRAFT' | 'PUBLISHED' | 'CANCELLED'>('DRAFT');
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
 
-  // Cancellation Modal State
   const [showCancelModal, setShowCancelModal] = useState(false);
   const [cancelReason, setCancelReason] = useState('');
   const [cancelSeriesMode, setCancelSeriesMode] = useState(false);
 
-  // Step 3: Ticket Tiers Form State
   const [ticketTiers, setTicketTiers] = useState<FormTicketTier[]>([
     {
       tempId: 'default-1',
@@ -235,7 +223,6 @@ export const CreateEventPage: React.FC = () => {
     setTimeout(() => setNotification(null), 6000);
   };
 
-  // Fetch existing event if editing
   const { data: existingData, isLoading: isLoadingExisting } = useQuery({
     queryKey: ['organizer-event', id],
     queryFn: () => api.organizer.getEvent(id!),
@@ -302,7 +289,6 @@ export const CreateEventPage: React.FC = () => {
     }
   }, [existingData]);
 
-  // Synchronize default recurrence weekday from startAt
   useEffect(() => {
     if (!isEditing && startAt) {
       const d = new Date(startAt);
@@ -313,7 +299,6 @@ export const CreateEventPage: React.FC = () => {
     }
   }, [startAt, isEditing]);
 
-  // Ticket tier actions
   const addTicketTier = () => {
     setTicketTiers((prev) => [
       ...prev,
@@ -358,7 +343,6 @@ export const CreateEventPage: React.FC = () => {
     setHasUnsavedChanges(true);
   };
 
-  // Image Upload handler (Cloudinary Direct & Server Upload Flow)
   const handleImageFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -401,7 +385,6 @@ export const CreateEventPage: React.FC = () => {
     }
   };
 
-  // Gallery file upload & management
   const handleGalleryFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -493,7 +476,6 @@ export const CreateEventPage: React.FC = () => {
     setHasUnsavedChanges(true);
   };
 
-  // Feature actions
   const handleFeatureImageFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -568,7 +550,6 @@ export const CreateEventPage: React.FC = () => {
   };
 
 
-  // Toggle Weekday chip selection
   const toggleWeekday = (day: number) => {
     setRecurrenceWeekdays((prev) => {
       if (prev.includes(day)) {
@@ -584,7 +565,6 @@ export const CreateEventPage: React.FC = () => {
     setHasUnsavedChanges(true);
   };
 
-  // Client-side occurrence schedule preview
   const occurrenceSchedulePreview = useMemo(() => {
     if (!isRecurring) return [];
     const startDate = new Date(startAt);
@@ -655,7 +635,6 @@ export const CreateEventPage: React.FC = () => {
 
   const detectedVideoId = useMemo(() => extractYouTubeVideoId(youtubeVideoUrl), [youtubeVideoUrl]);
 
-  // Step-level validation
   const validateStep = (stepNumber: WizardStep): boolean => {
     if (stepNumber === 1) {
       if (!title.trim() || title.trim().length < 2) {
@@ -741,7 +720,6 @@ export const CreateEventPage: React.FC = () => {
     }
   };
 
-  // Build Payload
   const buildPayload = (statusOverride?: 'DRAFT' | 'PUBLISHED') => {
     const formattedTiers = ticketTiers.map((tier) => ({
       ...(tier.id ? { id: tier.id } : {}),
@@ -814,7 +792,6 @@ export const CreateEventPage: React.FC = () => {
     };
   };
 
-  // Save / Publish Mutation
   const saveMutation = useMutation({
     mutationFn: async ({ publish }: { publish: boolean }) => {
       if (isUploadingImage) {
@@ -898,7 +875,6 @@ export const CreateEventPage: React.FC = () => {
     },
   });
 
-  // Unpublish Mutation
   const unpublishMutation = useMutation({
     mutationFn: async ({ unpublishSeries }: { unpublishSeries?: boolean }) => {
       if (!id) return;
@@ -917,7 +893,6 @@ export const CreateEventPage: React.FC = () => {
     },
   });
 
-  // Cancel Occurrence or Series Mutation
   const cancelMutation = useMutation({
     mutationFn: async () => {
       if (!id) return;
@@ -946,7 +921,6 @@ export const CreateEventPage: React.FC = () => {
     },
   });
 
-  // Auth gate
   if (!user || (user.role !== 'ORGANIZER' && user.role !== 'ADMIN')) {
     return (
       <div className="min-h-screen bg-[#FAF8F5] text-stone-900 flex items-center justify-center p-4">
@@ -1018,7 +992,6 @@ export const CreateEventPage: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-[#FAF8F5] text-stone-900 selection:bg-stone-900 selection:text-white pb-36">
-      {/* Sticky Top Command Bar */}
       <div className="sticky top-0 z-40 bg-[#FAF8F5]/95 backdrop-blur-md border-b border-stone-200 shadow-2xs">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between gap-4">
           <div className="flex items-center gap-3 sm:gap-4 min-w-0">
@@ -1079,7 +1052,6 @@ export const CreateEventPage: React.FC = () => {
               </Link>
             )}
 
-            {/* Save Draft */}
             <button
               type="button"
               onClick={() => saveMutation.mutate({ publish: false })}
@@ -1090,7 +1062,6 @@ export const CreateEventPage: React.FC = () => {
               <span>{saveMutation.isPending ? 'Saving...' : 'Save Draft'}</span>
             </button>
 
-            {/* Publish or Status Controls */}
             {currentStatus === 'PUBLISHED' ? (
               <div className="flex items-center gap-2">
                 <button
@@ -1131,7 +1102,6 @@ export const CreateEventPage: React.FC = () => {
         </div>
       </div>
 
-      {/* Toast Notification */}
       {notification && (
         <div className="max-w-7xl mx-auto px-4 mt-6">
           <div
@@ -1156,7 +1126,6 @@ export const CreateEventPage: React.FC = () => {
         </div>
       )}
 
-      {/* Wizard Progress Stepper Header */}
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mt-6">
         <div className="bg-white border border-stone-200 rounded-xl p-4 sm:p-5 shadow-xs">
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3 sm:gap-4">
@@ -1212,10 +1181,8 @@ export const CreateEventPage: React.FC = () => {
         </div>
       </div>
 
-      {/* Main Wizard Form Body */}
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mt-6">
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
-          {/* Sidebar / Quick Summary Card */}
           <aside className="lg:col-span-3 space-y-4 lg:sticky lg:top-24 order-2 lg:order-1">
             <div className="bg-white rounded-xl border border-stone-200 p-5 space-y-4 shadow-xs">
               <div className="text-[11px] font-mono uppercase tracking-wider text-stone-500 font-bold border-b border-stone-100 pb-2">
@@ -1253,7 +1220,6 @@ export const CreateEventPage: React.FC = () => {
                 })}
               </div>
 
-              {/* Event Metrics Summary */}
               <div className="pt-3 border-t border-stone-200/80 space-y-2 text-[11px] font-mono text-stone-500">
                 <div className="flex justify-between">
                   <span>Schedule Type:</span>
@@ -1285,7 +1251,6 @@ export const CreateEventPage: React.FC = () => {
                 </div>
               </div>
 
-              {/* Separate Finance & Org Link notice */}
               <div className="pt-3 border-t border-stone-200/80">
                 <Link
                   to="/organizer/finance"
@@ -1296,7 +1261,6 @@ export const CreateEventPage: React.FC = () => {
                 </Link>
               </div>
 
-              {/* Cancel Occurrence or Series option if editing */}
               {isEditing && currentStatus !== 'CANCELLED' && (
                 <div className="pt-2 border-t border-stone-200/80">
                   <button
@@ -1328,9 +1292,7 @@ export const CreateEventPage: React.FC = () => {
             </div>
           </aside>
 
-          {/* Form Step Content */}
           <main className="lg:col-span-9 space-y-6 order-1 lg:order-2">
-            {/* STEP 1: EVENT DETAILS & ARTWORK */}
             {currentStep === 1 && (
               <div className="bg-white rounded-xl border border-stone-200/90 p-6 sm:p-8 space-y-6 shadow-xs">
                 <div>
@@ -1348,7 +1310,6 @@ export const CreateEventPage: React.FC = () => {
                 </div>
 
                 <div className="space-y-5">
-                  {/* Event Title */}
                   <div>
                     <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5">
                       Event Title <span className="text-rose-600">*</span>
@@ -1365,7 +1326,6 @@ export const CreateEventPage: React.FC = () => {
                     />
                   </div>
 
-                  {/* Category Selection */}
                   <div>
                     <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5">
                       Category & Experience Genre <span className="text-rose-600">*</span>
@@ -1389,7 +1349,6 @@ export const CreateEventPage: React.FC = () => {
                     </select>
                   </div>
 
-                  {/* Full Description & Narrative */}
                   <div>
                     <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5">
                       Full Description & Experience Narrative
@@ -1406,7 +1365,6 @@ export const CreateEventPage: React.FC = () => {
                     />
                   </div>
 
-                  {/* Cover Artwork & Flyer (Integrated from old Step 4) */}
                   <div className="pt-4 border-t border-stone-200">
                     <div>
                       <h3 className="text-sm font-display font-black text-stone-900 uppercase tracking-tight">
@@ -1484,7 +1442,6 @@ export const CreateEventPage: React.FC = () => {
                         </div>
                       </div>
 
-                      {/* Presets */}
                       <div>
                         <span className="text-[11px] font-mono text-stone-500 block mb-2">
                           Or select from curated Outside.vip event aesthetics:
@@ -1521,7 +1478,6 @@ export const CreateEventPage: React.FC = () => {
                         </div>
                       </div>
 
-                      {/* Artwork Preview */}
                       {coverImageUrl && (
                         <div className="space-y-1.5 pt-2">
                           <span className="text-xs font-mono text-stone-500">Active Artwork Preview:</span>
@@ -1541,7 +1497,6 @@ export const CreateEventPage: React.FC = () => {
                     </div>
                   </div>
 
-                  {/* Event Image Gallery (Optional) */}
                   <div className="pt-6 border-t border-stone-200 space-y-4">
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <div>
@@ -1558,7 +1513,6 @@ export const CreateEventPage: React.FC = () => {
                       </span>
                     </div>
 
-                    {/* Upload & Add controls */}
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                       <div>
                         <label
@@ -1637,7 +1591,6 @@ export const CreateEventPage: React.FC = () => {
                       </div>
                     </div>
 
-                    {/* Gallery Images Grid with Reordering */}
                     {galleryImages.length > 0 ? (
                       <div className="space-y-2 pt-2">
                         <span className="text-xs font-mono text-stone-500">
@@ -1655,12 +1608,10 @@ export const CreateEventPage: React.FC = () => {
                                 className="w-full h-full object-cover transition-transform group-hover:scale-105 duration-300"
                               />
 
-                              {/* Index Badge */}
                               <div className="absolute top-1.5 left-1.5 px-1.5 py-0.5 rounded bg-black/75 backdrop-blur-xs text-[10px] font-mono text-white font-bold">
                                 #{idx + 1}
                               </div>
 
-                              {/* Action controls overlay */}
                               <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-1.5 p-1">
                                 <button
                                   type="button"
@@ -1701,7 +1652,6 @@ export const CreateEventPage: React.FC = () => {
                   </div>
                 </div>
 
-                {/* Step Navigation Actions */}
                 <div className="pt-6 border-t border-stone-200 flex items-center justify-between">
                   <div className="text-xs font-mono text-stone-500">
                     Step 1 of 4 completed
@@ -1718,7 +1668,6 @@ export const CreateEventPage: React.FC = () => {
               </div>
             )}
 
-            {/* STEP 2: DATE & LOCATION (With Recurring Events Engine) */}
             {currentStep === 2 && (
               <div className="bg-white rounded-xl border border-stone-200/90 p-6 sm:p-8 space-y-6 shadow-xs">
                 <div>
@@ -1735,7 +1684,6 @@ export const CreateEventPage: React.FC = () => {
                   </p>
                 </div>
 
-                {/* Existing Series Info Banner if editing an event in a series */}
                 {isEditing && existingData?.event?.seriesId && (
                   <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 space-y-2 text-xs">
                     <div className="flex items-center gap-2 text-blue-900 font-mono font-bold">
@@ -1758,7 +1706,6 @@ export const CreateEventPage: React.FC = () => {
                 )}
 
                 <div className="space-y-6">
-                  {/* Schedule Timings */}
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div>
                       <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5">
@@ -1811,7 +1758,6 @@ export const CreateEventPage: React.FC = () => {
                     </select>
                   </div>
 
-                  {/* RECURRING SERIES TOGGLE & CONFIGURATION */}
                   {!isEditing && (
                     <div className="pt-4 border-t border-stone-200 space-y-4">
                       <div className="flex items-center justify-between p-4 rounded-xl bg-stone-50 border border-stone-200">
@@ -1840,10 +1786,8 @@ export const CreateEventPage: React.FC = () => {
                         </label>
                       </div>
 
-                      {/* Recurrence Configuration Panel */}
                       {isRecurring && (
                         <div className="p-5 rounded-xl border border-stone-200 bg-[#FAF8F5] space-y-5">
-                          {/* Frequency Tabs */}
                           <div>
                             <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-2">
                               Recurrence Frequency
@@ -1869,7 +1813,6 @@ export const CreateEventPage: React.FC = () => {
                             </div>
                           </div>
 
-                          {/* Recurrence Interval */}
                           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                             <div>
                               <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5">
@@ -1897,7 +1840,6 @@ export const CreateEventPage: React.FC = () => {
                               </div>
                             </div>
 
-                            {/* End Condition Choice */}
                             <div>
                               <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5">
                                 Series End Condition
@@ -1933,7 +1875,6 @@ export const CreateEventPage: React.FC = () => {
                             </div>
                           </div>
 
-                          {/* Specific Weekdays Selector (only for WEEKLY) */}
                           {recurrenceFrequency === 'WEEKLY' && (
                             <div>
                               <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5">
@@ -1961,7 +1902,6 @@ export const CreateEventPage: React.FC = () => {
                             </div>
                           )}
 
-                          {/* End Value Input */}
                           {recurrenceEndType === 'count' ? (
                             <div>
                               <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5">
@@ -1999,7 +1939,6 @@ export const CreateEventPage: React.FC = () => {
                             </div>
                           )}
 
-                          {/* Live Schedule Preview Box */}
                           <div className="pt-3 border-t border-stone-200">
                             <div className="flex items-center justify-between mb-2">
                               <span className="text-xs font-mono uppercase font-bold text-stone-700 flex items-center gap-1.5">
@@ -2044,7 +1983,6 @@ export const CreateEventPage: React.FC = () => {
                     </div>
                   )}
 
-                  {/* Venue & Location Section */}
                   <div className="pt-4 border-t border-stone-200 space-y-4">
                     <div>
                       <h3 className="text-sm font-display font-black text-stone-900 uppercase tracking-tight">
@@ -2086,7 +2024,6 @@ export const CreateEventPage: React.FC = () => {
                           }}
                           className="w-full px-3.5 py-2.5 rounded-lg bg-[#FAF8F5] border border-stone-300 text-stone-900 placeholder-stone-400 text-sm focus:outline-none focus:border-stone-900 focus:bg-white transition-colors"
                         />
-                        {/* Kenya Quick Pick Chips */}
                         <div className="flex flex-wrap gap-1.5 mt-2">
                           {KENYA_CITIES.map((c) => (
                             <button
@@ -2127,7 +2064,6 @@ export const CreateEventPage: React.FC = () => {
                   </div>
                 </div>
 
-                {/* Step Navigation Actions */}
                 <div className="pt-6 border-t border-stone-200 flex items-center justify-between">
                   <button
                     type="button"
@@ -2150,7 +2086,6 @@ export const CreateEventPage: React.FC = () => {
               </div>
             )}
 
-            {/* STEP 3: TICKETS & POLICIES */}
             {currentStep === 3 && (
               <div className="bg-white rounded-xl border border-stone-200/90 p-6 sm:p-8 space-y-6 shadow-xs">
                 <div>
@@ -2167,7 +2102,6 @@ export const CreateEventPage: React.FC = () => {
                   </p>
                 </div>
 
-                {/* Ticket Tiers Management */}
                 <div className="space-y-4">
                   <div className="flex items-center justify-between">
                     <div>
@@ -2304,7 +2238,6 @@ export const CreateEventPage: React.FC = () => {
                             </div>
                           </div>
 
-                          {/* Enable Waitlist Setting */}
                           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 rounded-lg bg-white border border-stone-200">
                             <div className="space-y-0.5 max-w-md">
                               <div className="flex items-center gap-2">
@@ -2350,7 +2283,6 @@ export const CreateEventPage: React.FC = () => {
                             </button>
                           </div>
 
-                          {/* Tier Financial Breakdown Box */}
                           <div className="p-3 rounded-lg bg-white border border-stone-200 text-[11px] font-mono space-y-1">
                             <div className="flex items-center justify-between text-stone-600">
                               <span>Buyer Total (incl. processing):</span>
@@ -2371,7 +2303,6 @@ export const CreateEventPage: React.FC = () => {
                   </div>
                 </div>
 
-                {/* Admission Policies & Door Rules */}
                 <div className="pt-6 border-t border-stone-200 space-y-4">
                   <div>
                     <h3 className="text-sm font-display font-black text-stone-900 uppercase tracking-tight">
@@ -2435,7 +2366,6 @@ export const CreateEventPage: React.FC = () => {
                   </div>
                 </div>
 
-                {/* Step Navigation Actions */}
                 <div className="pt-6 border-t border-stone-200 flex items-center justify-between">
                   <button
                     type="button"
@@ -2458,7 +2388,6 @@ export const CreateEventPage: React.FC = () => {
               </div>
             )}
 
-            {/* STEP 4: DISCOVERY PREVIEW & PUBLISH */}
             {currentStep === 4 && (
               <div className="bg-white rounded-xl border border-stone-200/90 p-6 sm:p-8 space-y-6 shadow-xs">
                 <div>
@@ -2475,7 +2404,6 @@ export const CreateEventPage: React.FC = () => {
                   </p>
                 </div>
 
-                {/* 1. Page Settings & Access Control */}
                 <div className="p-5 rounded-xl border border-stone-200 bg-[#FAF8F5] space-y-4">
                   <div className="flex items-center gap-2">
                     <Shield className="w-4 h-4 text-stone-700" />
@@ -2485,7 +2413,6 @@ export const CreateEventPage: React.FC = () => {
                   </div>
 
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    {/* Show on Explore */}
                     <div className="p-4 rounded-lg bg-white border border-stone-200 space-y-2">
                       <div className="flex items-center justify-between">
                         <span className="text-xs font-mono font-bold uppercase text-stone-900 flex items-center gap-1.5">
@@ -2510,7 +2437,6 @@ export const CreateEventPage: React.FC = () => {
                       </p>
                     </div>
 
-                    {/* Hide Guest Count */}
                     <div className="p-4 rounded-lg bg-white border border-stone-200 space-y-2">
                       <div className="flex items-center justify-between">
                         <span className="text-xs font-mono font-bold uppercase text-stone-900 flex items-center gap-1.5">
@@ -2536,7 +2462,6 @@ export const CreateEventPage: React.FC = () => {
                     </div>
                   </div>
 
-                  {/* Password Protection */}
                   <div className="p-4 rounded-lg bg-white border border-stone-200 space-y-3">
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2">
@@ -2602,7 +2527,6 @@ export const CreateEventPage: React.FC = () => {
                   </div>
                 </div>
 
-                {/* 2. Optional YouTube Video */}
                 <div className="p-5 rounded-xl border border-stone-200 bg-[#FAF8F5] space-y-3">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
@@ -2669,7 +2593,6 @@ export const CreateEventPage: React.FC = () => {
                   )}
                 </div>
 
-                {/* 3. Event Features Section (Performers, Sponsors, Speakers, Hosts, and More) */}
                 <div className="p-5 rounded-xl border border-stone-200 bg-[#FAF8F5] space-y-4">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div>
@@ -2696,7 +2619,6 @@ export const CreateEventPage: React.FC = () => {
                     )}
                   </div>
 
-                  {/* Add Feature Form */}
                   {isAddingFeature && (
                     <div className="p-4 rounded-xl border border-stone-300 bg-white space-y-3 shadow-xs">
                       <div className="text-xs font-mono font-bold uppercase text-stone-900 pb-1 border-b border-stone-100 flex items-center justify-between">
@@ -2819,7 +2741,6 @@ export const CreateEventPage: React.FC = () => {
                     </div>
                   )}
 
-                  {/* Features List */}
                   {features.length > 0 ? (
                     <div className="space-y-2">
                       {features.map((feat, idx) => (
@@ -2892,7 +2813,6 @@ export const CreateEventPage: React.FC = () => {
                   )}
                 </div>
 
-                {/* 4. Live Discovery Preview */}
                 <div className="pt-2">
                   <div className="text-xs font-mono uppercase tracking-wider text-stone-500 font-bold mb-3">
                     Public Discovery Card Preview
@@ -2965,7 +2885,6 @@ export const CreateEventPage: React.FC = () => {
                   </div>
                 </div>
 
-                {/* Recurring Series Summary List (if recurring) */}
                 {isRecurring && (
                   <div className="p-5 rounded-xl border border-stone-200 bg-[#FAF8F5] space-y-3">
                     <div className="flex items-center justify-between">
@@ -3005,7 +2924,6 @@ export const CreateEventPage: React.FC = () => {
                   </div>
                 )}
 
-                {/* Final Checklist Card */}
                 <div className="p-4 rounded-xl border border-stone-200 bg-stone-50 space-y-2 text-xs font-mono">
                   <div className="font-bold text-stone-900 uppercase">Pre-Flight Verification</div>
                   <div className="flex items-center gap-2 text-stone-600">
@@ -3022,7 +2940,6 @@ export const CreateEventPage: React.FC = () => {
                   </div>
                 </div>
 
-                {/* Step Navigation Actions */}
                 <div className="pt-6 border-t border-stone-200 flex flex-wrap items-center justify-between gap-3">
                   <button
                     type="button"
@@ -3068,7 +2985,6 @@ export const CreateEventPage: React.FC = () => {
         </div>
       </div>
 
-      {/* Cancellation Modal */}
       {showCancelModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs">
           <div className="bg-white rounded-xl border border-stone-200 max-w-md w-full p-6 space-y-4 shadow-xl">

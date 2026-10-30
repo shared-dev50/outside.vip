@@ -15,7 +15,7 @@ describe('Cloudinary Integration & Event Image Flow', () => {
   let attendeeToken: string;
 
   beforeAll(async () => {
-    // 1. Authenticate seeded organizer
+    // Authenticate seeded organizer
     const organizerLogin = await request(app).post('/api/auth/login').send({
       email: 'sol@outside.vip',
       password: 'Outside2026!',
@@ -23,7 +23,7 @@ describe('Cloudinary Integration & Event Image Flow', () => {
     expect(organizerLogin.status).toBe(200);
     organizerToken = organizerLogin.body.data.token;
 
-    // 2. Authenticate seeded attendee
+    // Authenticate seeded attendee
     const attendeeLogin = await request(app).post('/api/auth/login').send({
       email: 'alex@outside.vip',
       password: 'Outside2026!',

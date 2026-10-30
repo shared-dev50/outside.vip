@@ -28,7 +28,7 @@ export async function processStripeWebhookEvent(
 ): Promise<{ handled: boolean; duplicate?: boolean }> {
   return await prisma.$transaction(
     async (tx) => {
-      // 1. Idempotency verification
+      // Skip duplicate deliveries
       const existing = await tx.processedWebhookEvent.findUnique({
         where: { eventId: event.id },
       });
@@ -169,12 +169,10 @@ export async function handlePaymentIntentSucceeded(
     return;
   }
 
-  // Already fulfilled? Safe idempotent return
   if (order.status === OrderStatus.COMPLETED) {
     return;
   }
 
-  // Verify amounts and currency match
   if (paymentIntent.amount !== null && paymentIntent.amount !== order.totalInCents) {
     throw new Error(
       `Amount mismatch for order ${order.orderNumber}: expected ${order.totalInCents}, received ${paymentIntent.amount}`
@@ -187,7 +185,6 @@ export async function handlePaymentIntentSucceeded(
     );
   }
 
-  // 1. Mark order completed
   await tx.order.update({
     where: { id: order.id },
     data: {
@@ -196,13 +193,12 @@ export async function handlePaymentIntentSucceeded(
     },
   });
 
-  // 2. Confirm reservations
   await tx.ticketReservation.updateMany({
     where: { orderId: order.id },
     data: { status: ReservationStatus.CONFIRMED },
   });
 
-  // 3. Shift reserved quantity to sold quantity
+  // Shift reserved inventory to sold counts
   const hasActiveReservations = order.reservations.some(
     (r) => r.status === ReservationStatus.ACTIVE
   );
@@ -217,7 +213,6 @@ export async function handlePaymentIntentSucceeded(
     });
   }
 
-  // 4. Issue cryptographically secure ticket records
   if (order.tickets.length === 0) {
     for (const item of order.items) {
       for (let i = 0; i < item.quantity; i++) {
@@ -237,7 +232,6 @@ export async function handlePaymentIntentSucceeded(
     }
   }
 
-  // 5. Record payment transaction
   const existingTx = await tx.paymentTransaction.findFirst({
     where: { orderId: order.id, status: PaymentStatus.SUCCEEDED },
   });
@@ -255,7 +249,7 @@ export async function handlePaymentIntentSucceeded(
     });
   }
 
-  // 6. Fulfill any linked waitlist offer idempotently
+  // Claim any waitlist offers fulfilled by this order
   const linkedOffers = await tx.ticketWaitlistOffer.findMany({
     where: { orderId: order.id },
   });
@@ -277,7 +271,6 @@ export async function handlePaymentIntentSucceeded(
     });
   }
 
-  // 7. Record financial ledger entries and organizer earnings
   const latestChargeId = typeof paymentIntent.latest_charge === 'string'
     ? paymentIntent.latest_charge
     : (paymentIntent.latest_charge as Stripe.Charge)?.id;
@@ -468,7 +461,6 @@ async function handleTransferEvent(
         data: { status: TransferStatus.REVERSED },
       });
 
-      // Record reversal in ledger
       await tx.financialLedgerEntry.create({
         data: {
           type: LedgerEntryType.ADJUSTMENT,

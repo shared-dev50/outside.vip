@@ -37,43 +37,22 @@ describe('Client Fees & Organizer Earnings Breakdown', () => {
     });
 
     it('correctly calculates breakdown for a $20.00 ticket with capacity 250', () => {
-      // $20.00 = 2000 cents
       const priceInCents = 2000;
       const capacity = 250;
       const breakdown = calculateTierEarnings(priceInCents, capacity);
 
-      // Platform fee: 10% of 2000 = 200 cents ($2.00)
       expect(breakdown.platformFeeInCents).toBe(200);
-
-      // Service fee: fixed 95 cents ($0.95)
       expect(breakdown.serviceFeeInCents).toBe(95);
-
-      // Subtotal before processing fee: 2000 + 200 + 95 = 2295 cents ($22.95)
       expect(breakdown.subtotalInCents).toBe(2295);
-
-      // Grossed-up buyer total: Math.round((2295 + 30) / (1 - 0.029)) = Math.round(2325 / 0.971) = 2394 cents ($23.94)
       expect(breakdown.buyerTotalInCents).toBe(2394);
-
-      // Processing fee: 2394 - 2295 = 99 cents ($0.99)
       expect(breakdown.processingFeeInCents).toBe(99);
-
-      // Organizer earnings per ticket: 100% of ticket price = 2000 cents ($20.00)
       expect(breakdown.organizerEarningsInCents).toBe(2000);
-
-      // Platform revenue: 200 + 95 = 295 cents ($2.95)
       expect(breakdown.platformRevenueInCents).toBe(295);
-
-      // Projected earnings at capacity: 2000 * 250 = 500,000 cents ($5,000.00)
       expect(breakdown.projectedEarningsInCents).toBe(500000);
-
-      // Projected buyer total at capacity: 2394 * 250 = 598,500 cents ($5,985.00)
       expect(breakdown.projectedBuyerTotalInCents).toBe(598500);
-
-      // Projected platform revenue at capacity: 295 * 250 = 73,750 cents ($737.50)
       expect(breakdown.projectedPlatformRevenueInCents).toBe(73750);
 
-      // Strict balance sheet reconciliation:
-      // Buyer Total === Organizer Earnings + Platform Revenue + Processing Fee
+      // Reconciliation: Buyer Total === Organizer Earnings + Platform Revenue + Processing Fee
       expect(breakdown.buyerTotalInCents).toBe(
         breakdown.organizerEarningsInCents +
           breakdown.platformRevenueInCents +
@@ -82,31 +61,18 @@ describe('Client Fees & Organizer Earnings Breakdown', () => {
     });
 
     it('correctly calculates breakdown for a $75.00 VIP ticket with capacity 100', () => {
-      // $75.00 = 7500 cents
       const priceInCents = 7500;
       const capacity = 100;
       const breakdown = calculateTierEarnings(priceInCents, capacity);
 
-      // Platform fee: 10% of 7500 = 750 cents ($7.50)
       expect(breakdown.platformFeeInCents).toBe(750);
       expect(breakdown.serviceFeeInCents).toBe(95);
-
-      // Subtotal: 7500 + 750 + 95 = 8345 cents ($83.45)
       expect(breakdown.subtotalInCents).toBe(8345);
-
-      // Grossed-up buyer total: Math.round((8345 + 30) / (1 - 0.029)) = Math.round(8375 / 0.971) = 8625 cents ($86.25)
       expect(breakdown.buyerTotalInCents).toBe(8625);
-
-      // Processing fee: 8625 - 8345 = 280 cents ($2.80)
       expect(breakdown.processingFeeInCents).toBe(280);
-
-      // Organizer earnings per ticket = 7500 cents ($75.00)
       expect(breakdown.organizerEarningsInCents).toBe(7500);
-
-      // Projected earnings: 7500 * 100 = 750,000 cents ($7,500.00)
       expect(breakdown.projectedEarningsInCents).toBe(750000);
 
-      // Reconciliation
       expect(breakdown.buyerTotalInCents).toBe(
         breakdown.organizerEarningsInCents +
           breakdown.platformRevenueInCents +
@@ -120,7 +86,6 @@ describe('Client Fees & Organizer Earnings Breakdown', () => {
       for (const price of oddPrices) {
         const breakdown = calculateTierEarnings(price, 50);
 
-        // Integer cent verification
         expect(Number.isInteger(breakdown.ticketPriceInCents)).toBe(true);
         expect(Number.isInteger(breakdown.platformFeeInCents)).toBe(true);
         expect(Number.isInteger(breakdown.serviceFeeInCents)).toBe(true);
@@ -128,10 +93,8 @@ describe('Client Fees & Organizer Earnings Breakdown', () => {
         expect(Number.isInteger(breakdown.buyerTotalInCents)).toBe(true);
         expect(Number.isInteger(breakdown.organizerEarningsInCents)).toBe(true);
 
-        // Organizer receives exactly the base ticket price
         expect(breakdown.organizerEarningsInCents).toBe(price);
 
-        // Balance sheet reconciliation holds exactly
         expect(breakdown.buyerTotalInCents).toBe(
           breakdown.organizerEarningsInCents +
             breakdown.platformFeeInCents +
@@ -224,36 +187,18 @@ describe('Client Fees & Organizer Earnings Breakdown', () => {
     });
 
     it('calculates the exact breakdown for a single $20.00 ticket', () => {
-      // 1 ticket @ $20.00 (2000 cents)
       const breakdown = calculateCheckoutFeeBreakdown(2000, 1);
 
-      // 1. Ticket subtotal
       expect(breakdown.ticketSubtotalInCents).toBe(2000);
       expect(breakdown.totalTicketQuantity).toBe(1);
-
-      // 2. Platform fee: 10% of $20.00 = $2.00 (200 cents)
       expect(breakdown.platformFeeInCents).toBe(200);
-
-      // 3. Service fee: $0.95 x 1 = $0.95 (95 cents)
       expect(breakdown.serviceFeeInCents).toBe(95);
-
-      // Pre-processing total: 2000 + 200 + 95 = 2295 cents ($22.95)
       expect(breakdown.preProcessingTotalInCents).toBe(2295);
-
-      // 4. Grossed-up buyer total: Math.round((2295 + 30) / (1 - 0.029)) = Math.round(2325 / 0.971) = 2394 cents ($23.94)
       expect(breakdown.buyerTotalInCents).toBe(2394);
-
-      // 5. Estimated Stripe processing fee: 2394 - 2295 = 99 cents ($0.99)
       expect(breakdown.processingFeeInCents).toBe(99);
-
-      // Organizer receives 100% of ticket price
       expect(breakdown.organizerEarningsInCents).toBe(2000);
-
-      // Platform revenue: platform fee + service fee = 200 + 95 = 295 cents ($2.95)
       expect(breakdown.platformRevenueInCents).toBe(295);
 
-      // Exact fund reconciliation:
-      // buyerTotal === ticketSubtotal + platformFee + serviceFee + processingFee
       expect(breakdown.buyerTotalInCents).toBe(
         breakdown.ticketSubtotalInCents +
           breakdown.platformFeeInCents +
@@ -263,28 +208,16 @@ describe('Client Fees & Organizer Earnings Breakdown', () => {
     });
 
     it('calculates the exact breakdown for multiple tickets in one transaction (2 x $20.00)', () => {
-      // 2 tickets @ $20.00 = 4000 cents
       const breakdown = calculateCheckoutFeeBreakdown(4000, 2);
 
       expect(breakdown.ticketSubtotalInCents).toBe(4000);
       expect(breakdown.totalTicketQuantity).toBe(2);
-
-      // Platform fee: 10% of 4000 = 400 cents ($4.00)
       expect(breakdown.platformFeeInCents).toBe(400);
-
-      // Service fee: $0.95 x 2 = 190 cents ($1.90)
       expect(breakdown.serviceFeeInCents).toBe(190);
-
-      // Pre-processing total: 4000 + 400 + 190 = 4590 cents ($45.90)
       expect(breakdown.preProcessingTotalInCents).toBe(4590);
-
-      // Buyer total: Math.round((4590 + 30) / 0.971) = Math.round(4620 / 0.971) = 4758 cents ($47.58)
       expect(breakdown.buyerTotalInCents).toBe(4758);
-
-      // Processing fee: 4758 - 4590 = 168 cents ($1.68)
       expect(breakdown.processingFeeInCents).toBe(168);
 
-      // Strict balance check
       expect(breakdown.buyerTotalInCents).toBe(
         breakdown.ticketSubtotalInCents +
           breakdown.platformFeeInCents +
@@ -294,7 +227,6 @@ describe('Client Fees & Organizer Earnings Breakdown', () => {
     });
 
     it('calculates breakdown for multiple tier selections supplied as an item array', () => {
-      // 1 x $25.00 ticket + 2 x $50.00 tickets = 3 tickets, $125.00 subtotal (12500 cents)
       const items = [
         { unitPriceInCents: 2500, quantity: 1 },
         { unitPriceInCents: 5000, quantity: 2 },
@@ -304,23 +236,12 @@ describe('Client Fees & Organizer Earnings Breakdown', () => {
 
       expect(breakdown.ticketSubtotalInCents).toBe(12500);
       expect(breakdown.totalTicketQuantity).toBe(3);
-
-      // Platform fee: 10% of 12500 = 1250 cents ($12.50)
       expect(breakdown.platformFeeInCents).toBe(1250);
-
-      // Service fee: 3 x 95 = 285 cents ($2.85)
       expect(breakdown.serviceFeeInCents).toBe(285);
-
-      // Pre-processing total: 12500 + 1250 + 285 = 14035 cents ($140.35)
       expect(breakdown.preProcessingTotalInCents).toBe(14035);
-
-      // Buyer total: Math.round((14035 + 30) / 0.971) = Math.round(14065 / 0.971) = 14485 cents ($144.85)
       expect(breakdown.buyerTotalInCents).toBe(14485);
-
-      // Processing fee: 14485 - 14035 = 450 cents ($4.50)
       expect(breakdown.processingFeeInCents).toBe(450);
 
-      // Reconciliation
       expect(breakdown.buyerTotalInCents).toBe(
         breakdown.ticketSubtotalInCents +
           breakdown.platformFeeInCents +

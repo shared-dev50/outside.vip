@@ -35,11 +35,8 @@ app.use(
 );
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
-
-// Global auth context attachment
 app.use(authenticateUser);
 
-// API Route Handlers
 app.use('/api/health', healthRouter);
 app.use('/api/auth', authRouter);
 app.use('/api/events', eventsRouter);
@@ -49,7 +46,6 @@ app.use('/api/webhooks', webhookRouter);
 app.use('/api/orders', ordersRouter);
 app.use('/api/waitlist', waitlistRouter);
 
-// Fallback 404 handler
 app.use('/api/*', (_req, res) => {
   res.status(404).json({
     success: false,
@@ -60,5 +56,4 @@ app.use('/api/*', (_req, res) => {
   });
 });
 
-// Centralized error handler
 app.use(errorHandler);

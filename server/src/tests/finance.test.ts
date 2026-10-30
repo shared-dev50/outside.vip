@@ -13,7 +13,7 @@ describe('Outside.vip Stripe Connect Finance & Account Dashboard API', () => {
   let secondOrganizerUserId: string;
 
   beforeAll(async () => {
-    // 1. Authenticate seeded organizer
+    // Authenticate seeded organizer
     const organizerLogin = await request(app).post('/api/auth/login').send({
       email: 'sol@outside.vip',
       password: 'Outside2026!',
@@ -22,7 +22,7 @@ describe('Outside.vip Stripe Connect Finance & Account Dashboard API', () => {
     organizerToken = organizerLogin.body.data.token;
     organizerUserId = organizerLogin.body.data.user.id;
 
-    // 2. Authenticate seeded attendee
+    // Authenticate seeded attendee
     const attendeeLogin = await request(app).post('/api/auth/login').send({
       email: 'alex@outside.vip',
       password: 'Outside2026!',
@@ -30,7 +30,7 @@ describe('Outside.vip Stripe Connect Finance & Account Dashboard API', () => {
     expect(attendeeLogin.status).toBe(200);
     attendeeToken = attendeeLogin.body.data.token;
 
-    // 3. Create and authenticate second organizer for isolation verification
+    // Create and authenticate second organizer for isolation verification
     const secondEmail = `org2_${Date.now()}@outside.vip`;
     const regRes = await request(app).post('/api/auth/register').send({
       email: secondEmail,

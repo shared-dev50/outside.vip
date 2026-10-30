@@ -54,23 +54,13 @@ export async function getOrCreateOrganizerBalance(
   return balance;
 }
 
-/**
- * Records the financial ledger entries for a completed ticket order:
- * 1. Organizer pending earnings entry.
- * 2. Outside.vip platform fee entry.
- * 3. Outside.vip service fee entry.
- * 4. Estimated Stripe processing fee entry.
- *
- * Increments OrganizerBalance.pendingBalanceInCents.
- * If autoSettle is true, immediately clears to available balance.
- */
+// Records pending earnings, platform fees, service fees, and estimated processing fees for a completed order.
 export async function recordTicketSalePending(
   tx: Prisma.TransactionClient,
   params: RecordTicketSaleParams
 ): Promise<void> {
   const { orderId, paymentIntentId, stripeChargeId, autoSettle = false } = params;
 
-  // Retrieve order with event and item relationships
   const order = await tx.order.findUnique({
     where: { id: orderId },
     include: {
@@ -86,7 +76,6 @@ export async function recordTicketSalePending(
   const organizerId = order.event.organizerId;
   const refKey = `order_${order.id}_pending_sale`;
 
-  // Verify idempotency via metadata lookup
   const existingPending = await tx.financialLedgerEntry.findFirst({
     where: {
       orderId: order.id,
@@ -101,7 +90,6 @@ export async function recordTicketSalePending(
     return;
   }
 
-  // Calculate authoritative checkout fee breakdown
   const feeBreakdown = calculateCheckoutFeeBreakdown(order.items);
   const organizerEarnings = order.organizerNetInCents > 0
     ? order.organizerNetInCents
@@ -110,7 +98,6 @@ export async function recordTicketSalePending(
   const serviceFee = feeBreakdown.serviceFeeInCents;
   const stripeEstFee = feeBreakdown.processingFeeInCents;
 
-  // 1. Organizer Pending Earnings Entry
   if (organizerEarnings > 0) {
     await tx.financialLedgerEntry.create({
       data: {
@@ -132,7 +119,6 @@ export async function recordTicketSalePending(
       },
     });
 
-    // Ensure OrganizerBalance exists and update pending balance
     await getOrCreateOrganizerBalance(tx, organizerId, order.currency);
     await tx.organizerBalance.update({
       where: { userId: organizerId },
@@ -142,7 +128,6 @@ export async function recordTicketSalePending(
     });
   }
 
-  // 2. Platform Fee Entry
   if (platformFee > 0) {
     await tx.financialLedgerEntry.create({
       data: {
@@ -164,7 +149,6 @@ export async function recordTicketSalePending(
     });
   }
 
-  // 3. Service Fee Entry
   if (serviceFee > 0) {
     await tx.financialLedgerEntry.create({
       data: {
@@ -187,7 +171,6 @@ export async function recordTicketSalePending(
     });
   }
 
-  // 4. Estimated Stripe Processing Fee Entry
   if (stripeEstFee > 0) {
     await tx.financialLedgerEntry.create({
       data: {
@@ -213,12 +196,7 @@ export async function recordTicketSalePending(
   }
 }
 
-/**
- * Transitions organizer earnings from PENDING to AVAILABLE:
- * 1. Decrements pendingBalanceInCents.
- * 2. Increments availableBalanceInCents.
- * 3. Creates TICKET_SALE_CLEARED ledger entry.
- */
+// Clears pending earnings to available balance once settled
 export async function settleOrderEarnings(
   tx: Prisma.TransactionClient,
   params: { orderId: string; stripeChargeId?: string }
@@ -243,7 +221,6 @@ export async function settleOrderEarnings(
     return;
   }
 
-  // Verify settlement hasn't already been recorded
   const existingCleared = await tx.financialLedgerEntry.findFirst({
     where: {
       orderId: order.id,
@@ -255,10 +232,7 @@ export async function settleOrderEarnings(
     return;
   }
 
-  // Ensure balance record exists
   const balance = await getOrCreateOrganizerBalance(tx, organizerId, order.currency);
-
-  // Decrement pending (if pending > 0), increment available
   const decrementPending = Math.min(balance.pendingBalanceInCents, organizerEarnings);
 
   await tx.organizerBalance.update({
@@ -268,8 +242,6 @@ export async function settleOrderEarnings(
       availableBalanceInCents: { increment: organizerEarnings },
     },
   });
-
-  // Create cleared available ledger entry
   await tx.financialLedgerEntry.create({
     data: {
       type: LedgerEntryType.TICKET_SALE_CLEARED,

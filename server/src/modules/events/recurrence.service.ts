@@ -79,14 +79,10 @@ function createDateInTimezone(
   second: number,
   timezone: string
 ): Date {
-  // Approximate with UTC first
   const pad = (n: number) => n.toString().padStart(2, '0');
   const targetIsoString = `${year}-${pad(month)}-${pad(day)}T${pad(hour)}:${pad(minute)}:${pad(second)}`;
 
-  // Construct UTC timestamp
   let guess = new Date(Date.UTC(year, month - 1, day, hour, minute, second));
-
-  // Determine timezone offset difference
   const parts = getDatePartsInTimezone(guess, timezone);
   const guessAsLocalIso = `${parts.year}-${pad(parts.month)}-${pad(parts.day)}T${pad(parts.hour)}:${pad(parts.minute)}:${pad(parts.second)}`;
 
@@ -96,9 +92,6 @@ function createDateInTimezone(
   return guess;
 }
 
-/**
- * Calculates occurrence start and end dates based on recurrence rules
- */
 export function calculateOccurrences(params: {
   baseStartAt: Date | string;
   baseEndAt: Date | string;
@@ -141,7 +134,6 @@ export function calculateOccurrences(params: {
     let index = 2;
 
     while (occurrences.length < countLimit) {
-      // Advance by interval days
       currentDay = new Date(currentDay.getTime() + interval * 24 * 60 * 60 * 1000);
       const dayParts = getDatePartsInTimezone(currentDay, timezone);
       const nextStart = createDateInTimezone(
@@ -169,12 +161,10 @@ export function calculateOccurrences(params: {
       ? [...new Set(params.rule.byWeekday)].sort((a, b) => a - b)
       : [startParts.weekday];
 
-    // Weekly generation
     let weekOffset = 0;
     let index = 2;
     const baseWeekday = startParts.weekday;
 
-    // Advance weeks until count or endDate reached
     while (occurrences.length < countLimit && weekOffset < 52 * interval) {
       for (const targetWeekday of rawByWeekday) {
         if (weekOffset === 0 && targetWeekday <= baseWeekday) {
@@ -257,18 +247,12 @@ export function calculateOccurrences(params: {
   return occurrences;
 }
 
-/**
- * Formats a clean date suffix for occurrence slugs, e.g. "2026-11-20"
- */
 export function formatOccurrenceSlugSuffix(date: Date, timezone: string = 'Africa/Nairobi'): string {
   const parts = getDatePartsInTimezone(date, timezone);
   const pad = (n: number) => n.toString().padStart(2, '0');
   return `${parts.year}-${pad(parts.month)}-${pad(parts.day)}`;
 }
 
-/**
- * Formats a human-readable summary of the recurrence schedule
- */
 export function formatRecurrenceSummary(
   rule: RecurrenceRuleInput,
   startDate?: Date,

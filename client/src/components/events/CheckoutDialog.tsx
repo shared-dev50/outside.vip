@@ -62,7 +62,6 @@ const PaymentContent: React.FC<PaymentContentProps> = ({
   const [email, setEmail] = useState(attendeeEmail);
   const [phone, setPhone] = useState(attendeePhone || '');
 
-  // Step state: 'idle' | 'processing' | 'success'
   const [paymentStep, setPaymentStep] = useState<'idle' | 'processing' | 'success'>('idle');
   const [cardError, setCardError] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -81,12 +80,10 @@ const PaymentContent: React.FC<PaymentContentProps> = ({
 
   const isBusy = paymentStep === 'processing' || paymentStep === 'success';
 
-  // Notify parent of busy state to prevent closing during in-flight payments
   useEffect(() => {
     onBusyChange?.(isBusy);
   }, [isBusy, onBusyChange]);
 
-  // Keep local state in sync if parent props change
   useEffect(() => {
     setName(attendeeName);
   }, [attendeeName]);
@@ -101,7 +98,6 @@ const PaymentContent: React.FC<PaymentContentProps> = ({
     }
   }, [attendeePhone]);
 
-  // Reservation hold countdown timer
   useEffect(() => {
     const timer = setInterval(() => {
       const diff = Math.floor((new Date(paymentSession.expiresAt).getTime() - Date.now()) / 1000);
@@ -150,7 +146,6 @@ const PaymentContent: React.FC<PaymentContentProps> = ({
       return;
     }
 
-    // 1. Immediately disable button and display animated spinner alongside "Processing payment…"
     setPaymentStep('processing');
     setErrorMessage(null);
 
@@ -166,7 +161,6 @@ const PaymentContent: React.FC<PaymentContentProps> = ({
         },
       });
 
-      // 3. If Stripe returns an error, stop spinner, display inline error message, and re-enable Pay
       if (result.error) {
         setErrorMessage(
           result.error.message || 'Payment attempt was declined. Please verify your card details and try again.'
@@ -175,16 +169,13 @@ const PaymentContent: React.FC<PaymentContentProps> = ({
         return;
       }
 
-      // 4. On successful payment confirmation, show brief success state with check icon and
-      // "Payment successful — preparing your tickets…" while the existing order-confirmation flow completes.
       if (
         result.paymentIntent &&
         (result.paymentIntent.status === 'succeeded' || result.paymentIntent.status === 'processing')
       ) {
         setPaymentStep('success');
 
-        // 5 & 6. Complete existing order confirmation flow:
-        // Poll order status to confirm ticket issuance with backend reconciliation
+        // Poll order status until tickets are confirmed
         const maxAttempts = 6;
         const pollIntervalMs = 1000;
 
@@ -208,8 +199,7 @@ const PaymentContent: React.FC<PaymentContentProps> = ({
           await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
         }
 
-        // Navigate to the established order confirmation page
-        navigate(
+          navigate(
           `/orders/${paymentSession.orderNumber}?token=${encodeURIComponent(paymentSession.orderAccessToken)}`
         );
       } else {
@@ -224,7 +214,6 @@ const PaymentContent: React.FC<PaymentContentProps> = ({
 
   return (
     <div className="flex flex-col h-full min-h-0">
-      {/* Modal Header: Fixed at top */}
       <div className="px-5 sm:px-6 py-3.5 sm:py-4 border-b border-gray-100 flex items-center justify-between bg-white shrink-0">
         <div className="space-y-0.5">
           <div className="flex items-center gap-2">
@@ -249,12 +238,10 @@ const PaymentContent: React.FC<PaymentContentProps> = ({
         </button>
       </div>
 
-      {/* Modal Scrollable Body: Single dedicated vertical scroll container */}
       <div
         className="px-5 sm:px-6 py-4 sm:py-5 overflow-y-auto flex-1 min-h-0 space-y-4 bg-[#FAF8F5]/40 overscroll-contain"
         style={{ WebkitOverflowScrolling: 'touch' }}
       >
-        {/* Reservation Hold Countdown Banner */}
         <div
           className={`p-3 rounded-lg border text-xs flex items-center justify-between gap-2 ${
             isExpired
@@ -289,7 +276,6 @@ const PaymentContent: React.FC<PaymentContentProps> = ({
           </div>
         )}
 
-        {/* Compact Order Summary Card */}
         <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-3 shadow-xs">
           <div className="text-[11px] uppercase tracking-wider font-semibold text-gray-400">
             Order Summary
@@ -313,7 +299,6 @@ const PaymentContent: React.FC<PaymentContentProps> = ({
             ))}
           </div>
 
-          {/* Fee breakdown details */}
           {dialogFees.ticketSubtotalInCents > 0 && (
             <div className="pt-3 border-t border-gray-100 space-y-1.5 text-xs text-gray-500">
               <div className="flex justify-between">
@@ -345,9 +330,7 @@ const PaymentContent: React.FC<PaymentContentProps> = ({
           </div>
         </div>
 
-        {/* Payment Form & Attendee Details */}
         <form onSubmit={handlePayment} className={`space-y-4 ${isExpired ? 'opacity-40 pointer-events-none' : ''}`}>
-          {/* Attendee Details Card */}
           <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-3 shadow-xs">
             <div className="flex items-center justify-between">
               <div className="text-[11px] uppercase tracking-wider font-semibold text-gray-400">
@@ -418,7 +401,6 @@ const PaymentContent: React.FC<PaymentContentProps> = ({
             </div>
           </div>
 
-          {/* CardElement Card: Embedded secure Stripe card entry */}
           <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-2.5 shadow-xs">
             <div className="flex items-center justify-between">
               <label htmlFor="card-element-container" className="text-[11px] uppercase tracking-wider font-semibold text-gray-500 block">
@@ -486,7 +468,6 @@ const PaymentContent: React.FC<PaymentContentProps> = ({
             )}
           </div>
 
-          {/* Declined or Validation Error Alert */}
           {errorMessage && (
             <div className="p-3.5 rounded-lg bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-start gap-2.5 animate-in fade-in">
               <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-600" />
@@ -497,7 +478,6 @@ const PaymentContent: React.FC<PaymentContentProps> = ({
             </div>
           )}
 
-          {/* Pay Button & Cancel */}
           <div className="space-y-2 pt-1">
             <button
               type="submit"
@@ -540,7 +520,6 @@ const PaymentContent: React.FC<PaymentContentProps> = ({
         </form>
       </div>
 
-      {/* Modal Footer Security Badge: Fixed at bottom */}
       <div className="px-5 sm:px-6 py-2.5 sm:py-3 border-t border-gray-100 bg-white flex items-center justify-center gap-1.5 text-[11px] text-gray-400 shrink-0">
         <ShieldCheck className="w-3.5 h-3.5 text-gray-400 shrink-0" />
         <span>End-to-end 256-bit encrypted card checkout via Stripe</span>

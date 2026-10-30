@@ -80,7 +80,6 @@ export const JoinWaitlistDialog: React.FC<JoinWaitlistDialogProps> = ({
         className="w-full max-w-md bg-white rounded-2xl border border-stone-200 shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200"
         onClick={(e) => e.stopPropagation()}
       >
-        {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-stone-100 bg-[#FAF8F5]">
           <div className="flex items-center gap-2.5">
             <div className="w-8 h-8 rounded-full bg-amber-100 border border-amber-300 flex items-center justify-center text-amber-800">
@@ -104,10 +103,8 @@ export const JoinWaitlistDialog: React.FC<JoinWaitlistDialogProps> = ({
           </button>
         </div>
 
-        {/* Content */}
         <div className="p-6">
           {result ? (
-            /* Success confirmation */
             <div className="space-y-5 text-center">
               <div className="w-14 h-14 rounded-full bg-emerald-50 border border-emerald-200 flex items-center justify-center mx-auto text-emerald-600">
                 <CheckCircle2 className="w-8 h-8" />
@@ -157,7 +154,6 @@ export const JoinWaitlistDialog: React.FC<JoinWaitlistDialogProps> = ({
               </button>
             </div>
           ) : (
-            /* Registration Form */
             <form onSubmit={handleSubmit} className="space-y-4">
               <div className="p-3 rounded-xl bg-amber-50/70 border border-amber-200 text-amber-900 text-xs flex items-start gap-2.5">
                 <Users className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />

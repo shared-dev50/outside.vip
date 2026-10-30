@@ -4,10 +4,7 @@ import { releaseExpiredReservations } from '../checkout/checkout.service.js';
 let workerInterval: NodeJS.Timeout | null = null;
 let isJobRunning = false;
 
-/**
- * Runs a single maintenance pass: sweeps expired checkout reservations
- * and sweeps expired waitlist purchase offers, advancing the queue.
- */
+// Sweeps expired checkout reservations and waitlist purchase offers.
 export async function runWaitlistMaintenancePass(): Promise<{
   releasedReservations: number;
   expiredOffers: number;
@@ -47,16 +44,11 @@ export async function runWaitlistMaintenancePass(): Promise<{
   }
 }
 
-/**
- * Starts the server-side waitlist background worker.
- * Runs on a safe periodic interval (default: 60 seconds).
- */
 export function startWaitlistBackgroundWorker(intervalMs = 60_000): void {
   if (workerInterval) return;
 
   console.log(`⏱️ Waitlist background worker started (interval: ${intervalMs / 1000}s)`);
 
-  // Run initial pass shortly after boot
   setTimeout(() => {
     runWaitlistMaintenancePass().catch(() => {});
   }, 5000);
@@ -65,15 +57,12 @@ export function startWaitlistBackgroundWorker(intervalMs = 60_000): void {
     runWaitlistMaintenancePass().catch(() => {});
   }, intervalMs);
 
-  // Do not hold process open solely for timer if all connections close
+  // Prevent interval from keeping the process alive on shutdown
   if (workerInterval.unref) {
     workerInterval.unref();
   }
 }
 
-/**
- * Gracefully terminates the waitlist background worker.
- */
 export function stopWaitlistBackgroundWorker(): void {
   if (workerInterval) {
     clearInterval(workerInterval);

@@ -55,10 +55,8 @@ export const EventDetailPage: React.FC = () => {
   const [paymentSession, setPaymentSession] = useState<CheckoutSessionResult | null>(null);
   const [sessionSnapshotKey, setSessionSnapshotKey] = useState<string | null>(null);
 
-  // Waitlist Registration Modal
   const [waitlistModalTier, setWaitlistModalTier] = useState<TicketTier | null>(null);
 
-  // Timed Waitlist Purchase Offer State
   const [offerTokenParam] = useState<string | null>(() => {
     if (typeof window !== 'undefined') {
       const sp = new URLSearchParams(window.location.search);
@@ -81,7 +79,6 @@ export const EventDetailPage: React.FC = () => {
 
   const event = data?.event;
 
-  // Retrieve Waitlist Offer on Mount if offer token exists in URL
   useEffect(() => {
     if (!offerTokenParam) return;
     let isMounted = true;
@@ -105,7 +102,6 @@ export const EventDetailPage: React.FC = () => {
     };
   }, [offerTokenParam]);
 
-  // Live Countdown Ticker for Waitlist Offer Expiry
   useEffect(() => {
     if (offerSecondsRemaining === null || offerSecondsRemaining <= 0) return;
     const timer = setInterval(() => {
@@ -203,8 +199,7 @@ export const EventDetailPage: React.FC = () => {
         });
         return;
       } catch {
-        // Fallback to clipboard
-      }
+            }
     }
 
     try {
@@ -353,7 +348,6 @@ export const EventDetailPage: React.FC = () => {
     setSessionSnapshotKey(null);
   };
 
-  // 1. Loading State
   if (isLoading) {
     return (
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6 animate-pulse">
@@ -370,7 +364,6 @@ export const EventDetailPage: React.FC = () => {
     );
   }
 
-  // 2. Error / 404 State
   if (error || !event) {
     return (
       <div className="max-w-lg mx-auto px-4 py-20 text-center space-y-4">
@@ -397,11 +390,9 @@ export const EventDetailPage: React.FC = () => {
     );
   }
 
-  // 3. Password Protected Event Gate
   if (event.isPasswordProtected && !event.hasAccess) {
     return (
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8 bg-white min-h-[70vh]">
-        {/* Top Back Navigation */}
         <div className="flex items-center justify-between text-xs">
           <Link
             to="/events"
@@ -413,7 +404,6 @@ export const EventDetailPage: React.FC = () => {
         </div>
 
         <div className="max-w-xl mx-auto space-y-6 pt-4">
-          {/* Teaser Header with Cover Image */}
           <div className="relative aspect-[16/10] rounded-xl overflow-hidden bg-stone-900 border border-stone-200 shadow-md">
             <img
               src={event.coverImageUrl}
@@ -439,7 +429,6 @@ export const EventDetailPage: React.FC = () => {
             </div>
           </div>
 
-          {/* Password Entry Card */}
           <div className="bg-[#FAF8F5] border border-stone-200 rounded-xl p-6 sm:p-8 space-y-5 text-center shadow-xs">
             <div className="w-12 h-12 rounded-full bg-amber-100 border border-amber-200 text-amber-800 flex items-center justify-center mx-auto shadow-2xs">
               <Lock className="w-6 h-6" />
@@ -515,7 +504,6 @@ export const EventDetailPage: React.FC = () => {
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8 bg-white">
-      {/* Top Back & Share Navigation */}
       <div className="flex items-center justify-between text-xs">
         <Link
           to="/events"
@@ -543,11 +531,8 @@ export const EventDetailPage: React.FC = () => {
         </button>
       </div>
 
-      {/* Main 2-Column Grid */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-10 items-start">
-        {/* Left Column: Poster, Title, Date/Venue, Description, Organizer */}
         <div className="lg:col-span-7 space-y-6">
-          {/* Prominent Poster / Cover Image */}
           <div className="relative aspect-[16/10] rounded-lg overflow-hidden bg-gray-100 border border-gray-200">
             <img
               src={event.coverImageUrl}
@@ -567,7 +552,6 @@ export const EventDetailPage: React.FC = () => {
             )}
           </div>
 
-          {/* Event Title & Tagline */}
           <div className="space-y-2">
             <h1 className="font-display font-extrabold text-2xl sm:text-3xl md:text-4xl text-gray-900 tracking-tight leading-tight">
               {event.title}
@@ -579,10 +563,7 @@ export const EventDetailPage: React.FC = () => {
             )}
           </div>
 
-          {/* Key Details Row: Date, Time & Venue */}
-          {/* Key Details Row: Date, Time & Venue */}
           <div className={`p-4 rounded-lg bg-gray-50 border border-gray-200 grid grid-cols-1 ${!event.hideGuestCount && typeof event.guestCount === 'number' && event.guestCount > 0 ? 'sm:grid-cols-3' : 'sm:grid-cols-2'} gap-4 text-xs`}>
-            {/* Date & Time */}
             <div className="space-y-1">
               <div className="text-gray-400 font-medium flex items-center gap-1.5 uppercase tracking-wider text-[11px]">
                 <Calendar className="w-3.5 h-3.5" />
@@ -602,7 +583,6 @@ export const EventDetailPage: React.FC = () => {
               </div>
             </div>
 
-            {/* Venue Location */}
             <div className="space-y-1">
               <div className="text-gray-400 font-medium flex items-center justify-between uppercase tracking-wider text-[11px]">
                 <span className="flex items-center gap-1.5">
@@ -627,7 +607,6 @@ export const EventDetailPage: React.FC = () => {
               </div>
             </div>
 
-            {/* Verified Attendees (if not hidden) */}
             {!event.hideGuestCount && typeof event.guestCount === 'number' && event.guestCount > 0 && (
               <div className="space-y-1">
                 <div className="text-gray-400 font-medium flex items-center gap-1.5 uppercase tracking-wider text-[11px]">
@@ -644,7 +623,6 @@ export const EventDetailPage: React.FC = () => {
             )}
           </div>
 
-          {/* Organizer Card */}
           <div className="p-4 rounded-lg border border-gray-200 flex items-center justify-between gap-3 text-xs">
             <div className="flex items-center gap-3">
               {event.organizer.avatarUrl ? (
@@ -684,7 +662,6 @@ export const EventDetailPage: React.FC = () => {
             )}
           </div>
 
-          {/* Description */}
           <div className="space-y-3 pt-2">
             <h2 className="font-bold text-lg text-gray-900">About this event</h2>
             <div className="text-gray-700 text-sm leading-relaxed whitespace-pre-line font-normal">
@@ -692,7 +669,6 @@ export const EventDetailPage: React.FC = () => {
             </div>
           </div>
 
-          {/* Admission & Policies */}
           <div className="p-4 rounded-lg bg-gray-50 border border-gray-200 space-y-2 text-xs text-gray-600">
             <div className="font-semibold text-gray-900">Important Information</div>
             <div className="grid grid-cols-2 gap-2 text-xs pt-1">
@@ -704,7 +680,6 @@ export const EventDetailPage: React.FC = () => {
             </p>
           </div>
 
-          {/* Event Features Section (Performers, Sponsors, Speakers, Hosts, Others) */}
           {event.features && event.features.length > 0 && (
             <div className="space-y-4 pt-4 border-t border-gray-100">
               <div className="flex items-center gap-2">
@@ -746,7 +721,6 @@ export const EventDetailPage: React.FC = () => {
             </div>
           )}
 
-          {/* Featured Video (YouTube) */}
           {event.youtubeVideoId && (
             <div className="space-y-3 pt-4 border-t border-gray-100">
               <h2 className="font-bold text-lg text-gray-900">Featured Video</h2>
@@ -762,7 +736,6 @@ export const EventDetailPage: React.FC = () => {
             </div>
           )}
 
-          {/* Event Gallery */}
           {event.galleryImages && event.galleryImages.length > 0 && (
             <div className="space-y-3 pt-4 border-t border-gray-100">
               <div className="flex items-center justify-between">
@@ -796,7 +769,6 @@ export const EventDetailPage: React.FC = () => {
           )}
         </div>
 
-        {/* Right Column: Ticket Purchase Panel */}
         <div id="tickets-panel" className="lg:col-span-5 space-y-4">
           <div className="border border-gray-200 rounded-lg p-5 sm:p-6 space-y-5 sticky top-20 bg-white">
             <div className="flex items-center justify-between pb-3 border-b border-gray-100">
@@ -804,7 +776,6 @@ export const EventDetailPage: React.FC = () => {
               <span className="text-xs text-gray-500">Official passes</span>
             </div>
 
-            {/* Active Waitlist Offer Banner */}
             {offerInfo && (offerSecondsRemaining ?? 0) > 0 && (
               <div className="p-4 rounded-xl bg-amber-500/10 border-2 border-amber-500 text-stone-900 space-y-3 shadow-xs">
                 <div className="flex items-start justify-between gap-3">
@@ -850,7 +821,6 @@ export const EventDetailPage: React.FC = () => {
               </div>
             )}
 
-            {/* Expired or Invalid Offer Banner */}
             {offerTokenParam && ((offerSecondsRemaining !== null && offerSecondsRemaining <= 0) || offerError) && (
               <div className="p-3.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-start gap-2.5">
                 <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
@@ -863,7 +833,6 @@ export const EventDetailPage: React.FC = () => {
               </div>
             )}
 
-            {/* Declined Offer Message */}
             {offerDeclinedMessage && (
               <div className="p-3.5 rounded-xl bg-stone-100 border border-stone-300 text-stone-800 text-xs flex items-start gap-2.5">
                 <Check className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
@@ -874,7 +843,6 @@ export const EventDetailPage: React.FC = () => {
               </div>
             )}
 
-            {/* Ticket Tier List */}
             <div className="space-y-3">
               {event.ticketTiers.map((tier: TicketTier) => {
                 const qty = selectedQuantities[tier.id] || 0;
@@ -917,7 +885,6 @@ export const EventDetailPage: React.FC = () => {
                         </div>
                       </div>
 
-                      {/* Quantity Stepper or Join Waitlist */}
                       {!isSoldOut ? (
                         <div className="flex items-center gap-1.5 bg-gray-50 border border-gray-200 rounded-md p-1 shrink-0">
                           <button
@@ -965,7 +932,6 @@ export const EventDetailPage: React.FC = () => {
               </div>
             )}
 
-            {/* Attendee Details Form & Continue Button */}
             <form onSubmit={handleProceedToCheckout} className="space-y-3 pt-3 border-t border-gray-100 text-xs" noValidate>
               <div className="space-y-2">
                 <div>
@@ -1019,7 +985,6 @@ export const EventDetailPage: React.FC = () => {
                 </div>
               </div>
 
-              {/* Ticket Fee Breakdown */}
               {totalTickets > 0 && checkoutFees.ticketSubtotalInCents > 0 && (
                 <div className="p-3 rounded-lg bg-gray-50 border border-gray-200/80 space-y-2 text-xs">
                   <div className="flex justify-between text-gray-600">
@@ -1084,7 +1049,6 @@ export const EventDetailPage: React.FC = () => {
         </div>
       </div>
 
-      {/* Mobile Sticky Bottom Bar */}
       <div className="fixed bottom-0 left-0 right-0 z-40 lg:hidden p-3 bg-white border-t border-gray-200 shadow-md">
         <div className="flex items-center justify-between gap-4 max-w-md mx-auto">
           <div>
@@ -1111,7 +1075,6 @@ export const EventDetailPage: React.FC = () => {
         </div>
       </div>
 
-      {/* Checkout Dialog Modal */}
       {event && (
         <CheckoutDialog
           isOpen={isCheckoutOpen}
@@ -1130,7 +1093,6 @@ export const EventDetailPage: React.FC = () => {
         />
       )}
 
-      {/* Join Waitlist Modal */}
       {waitlistModalTier && event && (
         <JoinWaitlistDialog
           isOpen={Boolean(waitlistModalTier)}
@@ -1144,7 +1106,6 @@ export const EventDetailPage: React.FC = () => {
         />
       )}
 
-      {/* Gallery Lightbox Modal */}
       {activeGalleryModalImage && (
         <div
           className="fixed inset-0 z-50 bg-black/90 flex items-center justify-center p-4 backdrop-blur-xs"

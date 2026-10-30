@@ -83,8 +83,7 @@ describe('Organizer Earnings & Fee Calculations (Server)', () => {
       // Projected buyer spend: 2394 * 250 = 598,500 cents ($5,985.00)
       expect(breakdown.projectedBuyerTotalInCents).toBe(598500);
 
-      // Strict balance sheet reconciliation
-      expect(breakdown.buyerTotalInCents).toBe(
+        expect(breakdown.buyerTotalInCents).toBe(
         breakdown.organizerEarningsInCents +
           breakdown.platformRevenueInCents +
           breakdown.processingFeeInCents
@@ -97,24 +96,21 @@ describe('Organizer Earnings & Fee Calculations (Server)', () => {
         const capacity = dollars * 5;
         const b = calculateTierEarnings(priceInCents, capacity);
 
-        // Must be integer cents
-        expect(Number.isInteger(b.ticketPriceInCents)).toBe(true);
+          expect(Number.isInteger(b.ticketPriceInCents)).toBe(true);
         expect(Number.isInteger(b.platformFeeInCents)).toBe(true);
         expect(Number.isInteger(b.serviceFeeInCents)).toBe(true);
         expect(Number.isInteger(b.processingFeeInCents)).toBe(true);
         expect(Number.isInteger(b.buyerTotalInCents)).toBe(true);
         expect(Number.isInteger(b.organizerEarningsInCents)).toBe(true);
 
-        // Organizer receives 100% of the ticket price
-        expect(b.organizerEarningsInCents).toBe(priceInCents);
+          expect(b.organizerEarningsInCents).toBe(priceInCents);
 
         // Strict fund preservation: Buyer Total === Organizer + Platform + Stripe
         expect(b.buyerTotalInCents).toBe(
           b.organizerEarningsInCents + b.platformRevenueInCents + b.processingFeeInCents
         );
 
-        // Capacity projections match
-        expect(b.projectedEarningsInCents).toBe(b.organizerEarningsInCents * capacity);
+          expect(b.projectedEarningsInCents).toBe(b.organizerEarningsInCents * capacity);
         expect(b.projectedBuyerTotalInCents).toBe(b.buyerTotalInCents * capacity);
         expect(b.projectedPlatformRevenueInCents).toBe(b.platformRevenueInCents * capacity);
       }
@@ -148,8 +144,7 @@ describe('Organizer Earnings & Fee Calculations (Server)', () => {
       // Expected earnings: 1500*50 + 3000*200 + 10000*25 = 75000 + 600000 + 250000 = 925000 cents ($9,250.00)
       expect(combined.totalProjectedEarningsInCents).toBe(925000);
 
-      // Reconcile total buyer spend
-      expect(combined.totalProjectedBuyerSpendInCents).toBe(
+        expect(combined.totalProjectedBuyerSpendInCents).toBe(
         combined.totalProjectedEarningsInCents +
           combined.totalProjectedPlatformRevenueInCents +
           combined.totalProjectedProcessingFeesInCents
@@ -215,7 +210,6 @@ describe('Organizer Earnings & Fee Calculations (Server)', () => {
       expect(t2.serviceFeeInCents).toBe(95);
       expect(t2.organizerEarningsInCents).toBe(7500);
 
-      // Overall fund reconciliation check in API response
       expect(preview.totalProjectedBuyerSpendInCents).toBe(
         preview.totalProjectedEarningsInCents +
           preview.totalProjectedPlatformRevenueInCents +
@@ -295,8 +289,7 @@ describe('Organizer Earnings & Fee Calculations (Server)', () => {
       // Processing fee: 4758 - 4590 = 168 cents ($1.68)
       expect(b.processingFeeInCents).toBe(168);
 
-      // Reconciliation
-      expect(b.buyerTotalInCents).toBe(
+        expect(b.buyerTotalInCents).toBe(
         b.ticketSubtotalInCents +
           b.platformFeeInCents +
           b.serviceFeeInCents +
@@ -321,8 +314,7 @@ describe('Organizer Earnings & Fee Calculations (Server)', () => {
       expect(b.buyerTotalInCents).toBe(14485);
       expect(b.processingFeeInCents).toBe(450);
 
-      // Strict balance verification
-      expect(b.buyerTotalInCents).toBe(
+        expect(b.buyerTotalInCents).toBe(
         b.ticketSubtotalInCents +
           b.platformFeeInCents +
           b.serviceFeeInCents +
@@ -383,23 +375,18 @@ describe('Organizer Earnings & Fee Calculations (Server)', () => {
       const qty = 2;
       const b = calculateCheckoutFeeBreakdown(subtotal, qty);
 
-      // Platform fee is 10% of ticket subtotal only
-      expect(b.platformFeeInCents).toBe(750);
+        expect(b.platformFeeInCents).toBe(750);
 
       // Service fee is $0.95 x 2
       expect(b.serviceFeeInCents).toBe(190);
 
-      // Pre-processing total: 7500 + 750 + 190 = 8440
-      expect(b.preProcessingTotalInCents).toBe(8440);
+        expect(b.preProcessingTotalInCents).toBe(8440);
 
-      // Buyer total: Math.round((8440 + 30) / 0.971) = Math.round(8470 / 0.971) = 8723
-      expect(b.buyerTotalInCents).toBe(8723);
+        expect(b.buyerTotalInCents).toBe(8723);
 
-      // Processing fee: 8723 - 8440 = 283
-      expect(b.processingFeeInCents).toBe(283);
+        expect(b.processingFeeInCents).toBe(283);
 
-      // Check Stripe take: 8723 * 0.029 + 30 = 252.967 + 30 = 282.967 -> 283
-      const stripeTake = Math.round(b.buyerTotalInCents * STRIPE_PERCENT + STRIPE_FIXED_CENTS);
+        const stripeTake = Math.round(b.buyerTotalInCents * STRIPE_PERCENT + STRIPE_FIXED_CENTS);
       expect(b.processingFeeInCents).toBe(stripeTake);
     });
   });

@@ -9,13 +9,8 @@ export interface FinancialBreakdown {
   organizerPayoutInCents?: number;
 }
 
-/**
- * Calculates integer-cents platform commission and organizer payout breakdown.
- * Enforces the invariant: platformFeeInCents + organizerNetInCents === totalInCents.
- *
- * @param totalInCents Gross order amount in minor currency units (cents)
- * @param commissionPercent Configurable platform commission rate (defaults to env or 5%)
- */
+// Calculates platform commission and organizer payout breakdown in integer cents.
+// Enforces invariant: platformFeeInCents + organizerNetInCents === totalInCents.
 export function calculateFinancialBreakdown(
   totalInCents: number,
   commissionPercent: number = env.PLATFORM_COMMISSION_PERCENT
@@ -28,11 +23,9 @@ export function calculateFinancialBreakdown(
     throw new Error('Commission percentage must be between 0 and 100');
   }
 
-  // Calculate platform fee rounded to nearest integer cent
   const platformFeeInCents = Math.round(totalInCents * (commissionPercent / 100));
   const organizerNetInCents = totalInCents - platformFeeInCents;
 
-  // Strict invariant validation
   if (platformFeeInCents + organizerNetInCents !== totalInCents) {
     throw new Error(
       `Financial discrepancy detected: ${platformFeeInCents} + ${organizerNetInCents} !== ${totalInCents}`
@@ -50,34 +43,22 @@ export function calculateFinancialBreakdown(
 }
 
 export const PLATFORM_FEE_PERCENT = 10; // 10%
-export const SERVICE_FEE_CENTS = 95; // $0.95 (95 cents)
+export const SERVICE_FEE_CENTS = 95; // $0.95 per ticket
 export const STRIPE_PERCENT = 0.029; // 2.9%
-export const STRIPE_FIXED_CENTS = 30; // $0.30 (30 cents)
+export const STRIPE_FIXED_CENTS = 30; // $0.30 per transaction
 
 export interface TierFeeBreakdown {
-  /** Unit ticket price in cents set by organizer */
   ticketPriceInCents: number;
-  /** Platform fee in cents (10% of ticket price) */
   platformFeeInCents: number;
-  /** Fixed service fee in cents ($0.95 per ticket paid by buyer) */
   serviceFeeInCents: number;
-  /** Pre-processing subtotal = ticketPrice + platformFee + serviceFee */
   subtotalInCents: number;
-  /** Stripe payment processing fee in cents covering 2.9% + $0.30 */
   processingFeeInCents: number;
-  /** Final estimated total charged to buyer per ticket */
   buyerTotalInCents: number;
-  /** Organizer net earnings per ticket */
   organizerEarningsInCents: number;
-  /** Platform net revenue per ticket = platformFee + serviceFee */
   platformRevenueInCents: number;
-  /** Configured capacity of this tier */
   capacity: number;
-  /** Projected organizer earnings at capacity = organizerEarningsInCents * capacity */
   projectedEarningsInCents: number;
-  /** Projected gross buyer spend at capacity = buyerTotalInCents * capacity */
   projectedBuyerTotalInCents: number;
-  /** Projected platform revenue at capacity = platformRevenueInCents * capacity */
   projectedPlatformRevenueInCents: number;
 }
 
@@ -90,11 +71,8 @@ export interface CombinedEarningsBreakdown {
   totalProjectedProcessingFeesInCents: number;
 }
 
-/**
- * Authoritatively calculates the fee breakdown and organizer earnings for a single ticket tier.
- * Uses integer cents arithmetic and strictly guarantees:
- *   buyerTotalInCents === organizerEarningsInCents + platformRevenueInCents + processingFeeInCents
- */
+// Calculates fee breakdown and organizer earnings for a single ticket tier.
+// Guarantee: buyerTotalInCents === organizerEarningsInCents + platformRevenueInCents + processingFeeInCents.
 export function calculateTierEarnings(
   ticketPriceInCents: number,
   capacity: number = 1
@@ -119,31 +97,22 @@ export function calculateTierEarnings(
     };
   }
 
-  // 1. Platform fee: 10% of ticket price
   const platformFeeInCents = Math.round(safePrice * (PLATFORM_FEE_PERCENT / 100));
-
-  // 2. Service fee: $0.95 (95 cents), charged to the buyer
   const serviceFeeInCents = SERVICE_FEE_CENTS;
-
-  // 3. Pre-processing subtotal
   const subtotalInCents = safePrice + platformFeeInCents + serviceFeeInCents;
 
-  // 4. Estimated buyer total covering Stripe 2.9% + $0.30
-  // Formula: BuyerTotal * (1 - 0.029) - 30 = Subtotal => BuyerTotal = (Subtotal + 30) / (1 - 0.029)
+  // Gross-up buyer total to cover Stripe's 2.9% + $0.30 fee
+  // BuyerTotal = (Subtotal + 30) / (1 - 0.029)
   const buyerTotalInCents = Math.round(
     (subtotalInCents + STRIPE_FIXED_CENTS) / (1 - STRIPE_PERCENT)
   );
 
-  // Exact Stripe fee charged on final buyer charge
   const processingFeeInCents = buyerTotalInCents - subtotalInCents;
 
-  // 5. Organizer earnings
-  // The buyer pays platform fee, service fee, and processing fee.
-  // The organizer receives 100% of their set ticket price.
+  // Buyer pays all platform and processing fees; organizer retains 100% of face value
   const organizerEarningsInCents = safePrice;
   const platformRevenueInCents = platformFeeInCents + serviceFeeInCents;
 
-  // Invariant verification
   if (buyerTotalInCents !== organizerEarningsInCents + platformRevenueInCents + processingFeeInCents) {
     throw new Error('Reconciliation invariant failed in calculateTierEarnings');
   }
@@ -192,32 +161,18 @@ export function calculateCombinedEarnings(
 }
 
 export interface CheckoutFeeBreakdown {
-  /** Sum of ticket prices × quantities in cents */
   ticketSubtotalInCents: number;
-  /** Total ticket quantity across all tiers */
   totalTicketQuantity: number;
-  /** Platform fee: 10% of ticket subtotal in cents */
   platformFeeInCents: number;
-  /** Service fee: $0.95 (95 cents) per ticket × total quantity */
   serviceFeeInCents: number;
-  /** Pre-processing subtotal = ticketSubtotal + platformFee + serviceFee */
   preProcessingTotalInCents: number;
-  /** Estimated Stripe processing fee in cents covering 2.9% + $0.30 */
   processingFeeInCents: number;
-  /** Final total payable by buyer in cents */
   buyerTotalInCents: number;
-  /** Organizer net earnings in cents (= ticketSubtotal) */
   organizerEarningsInCents: number;
-  /** Platform revenue in cents (= platformFee + serviceFee) */
   platformRevenueInCents: number;
 }
 
-/**
- * Calculates the comprehensive checkout fee breakdown for a buyer order in integer cents.
- * Supports passing either an array of tier items [{ priceInCents, quantity }] or (ticketSubtotalInCents, totalTicketQuantity).
- *
- * Invariant: buyerTotalInCents === ticketSubtotalInCents + platformFeeInCents + serviceFeeInCents + processingFeeInCents
- */
+// Invariant: buyerTotalInCents === ticketSubtotalInCents + platformFeeInCents + serviceFeeInCents + processingFeeInCents
 export function calculateCheckoutFeeBreakdown(
   itemsOrSubtotal:
     | Array<{ priceInCents?: number; unitPriceInCents?: number; quantity: number }>
@@ -245,7 +200,6 @@ export function calculateCheckoutFeeBreakdown(
     totalTicketQuantity = Math.max(0, Math.round(quantity || 0));
   }
 
-  // Free order or zero quantity
   if (ticketSubtotalInCents === 0 || totalTicketQuantity === 0) {
     return {
       ticketSubtotalInCents,
@@ -260,29 +214,20 @@ export function calculateCheckoutFeeBreakdown(
     };
   }
 
-  // 1. Platform fee: 10% of ticket subtotal
   const platformFeeInCents = Math.round(ticketSubtotalInCents * (PLATFORM_FEE_PERCENT / 100));
-
-  // 2. Service fee: $0.95 per ticket, multiplied by total ticket quantity
   const serviceFeeInCents = totalTicketQuantity * SERVICE_FEE_CENTS;
-
-  // 3. Pre-processing total
   const preProcessingTotalInCents = ticketSubtotalInCents + platformFeeInCents + serviceFeeInCents;
 
-  // 4. Estimated buyer total covering 2.9% + $0.30 per transaction
   // buyerTotal = (preProcessingTotal + 0.30) / (1 - 0.029)
   const buyerTotalInCents = Math.round(
     (preProcessingTotalInCents + STRIPE_FIXED_CENTS) / (1 - STRIPE_PERCENT)
   );
 
-  // 5. Processing fee: exact difference to cover rounding reconciliation
   const processingFeeInCents = buyerTotalInCents - preProcessingTotalInCents;
-
-  // 6. Fund allocation
   const organizerEarningsInCents = ticketSubtotalInCents;
   const platformRevenueInCents = platformFeeInCents + serviceFeeInCents;
 
-  // Enforce mathematical fund balance invariant
+  // Enforce fund balance invariant
   if (
     buyerTotalInCents !==
     organizerEarningsInCents + platformRevenueInCents + processingFeeInCents

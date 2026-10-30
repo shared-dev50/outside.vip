@@ -13,8 +13,7 @@ export interface ClassifiedStripeError {
 }
 
 /**
- * Scans any string and replaces sensitive credentials, Stripe keys, account IDs,
- * and auth tokens with safe redaction markers.
+ * Redacts API keys, webhook secrets, account IDs, and auth tokens from strings.
  */
 export function redactSensitiveData(input: string): string {
   if (!input || typeof input !== 'string') {
@@ -22,23 +21,16 @@ export function redactSensitiveData(input: string): string {
   }
 
   return input
-    // Full or partially masked Stripe secret keys
     .replace(/sk_(?:live|test)_[a-zA-Z0-9*]{4,}/gi, '[REDACTED_STRIPE_SECRET_KEY]')
-    // Full or partially masked Stripe restricted keys
     .replace(/rk_(?:live|test)_[a-zA-Z0-9*]{4,}/gi, '[REDACTED_STRIPE_RESTRICTED_KEY]')
-    // Stripe webhook secrets
     .replace(/whsec_[a-zA-Z0-9*]{4,}/gi, '[REDACTED_STRIPE_WEBHOOK_SECRET]')
-    // Stripe Publishable keys
     .replace(/pk_(?:live|test)_[a-zA-Z0-9*]{4,}/gi, '[REDACTED_STRIPE_PUBLISHABLE_KEY]')
-    // Connected account IDs
     .replace(/acct_[a-zA-Z0-9*]{6,}/gi, '[REDACTED_ACCOUNT_ID]')
-    // HTTP Authorization headers
     .replace(/Bearer\s+[a-zA-Z0-9_.\-]+/gi, 'Bearer [REDACTED_TOKEN]');
 }
 
 /**
- * Ensures any message destined for client consumption is free of raw exceptions,
- * internal account identifiers, and API credentials.
+ * Strips raw exception text and credentials before returning errors to clients.
  */
 export function sanitizeErrorMessage(message?: string): string {
   if (!message || typeof message !== 'string') {
@@ -47,7 +39,6 @@ export function sanitizeErrorMessage(message?: string): string {
 
   const sanitized = redactSensitiveData(message);
 
-  // If the message contains technical Stripe error artifacts, provide a clean fallback
   if (
     /StripeInvalidRequestError|StripeAuthenticationError|StripePermissionError|StripeConnectionError|StripeAPIError/i.test(
       sanitized
@@ -61,11 +52,7 @@ export function sanitizeErrorMessage(message?: string): string {
 }
 
 /**
- * Categorizes an error thrown by Stripe or network clients into one of 4 defined states:
- * 1. No connected account.
- * 2. Invalid or inaccessible connected account.
- * 3. Stripe platform configuration problem.
- * 4. Temporary Stripe API / network failure.
+ * Maps raw Stripe or network errors to safe client categories and HTTP codes.
  */
 export function classifyStripeError(err: any): ClassifiedStripeError {
   if (!err) {
@@ -82,8 +69,7 @@ export function classifyStripeError(err: any): ClassifiedStripeError {
   const errType = (err.type || err.rawType || '').toString();
   const statusCode = err.statusCode || err.status || 500;
 
-  // 1. Stripe platform configuration problem
-  // Invalid or placeholder API key, expired key, or authentication failure
+  // Platform API key issue
   if (
     errType === 'StripeAuthenticationError' ||
     errCode === 'api_key_expired' ||
@@ -99,8 +85,7 @@ export function classifyStripeError(err: any): ClassifiedStripeError {
     };
   }
 
-  // 2. Invalid or inaccessible connected account
-  // Account does not exist in Stripe, has been deleted, or belongs to a different Stripe platform
+  // Account deleted, unlinked, or owned by another platform
   if (
     errCode === 'resource_missing' ||
     errCode === 'account_invalid' ||
@@ -119,8 +104,7 @@ export function classifyStripeError(err: any): ClassifiedStripeError {
     };
   }
 
-  // 3. Temporary Stripe API / network failure
-  // Rate limits, connection timeouts, connection resets, DNS failures, Stripe 5xx
+  // Network drops, rate limits, timeouts, or Stripe downtime
   if (
     errType === 'StripeConnectionError' ||
     errType === 'StripeAPIError' ||
@@ -139,7 +123,6 @@ export function classifyStripeError(err: any): ClassifiedStripeError {
     };
   }
 
-  // Default fallback for operational errors
   return {
     category: 'unknown',
     code: 'STRIPE_SERVICE_ERROR',

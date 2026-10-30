@@ -29,7 +29,7 @@ describe('Posh-Inspired Organizer Finance & Transfer Workflow', () => {
   let testOrderId: string;
 
   beforeAll(async () => {
-    // 1. Create and authenticate isolated test organizer
+    // Create and authenticate isolated test organizer
     const flowEmail = `flow_org_${Date.now()}@outside.vip`;
     const organizerReg = await request(app).post('/api/auth/register').send({
       email: flowEmail,
@@ -41,7 +41,7 @@ describe('Posh-Inspired Organizer Finance & Transfer Workflow', () => {
     organizerToken = organizerReg.body.data.token;
     organizerUserId = organizerReg.body.data.user.id;
 
-    // 2. Authenticate seeded admin user
+    // Authenticate seeded admin user
     const adminLogin = await request(app).post('/api/auth/login').send({
       email: 'admin@outside.vip',
       password: 'Outside2026!',
@@ -50,7 +50,7 @@ describe('Posh-Inspired Organizer Finance & Transfer Workflow', () => {
     adminToken = adminLogin.body.data.token;
     adminUserId = adminLogin.body.data.user.id;
 
-    // 3. Create second organizer for cross-organizer isolation testing
+    // Create second organizer for cross-organizer isolation testing
     const secondEmail = `org_sec_${Date.now()}@outside.vip`;
     const secondReg = await request(app).post('/api/auth/register').send({
       email: secondEmail,
@@ -62,7 +62,7 @@ describe('Posh-Inspired Organizer Finance & Transfer Workflow', () => {
     secondOrganizerToken = secondReg.body.data.token;
     secondOrganizerUserId = secondReg.body.data.user.id;
 
-    // 4. Create a test event with a paid ticket tier for the main organizer
+    // Create a test event with a paid ticket tier for the main organizer
     const event = await prisma.event.create({
       data: {
         organizerId: organizerUserId,
@@ -108,7 +108,7 @@ describe('Posh-Inspired Organizer Finance & Transfer Workflow', () => {
 
   describe('1. Ticket Purchase, Fee Breakdown & Ledger Creation', () => {
     it('creates accurate financial ledger entries and pending balance on payment_intent.succeeded', async () => {
-      // 1. Create a simulated order for $20 ticket ($23.94 buyer total)
+      // Create a simulated order for $20 ticket ($23.94 buyer total)
       const orderId = `ord_test_${nanoid(10)}`;
       const orderNumber = `OUT-${nanoid(8).toUpperCase()}`;
       const piId = `pi_test_${nanoid(16)}`;
@@ -142,7 +142,7 @@ describe('Posh-Inspired Organizer Finance & Transfer Workflow', () => {
         },
       });
 
-      // 2. Dispatch simulated Stripe payment_intent.succeeded webhook
+      // Dispatch simulated Stripe payment_intent.succeeded webhook
       const webhookPayload: Stripe.Event = {
         id: `evt_pi_${nanoid(14)}`,
         object: 'event',
@@ -167,11 +167,11 @@ describe('Posh-Inspired Organizer Finance & Transfer Workflow', () => {
       const result = await processStripeWebhookEvent(webhookPayload);
       expect(result.handled).toBe(true);
 
-      // 3. Verify order was marked COMPLETED
+      // Verify order was marked COMPLETED
       const order = await prisma.order.findUnique({ where: { id: orderId } });
       expect(order?.status).toBe(OrderStatus.COMPLETED);
 
-      // 4. Verify FinancialLedgerEntry records were generated
+      // Verify FinancialLedgerEntry records were generated
       const ledgerEntries = await prisma.financialLedgerEntry.findMany({
         where: { orderId },
       });
@@ -194,7 +194,7 @@ describe('Posh-Inspired Organizer Finance & Transfer Workflow', () => {
       expect(stripeEstimate).toBeDefined();
       expect(stripeEstimate?.amountInCents).toBe(99); // 2.9% + $0.30 gross-up = 99 cents
 
-      // 5. Verify OrganizerBalance was incremented in pending
+      // Verify OrganizerBalance was incremented in pending
       const balance = await prisma.organizerBalance.findUnique({
         where: { userId: organizerUserId },
       });
@@ -479,7 +479,7 @@ describe('Posh-Inspired Organizer Finance & Transfer Workflow', () => {
 
   describe('4. Refunds & Dispute Financial Accounting', () => {
     it('reduces available balance on refund before transfer (pre-transfer)', async () => {
-      // 1. Create paid order for $30.00
+      // Create paid order for $30.00
       const orderId = `ord_ref_pre_${nanoid(10)}`;
       await prisma.order.create({
         data: {
@@ -549,7 +549,7 @@ describe('Posh-Inspired Organizer Finance & Transfer Workflow', () => {
     });
 
     it('tracks post-transfer refunds as recoverable liabilities without creating negative transfers', async () => {
-      // 1. Create paid order
+      // Create paid order
       const orderId = `ord_ref_post_${nanoid(10)}`;
       await prisma.order.create({
         data: {
@@ -740,7 +740,7 @@ describe('Posh-Inspired Organizer Finance & Transfer Workflow', () => {
 
   describe('6. Multi-Organizer Isolation & Security', () => {
     it('strictly prevents organizer A from viewing or accessing organizer B financial records', async () => {
-      // 1. Organizer B queries transfers: must only see their own (empty)
+      // Organizer B queries transfers: must only see their own (empty)
       const res = await request(app)
         .get('/api/organizer/finance/transfers')
         .set('Authorization', `Bearer ${secondOrganizerToken}`);
@@ -748,7 +748,7 @@ describe('Posh-Inspired Organizer Finance & Transfer Workflow', () => {
       expect(res.status).toBe(200);
       expect(res.body.data.transfers).toEqual([]);
 
-      // 2. Organizer B queries ledger: must not see organizer A's ledger entries
+      // Organizer B queries ledger: must not see organizer A's ledger entries
       const ledgerRes = await request(app)
         .get('/api/organizer/finance/ledger')
         .set('Authorization', `Bearer ${secondOrganizerToken}`);
@@ -756,7 +756,7 @@ describe('Posh-Inspired Organizer Finance & Transfer Workflow', () => {
       expect(ledgerRes.status).toBe(200);
       expect(ledgerRes.body.data.entries).toEqual([]);
 
-      // 3. Organizer B cannot initiate withdrawal for Organizer A
+      // Organizer B cannot initiate withdrawal for Organizer A
       const withdrawRes = await request(app)
         .post('/api/organizer/finance/admin/withdraw')
         .set('Authorization', `Bearer ${secondOrganizerToken}`)

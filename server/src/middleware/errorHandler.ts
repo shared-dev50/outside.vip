@@ -11,7 +11,6 @@ export function errorHandler(
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   _next: NextFunction
 ): void {
-  // Handle AppError (custom operational errors)
   if (err instanceof AppError) {
     res.status(err.statusCode).json({
       success: false,
@@ -24,7 +23,6 @@ export function errorHandler(
     return;
   }
 
-  // Handle Zod validation errors
   if (err instanceof ZodError) {
     const formattedErrors = err.errors.map((e) => ({
       field: e.path.join('.'),
@@ -42,7 +40,6 @@ export function errorHandler(
     return;
   }
 
-  // Handle Prisma unique constraint violation (P2002)
   if (err instanceof Prisma.PrismaClientKnownRequestError) {
     if (err.code === 'P2002') {
       const target = (err.meta?.target as string[])?.join(', ') || 'field';

@@ -21,7 +21,7 @@ describe('Outside.vip Ticket PDF Generation & QR Credential Validation', () => {
   let testOrderAccessToken: string;
 
   beforeAll(async () => {
-    // 1. Authenticate seeded organizer
+    // Authenticate seeded organizer
     const organizerLogin = await request(app).post('/api/auth/login').send({
       email: 'sol@outside.vip',
       password: 'Outside2026!',
@@ -30,7 +30,7 @@ describe('Outside.vip Ticket PDF Generation & QR Credential Validation', () => {
     organizerToken = organizerLogin.body.data.token;
     organizerUserId = organizerLogin.body.data.user.id;
 
-    // 2. Authenticate seeded attendee
+    // Authenticate seeded attendee
     const attendeeLogin = await request(app).post('/api/auth/login').send({
       email: 'alex@outside.vip',
       password: 'Outside2026!',
@@ -39,7 +39,7 @@ describe('Outside.vip Ticket PDF Generation & QR Credential Validation', () => {
     attendeeToken = attendeeLogin.body.data.token;
     attendeeUserId = attendeeLogin.body.data.user.id;
 
-    // 3. Create or authenticate second attendee for access control tests
+    // Create or authenticate second attendee for access control tests
     const secondEmail = 'second-attendee-pdf@outside.vip';
     let secondUser = await prisma.user.findUnique({ where: { email: secondEmail } });
     if (!secondUser) {
@@ -59,7 +59,7 @@ describe('Outside.vip Ticket PDF Generation & QR Credential Validation', () => {
       secondAttendeeUserId = log.body.data.user.id;
     }
 
-    // 4. Retrieve published event and active tier
+    // Retrieve published event and active tier
     event = await prisma.event.findFirst({
       where: {
         status: EventStatus.PUBLISHED,
@@ -73,7 +73,7 @@ describe('Outside.vip Ticket PDF Generation & QR Credential Validation', () => {
     tier = event.ticketTiers.find((t: any) => t.priceInCents > 0);
     expect(tier).toBeTruthy();
 
-    // 5. Create a clean test order with 2 tickets belonging to attendeeUser
+    // Create a clean test order with 2 tickets belonging to attendeeUser
     testOrderAccessToken = `tok_${nanoid(32)}`;
     const orderNumber = `OUT-TEST-${Date.now()}`;
     const paymentIntentId = `pi_test_${nanoid(20)}`;

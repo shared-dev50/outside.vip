@@ -53,9 +53,6 @@ function sanitizeClientErrorMessage(msg?: string): string {
   return clean;
 }
 
-/**
- * Format minor currency units (cents) into user-friendly currency string.
- */
 function formatCurrency(amountInCents: number, currency: string = 'USD'): string {
   const amount = amountInCents / 100;
   const curr = currency.toUpperCase();
@@ -72,9 +69,6 @@ function formatCurrency(amountInCents: number, currency: string = 'USD'): string
   }
 }
 
-/**
- * Format ISO date string into readable date.
- */
 function formatDate(dateStr: string | null | undefined): string {
   if (!dateStr) return '—';
   try {
@@ -100,7 +94,6 @@ export const FinanceOrganizationPage: React.FC = () => {
     };
   }, []);
 
-  // Main state
   const [accountStatus, setAccountStatus] = useState<StripeConnectedAccountStatus | null>(null);
   const [balance, setBalance] = useState<StripeBalanceResponse | null>(null);
   const [transfers, setTransfers] = useState<OrganizerTransferItem[]>([]);
@@ -109,7 +102,6 @@ export const FinanceOrganizationPage: React.FC = () => {
   const [ledgerEntries, setLedgerEntries] = useState<FinancialLedgerEntryItem[]>([]);
   const [payoutDetails, setPayoutDetails] = useState<OrganizerPayoutDetails | null>(null);
 
-  // UI state
   const [activeTab, setActiveTab] = useState<'finance' | 'organization'>('finance');
   const [historyTab, setHistoryTab] = useState<'transfers' | 'payouts' | 'ledger'>('transfers');
   const [isLoading, setIsLoading] = useState<boolean>(true);
@@ -121,14 +113,12 @@ export const FinanceOrganizationPage: React.FC = () => {
     type: 'info' | 'success' | 'warning' | 'error';
   } | null>(null);
 
-  // Withdrawal modal state
   const [isWithdrawModalOpen, setIsWithdrawModalOpen] = useState<boolean>(false);
   const [withdrawAmountDollars, setWithdrawAmountDollars] = useState<string>('');
   const [withdrawNotes, setWithdrawNotes] = useState<string>('');
   const [isSubmittingWithdrawal, setIsSubmittingWithdrawal] = useState<boolean>(false);
   const [withdrawError, setWithdrawError] = useState<string | null>(null);
 
-  // Edit organization form state
   const [isEditingOrg, setIsEditingOrg] = useState<boolean>(false);
   const [orgForm, setOrgForm] = useState<PayoutDetailsInput>({
     orgType: 'Company',
@@ -146,7 +136,6 @@ export const FinanceOrganizationPage: React.FC = () => {
   });
   const [isSavingOrg, setIsSavingOrg] = useState<boolean>(false);
 
-  // Load all finance and organization data
   const loadDashboardData = useCallback(async (isRefresh = false) => {
     if (isRefresh) {
       setIsRefreshing(true);
@@ -156,11 +145,9 @@ export const FinanceOrganizationPage: React.FC = () => {
     setError(null);
 
     try {
-      // 1. Fetch connected Stripe account status
       const statusRes = await api.finance.getStatus();
       setAccountStatus(statusRes);
 
-      // 2. Fetch Posh-inspired ledger balances & transfers
       const [balRes, transfersRes, payoutsRes, disputesRes, ledgerRes] = await Promise.all([
         api.finance.getBalance().catch(() => null),
         api.finance.getTransfers(1, 20).catch(() => ({ total: 0, transfers: [] })),
@@ -175,7 +162,6 @@ export const FinanceOrganizationPage: React.FC = () => {
       setDisputes(disputesRes?.disputes || []);
       setLedgerEntries(ledgerRes?.entries || []);
 
-      // 3. Fetch Organization Legal Details
       try {
         const orgRes = await api.organizer.getPayoutDetails();
         if (orgRes.payoutDetails) {
@@ -196,8 +182,7 @@ export const FinanceOrganizationPage: React.FC = () => {
           });
         }
       } catch {
-        // Payout details optional init
-      }
+        }
     } catch (err: any) {
       console.error('Failed to load finance data:', err);
       if (err?.code === 'STRIPE_CONFIGURATION_UNAVAILABLE') {
@@ -215,7 +200,6 @@ export const FinanceOrganizationPage: React.FC = () => {
     }
   }, []);
 
-  // Handle URL return parameters from Stripe
   useEffect(() => {
     const isReturn = searchParams.get('stripe_return') === 'true';
     const isRefresh = searchParams.get('stripe_refresh') === 'true';
@@ -239,7 +223,6 @@ export const FinanceOrganizationPage: React.FC = () => {
     loadDashboardData();
   }, [loadDashboardData, searchParams, setSearchParams]);
 
-  // Handle Start / Continue Onboarding
   const handleStartOrContinueOnboarding = async (options?: { reconnect?: boolean }) => {
     setActionLoading('onboarding');
     setError(null);
@@ -268,7 +251,6 @@ export const FinanceOrganizationPage: React.FC = () => {
     }
   };
 
-  // Handle Open Stripe Express Dashboard
   const handleOpenStripeDashboard = async () => {
     setActionLoading('dashboard');
     setError(null);
@@ -293,7 +275,6 @@ export const FinanceOrganizationPage: React.FC = () => {
     }
   };
 
-  // Handle Request Withdrawal submission
   const handleWithdrawalSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setWithdrawError(null);
@@ -330,8 +311,7 @@ export const FinanceOrganizationPage: React.FC = () => {
       setWithdrawAmountDollars('');
       setWithdrawNotes('');
 
-      // Refresh dashboard data
-      await loadDashboardData(true);
+          await loadDashboardData(true);
     } catch (err: any) {
       console.error('Withdrawal failed:', err);
       setWithdrawError(sanitizeClientErrorMessage(err?.message || 'Withdrawal could not be completed. Please try again.'));
@@ -340,7 +320,6 @@ export const FinanceOrganizationPage: React.FC = () => {
     }
   };
 
-  // Handle Save Organization Legal Details
   const handleSaveOrgDetails = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsSavingOrg(true);
@@ -362,7 +341,6 @@ export const FinanceOrganizationPage: React.FC = () => {
     }
   };
 
-  // Resolved balances
   const availableCents = balance?.availableInCents ?? (balance?.available?.[0]?.amount || 0);
   const pendingCents = balance?.pendingInCents ?? (balance?.pending?.[0]?.amount || 0);
   const transferredCents = balance?.transferredInCents ?? 0;
@@ -372,7 +350,6 @@ export const FinanceOrganizationPage: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-[#FAF8F5] pb-24 font-sans text-stone-900">
-      {/* Top Banner Navigation */}
       <div className="sticky top-0 z-30 bg-[#FAF8F5]/90 backdrop-blur-md border-b border-stone-200/80 px-4 sm:px-8 py-3.5 flex items-center justify-between">
         <div className="flex items-center gap-3">
           <Link
@@ -416,7 +393,6 @@ export const FinanceOrganizationPage: React.FC = () => {
       </div>
 
       <div className="max-w-6xl mx-auto px-4 sm:px-8 pt-6 space-y-6">
-        {/* Global Error Banner */}
         {error && (
           <div className="p-4 rounded-2xl bg-rose-50 border border-rose-200 flex items-start gap-3 text-rose-900 text-xs animate-fadeIn">
             <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
@@ -435,7 +411,6 @@ export const FinanceOrganizationPage: React.FC = () => {
           </div>
         )}
 
-        {/* Global Notification Banner */}
         {notification && (
           <div
             className={`p-4 rounded-2xl border flex items-start gap-3 text-xs animate-fadeIn ${
@@ -465,7 +440,6 @@ export const FinanceOrganizationPage: React.FC = () => {
           </div>
         )}
 
-        {/* Main Navigation Tabs */}
         <div className="flex items-center gap-2 border-b border-stone-200 pb-2">
           <button
             onClick={() => setActiveTab('finance')}
@@ -493,7 +467,6 @@ export const FinanceOrganizationPage: React.FC = () => {
 
         {activeTab === 'finance' ? (
           <div className="space-y-8 animate-fadeIn">
-            {/* SECTION A: ACCOUNT CONNECTION STATUS */}
             <div className="bg-white rounded-2xl border border-stone-200/90 p-6 sm:p-8 space-y-6 shadow-xs">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-stone-100">
                 <div className="flex items-center gap-3">
@@ -589,7 +562,6 @@ export const FinanceOrganizationPage: React.FC = () => {
                 </div>
               </div>
 
-              {/* Status Notice Banners */}
               {accountStatus?.connectionStatus === 'invalid_or_inaccessible' && (
                 <div className="p-4 bg-amber-50/90 border border-amber-200/90 rounded-xl flex items-start gap-3 text-amber-900 text-xs">
                   <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
@@ -604,7 +576,6 @@ export const FinanceOrganizationPage: React.FC = () => {
                 </div>
               )}
 
-              {/* Capabilities Grid */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div
                   className={`p-5 rounded-xl border transition-colors ${
@@ -680,7 +651,6 @@ export const FinanceOrganizationPage: React.FC = () => {
               </div>
             </div>
 
-            {/* SECTION B: POSH-INSPIRED BALANCE CARDS */}
             <div className="space-y-4">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                 <div>
@@ -713,7 +683,6 @@ export const FinanceOrganizationPage: React.FC = () => {
                 )}
               </div>
 
-              {/* Recoverable Liability Notice if any */}
               {recoverableCents > 0 && (
                 <div className="p-4 rounded-xl bg-amber-50 border border-amber-200 flex items-start gap-3 text-amber-900 text-xs">
                   <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
@@ -729,8 +698,7 @@ export const FinanceOrganizationPage: React.FC = () => {
               )}
 
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                {/* Available Balance Card */}
-                <div className="bg-white rounded-2xl border border-stone-200/90 p-6 space-y-3 shadow-xs relative overflow-hidden">
+                  <div className="bg-white rounded-2xl border border-stone-200/90 p-6 space-y-3 shadow-xs relative overflow-hidden">
                   <div className="flex items-center justify-between">
                     <span className="text-xs font-mono uppercase text-stone-500 font-bold tracking-wider">
                       Available Balance
@@ -770,8 +738,7 @@ export const FinanceOrganizationPage: React.FC = () => {
                   </div>
                 </div>
 
-                {/* Pending Balance Card */}
-                <div className="bg-white rounded-2xl border border-stone-200/90 p-6 space-y-3 shadow-xs">
+                  <div className="bg-white rounded-2xl border border-stone-200/90 p-6 space-y-3 shadow-xs">
                   <div className="flex items-center justify-between">
                     <span className="text-xs font-mono uppercase text-stone-500 font-bold tracking-wider">
                       Pending Balance
@@ -792,8 +759,7 @@ export const FinanceOrganizationPage: React.FC = () => {
                   </p>
                 </div>
 
-                {/* Transferred Balance Card */}
-                <div className="bg-white rounded-2xl border border-stone-200/90 p-6 space-y-3 shadow-xs">
+                  <div className="bg-white rounded-2xl border border-stone-200/90 p-6 space-y-3 shadow-xs">
                   <div className="flex items-center justify-between">
                     <span className="text-xs font-mono uppercase text-stone-500 font-bold tracking-wider">
                       Transferred Balance
@@ -816,7 +782,6 @@ export const FinanceOrganizationPage: React.FC = () => {
               </div>
             </div>
 
-            {/* SECTION C: WITHDRAWAL & TRANSFER HISTORY / AUDITABLE LEDGER */}
             <div className="bg-white rounded-2xl border border-stone-200/90 p-6 sm:p-8 space-y-6 shadow-xs">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-stone-100">
                 <div>
@@ -862,7 +827,6 @@ export const FinanceOrganizationPage: React.FC = () => {
                 </div>
               </div>
 
-              {/* Sub-Tab 1: Platform-to-Connected Transfers */}
               {historyTab === 'transfers' && (
                 <div className="space-y-4">
                   {transfers.length === 0 ? (
@@ -939,7 +903,6 @@ export const FinanceOrganizationPage: React.FC = () => {
                 </div>
               )}
 
-              {/* Sub-Tab 2: Bank Payouts */}
               {historyTab === 'payouts' && (
                 <div className="space-y-4">
                   {payouts.length === 0 ? (
@@ -1006,7 +969,6 @@ export const FinanceOrganizationPage: React.FC = () => {
                 </div>
               )}
 
-              {/* Sub-Tab 3: Ledger Activity */}
               {historyTab === 'ledger' && (
                 <div className="space-y-4">
                   {ledgerEntries.length === 0 ? (
@@ -1070,7 +1032,6 @@ export const FinanceOrganizationPage: React.FC = () => {
               )}
             </div>
 
-            {/* SECTION D: PAYMENT METHODS (MASKED BANK ACCOUNTS) */}
             <div className="bg-white rounded-2xl border border-stone-200/90 p-6 sm:p-8 space-y-6 shadow-xs">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-stone-100">
                 <div>
@@ -1145,7 +1106,6 @@ export const FinanceOrganizationPage: React.FC = () => {
               )}
             </div>
 
-            {/* SECTION E: DISPUTES & CHARGEBACKS */}
             <div className="bg-white rounded-2xl border border-stone-200/90 p-6 sm:p-8 space-y-5 shadow-xs">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-stone-100">
                 <div>
@@ -1213,7 +1173,6 @@ export const FinanceOrganizationPage: React.FC = () => {
             </div>
           </div>
         ) : (
-          /* TAB 2: ORGANIZATION PROFILE */
           <div className="bg-white rounded-2xl border border-stone-200/90 p-6 sm:p-8 space-y-6 shadow-xs animate-fadeIn">
             <div className="flex items-center justify-between pb-4 border-b border-stone-100">
               <div>
@@ -1357,7 +1316,6 @@ export const FinanceOrganizationPage: React.FC = () => {
         )}
       </div>
 
-      {/* WITHDRAWAL MODAL */}
       {isWithdrawModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-fadeIn">
           <div className="bg-white rounded-3xl border border-stone-200 max-w-md w-full p-6 sm:p-8 space-y-6 shadow-2xl relative">
@@ -1386,7 +1344,6 @@ export const FinanceOrganizationPage: React.FC = () => {
             )}
 
             <form onSubmit={handleWithdrawalSubmit} className="space-y-5">
-              {/* Available balance indicator */}
               <div className="p-4 rounded-2xl bg-[#FAF8F5] border border-stone-200 flex items-center justify-between">
                 <div>
                   <span className="text-[10px] font-mono uppercase text-stone-500 block font-bold">
@@ -1401,7 +1358,6 @@ export const FinanceOrganizationPage: React.FC = () => {
                 </span>
               </div>
 
-              {/* Amount input */}
               <div className="space-y-2">
                 <label className="block text-xs font-mono uppercase text-stone-700 font-bold">
                   Withdrawal Amount (USD)
@@ -1422,8 +1378,7 @@ export const FinanceOrganizationPage: React.FC = () => {
                   />
                 </div>
 
-                {/* Quick-select amount buttons */}
-                <div className="flex items-center gap-2 pt-1">
+                  <div className="flex items-center gap-2 pt-1">
                   {[25, 50, 100].map((amt) => {
                     const cents = amt * 100;
                     if (cents > netAvailableCents) return null;
@@ -1450,7 +1405,6 @@ export const FinanceOrganizationPage: React.FC = () => {
                 </div>
               </div>
 
-              {/* Destination account confirmation */}
               <div className="space-y-1.5 p-3.5 rounded-xl border border-stone-200 bg-stone-50/70 text-xs font-mono">
                 <span className="text-[10px] uppercase text-stone-500 font-bold block">
                   Destination Account
@@ -1465,7 +1419,6 @@ export const FinanceOrganizationPage: React.FC = () => {
                 </div>
               </div>
 
-              {/* Optional reference notes */}
               <div className="space-y-1">
                 <label className="block text-[11px] font-mono uppercase text-stone-500 font-bold">
                   Reference Note (Optional)
@@ -1480,7 +1433,6 @@ export const FinanceOrganizationPage: React.FC = () => {
                 />
               </div>
 
-              {/* Action buttons */}
               <div className="flex items-center justify-end gap-3 pt-2">
                 <button
                   type="button"
