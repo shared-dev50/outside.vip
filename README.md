@@ -317,8 +317,8 @@ Cost to buyer ($23.92)
 
 
 ## Add this logic
-1.when a customer is purchasing a ticket give them this breakdown
-2. when the organizer is creating an event show them this a breakdown of what they get
+1.when a customer is purchasing a ticket give them this breakdown.
+2. when the organizer is creating an event show them this a breakdown.
 
 
 
