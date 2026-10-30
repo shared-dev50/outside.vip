@@ -38,21 +38,41 @@ export async function handleStripeWebhook(req: Request, res: Response): Promise<
       env.STRIPE_WEBHOOK_SECRET
     );
   } catch (err: any) {
-    if (env.STRIPE_WEBHOOK_SECRET === 'whsec_placeholder') {
-      console.warn(
-        'Webhook signature verification failed: STRIPE_WEBHOOK_SECRET is set to placeholder "whsec_placeholder". Update STRIPE_WEBHOOK_SECRET in server/.env with the signing secret from "stripe listen" or Stripe Dashboard.'
-      );
+    const connectSecret = process.env.STRIPE_CONNECT_WEBHOOK_SECRET;
+    if (connectSecret) {
+      try {
+        event = stripe.webhooks.constructEvent(
+          req.rawBody,
+          signature,
+          connectSecret
+        );
+      } catch (connectErr: any) {
+        res.status(400).json({
+          success: false,
+          error: {
+            message: `Webhook signature verification failed: ${err.message}`,
+            statusCode: 400,
+          },
+        });
+        return;
+      }
     } else {
-      console.error('Webhook signature verification failed:', err.message);
+      if (env.STRIPE_WEBHOOK_SECRET === 'whsec_placeholder') {
+        console.warn(
+          'Webhook signature verification failed: STRIPE_WEBHOOK_SECRET is set to placeholder "whsec_placeholder". Update STRIPE_WEBHOOK_SECRET in server/.env with the signing secret from "stripe listen" or Stripe Dashboard.'
+        );
+      } else {
+        console.error('Webhook signature verification failed:', err.message);
+      }
+      res.status(400).json({
+        success: false,
+        error: {
+          message: `Webhook signature verification failed: ${err.message}`,
+          statusCode: 400,
+        },
+      });
+      return;
     }
-    res.status(400).json({
-      success: false,
-      error: {
-        message: `Webhook signature verification failed: ${err.message}`,
-        statusCode: 400,
-      },
-    });
-    return;
   }
 
   try {

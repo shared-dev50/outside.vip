@@ -299,6 +299,10 @@ describe('Posh-Inspired Organizer Finance & Transfer Workflow', () => {
         payouts_enabled: true,
         charges_enabled: true,
         details_submitted: true,
+        capabilities: {
+          transfers: 'active',
+          card_payments: 'active',
+        },
       } as any);
 
       const res = await request(app)
@@ -317,6 +321,10 @@ describe('Posh-Inspired Organizer Finance & Transfer Workflow', () => {
         payouts_enabled: false,
         charges_enabled: false,
         details_submitted: false,
+        capabilities: {
+          transfers: 'inactive',
+          card_payments: 'inactive',
+        },
       } as any);
 
       const res = await request(app)
@@ -342,6 +350,10 @@ describe('Posh-Inspired Organizer Finance & Transfer Workflow', () => {
         payouts_enabled: true,
         charges_enabled: true,
         details_submitted: true,
+        capabilities: {
+          transfers: 'active',
+          card_payments: 'active',
+        },
       } as any);
 
       const mockStripeTransferId = `tr_test_${nanoid(16)}`;
@@ -397,6 +409,10 @@ describe('Posh-Inspired Organizer Finance & Transfer Workflow', () => {
         payouts_enabled: true,
         charges_enabled: true,
         details_submitted: true,
+        capabilities: {
+          transfers: 'active',
+          card_payments: 'active',
+        },
       } as any);
 
       // Simulate Stripe transfer creation rejection
@@ -440,6 +456,10 @@ describe('Posh-Inspired Organizer Finance & Transfer Workflow', () => {
         payouts_enabled: true,
         charges_enabled: true,
         details_submitted: true,
+        capabilities: {
+          transfers: 'active',
+          card_payments: 'active',
+        },
       } as any);
 
       const mockStripeTransferId = `tr_admin_${nanoid(16)}`;

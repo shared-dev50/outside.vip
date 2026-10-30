@@ -15,6 +15,8 @@ import {
 } from '@prisma/client';
 import { nanoid } from 'nanoid';
 import { prisma } from '../../db/prisma.js';
+import { stripe } from '../../lib/stripe.js';
+import { env } from '../../config/env.js';
 import {
   recordTicketSalePending,
   settleOrderEarnings,
@@ -346,8 +348,32 @@ async function handleChargeUpdated(
   }
 
   if (order) {
-    // Settle earnings when charge is confirmed / succeeded
-    if (charge.status === 'succeeded') {
+    let balanceTx: Stripe.BalanceTransaction | null = null;
+    if (typeof charge.balance_transaction === 'object' && charge.balance_transaction !== null) {
+      balanceTx = charge.balance_transaction as Stripe.BalanceTransaction;
+    } else if (
+      typeof charge.balance_transaction === 'string' &&
+      env.STRIPE_SECRET_KEY &&
+      env.STRIPE_SECRET_KEY !== 'sk_test_placeholder'
+    ) {
+      try {
+        balanceTx = await stripe.balanceTransactions.retrieve(charge.balance_transaction);
+      } catch (err: any) {
+        console.warn(`[Settlement] Could not retrieve balance transaction ${charge.balance_transaction}: ${err?.message}`);
+      }
+    }
+
+    // Financially correct settlement detection:
+    // Only transition organizer earnings from PENDING to AVAILABLE if the underlying
+    // Stripe BalanceTransaction has actually become available in the platform Stripe balance
+    // (status === 'available' or available_on <= now).
+    // If funds are still in Stripe's rolling settlement window, they remain strictly PENDING.
+    const isFundsAvailable = balanceTx
+      ? balanceTx.status === 'available' ||
+        (typeof balanceTx.available_on === 'number' && balanceTx.available_on * 1000 <= Date.now())
+      : false;
+
+    if (charge.status === 'succeeded' && isFundsAvailable) {
       await settleOrderEarnings(tx, {
         orderId: order.id,
         stripeChargeId: charge.id,
@@ -355,19 +381,13 @@ async function handleChargeUpdated(
     }
 
     // Reconcile actual Stripe fee if balance transaction is included
-    if (charge.balance_transaction) {
-      const balanceTx = typeof charge.balance_transaction === 'object'
-        ? (charge.balance_transaction as Stripe.BalanceTransaction)
-        : null;
-
-      if (balanceTx && typeof balanceTx.fee === 'number') {
-        await recordActualStripeFee(tx, {
-          stripeChargeId: charge.id,
-          actualFeeInCents: balanceTx.fee,
-          currency: charge.currency,
-          orderId: order.id,
-        });
-      }
+    if (balanceTx && typeof balanceTx.fee === 'number') {
+      await recordActualStripeFee(tx, {
+        stripeChargeId: charge.id,
+        actualFeeInCents: balanceTx.fee,
+        currency: charge.currency,
+        orderId: order.id,
+      });
     }
   }
 }
@@ -393,8 +413,7 @@ async function handleChargeRefunded(
   }
 
   if (!order) {
-    console.warn(`[ChargeRefunded] Order not found for charge ${charge.id}`);
-    return;
+    throw new Error(`[ChargeRefunded] Order not found for charge ${charge.id}; throwing to trigger Stripe webhook retry`);
   }
 
   const stripeRefundId = charge.refunds?.data?.[0]?.id;
@@ -461,6 +480,15 @@ async function handleTransferEvent(
         data: { status: TransferStatus.REVERSED },
       });
 
+      // Restore organizer balance: decrement transferred balance, increment available balance
+      await tx.organizerBalance.update({
+        where: { userId: existing.organizerId },
+        data: {
+          transferredBalanceInCents: { decrement: existing.amountInCents },
+          availableBalanceInCents: { increment: existing.amountInCents },
+        },
+      });
+
       await tx.financialLedgerEntry.create({
         data: {
           type: LedgerEntryType.ADJUSTMENT,
@@ -471,6 +499,24 @@ async function handleTransferEvent(
           transferId: existing.id,
           stripeReferenceId: transfer.id,
           description: `Stripe transfer reversed for transfer #${existing.transferNumber}`,
+          metadata: {
+            transferId: existing.id,
+            transferNumber: existing.transferNumber,
+            stripeTransferId: transfer.id,
+          },
+        },
+      });
+
+      await tx.financialLedgerEntry.create({
+        data: {
+          type: LedgerEntryType.ADJUSTMENT,
+          balanceType: LedgerBalanceType.AVAILABLE,
+          amountInCents: existing.amountInCents,
+          currency: existing.currency.toUpperCase(),
+          organizerId: existing.organizerId,
+          transferId: existing.id,
+          stripeReferenceId: transfer.id,
+          description: `Restored available balance for reversed transfer #${existing.transferNumber}`,
           metadata: {
             transferId: existing.id,
             transferNumber: existing.transferNumber,

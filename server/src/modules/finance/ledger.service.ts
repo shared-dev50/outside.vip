@@ -242,6 +242,28 @@ export async function settleOrderEarnings(
       availableBalanceInCents: { increment: organizerEarnings },
     },
   });
+
+  if (decrementPending > 0) {
+    await tx.financialLedgerEntry.create({
+      data: {
+        type: LedgerEntryType.ADJUSTMENT,
+        balanceType: LedgerBalanceType.PENDING,
+        amountInCents: -decrementPending,
+        currency: order.currency.toUpperCase(),
+        organizerId,
+        eventId: order.eventId,
+        orderId: order.id,
+        stripeReferenceId: stripeChargeId || null,
+        description: `Pending balance cleared to available for order #${order.orderNumber}`,
+        metadata: {
+          idempotencyKey: `order_${order.id}_settle_pending_cleared`,
+          orderNumber: order.orderNumber,
+          clearedAmountInCents: decrementPending,
+        },
+      },
+    });
+  }
+
   await tx.financialLedgerEntry.create({
     data: {
       type: LedgerEntryType.TICKET_SALE_CLEARED,
@@ -309,7 +331,7 @@ export async function recordActualStripeFee(
       type: LedgerEntryType.STRIPE_PROCESSING_FEE,
       balanceType: LedgerBalanceType.PLATFORM_REVENUE,
       amountInCents: actualFeeInCents,
-      currency: currency.toUpperCase(),
+      currency: (currency || 'USD').toUpperCase(),
       organizerId,
       eventId,
       orderId,
@@ -350,10 +372,47 @@ export async function recordRefundLedger(
   const organizerId = order.event.organizerId;
   const balance = await getOrCreateOrganizerBalance(tx, organizerId, order.currency);
 
-  const organizerRefundPortion = Math.min(
+  // If a specific Stripe refund ID was provided, verify it hasn't been processed yet
+  if (stripeRefundId) {
+    const existingRefund = await tx.financialLedgerEntry.findFirst({
+      where: {
+        orderId: order.id,
+        stripeReferenceId: stripeRefundId,
+      },
+    });
+    if (existingRefund) {
+      return;
+    }
+  }
+
+  // Calculate previous refund deductions for this order to prevent duplicate deductions on cumulative amounts
+  const previousRefundEntries = await tx.financialLedgerEntry.findMany({
+    where: {
+      orderId: order.id,
+      type: {
+        in: [
+          LedgerEntryType.REFUND_PENDING,
+          LedgerEntryType.REFUND_CLEARED,
+          LedgerEntryType.REFUND_POST_TRANSFER,
+        ],
+      },
+    },
+  });
+
+  const totalPreviousDeduction = previousRefundEntries.reduce(
+    (sum, e) => sum + Math.abs(e.amountInCents),
+    0
+  );
+
+  const totalOrganizerEntitlement = Math.min(
     order.organizerNetInCents,
     Math.round((amountInCents / order.totalInCents) * order.organizerNetInCents)
   );
+
+  const organizerRefundPortion = Math.max(0, totalOrganizerEntitlement - totalPreviousDeduction);
+  if (organizerRefundPortion <= 0) {
+    return;
+  }
 
   let preTransferDeducted = 0;
   let postTransferRecoverable = 0;
@@ -587,7 +646,7 @@ export async function getOrganizerFinancialSummary(userId: string) {
   const seenOrders = new Set<string>();
   let lifetimeEarningsInCents = 0;
   for (const entry of earningsEntries) {
-    if (entry.orderId && !seenOrders.has(entry.orderId)) {
+    if (entry.orderId && entry.amountInCents > 0 && !seenOrders.has(entry.orderId)) {
       seenOrders.add(entry.orderId);
       lifetimeEarningsInCents += entry.amountInCents;
     }

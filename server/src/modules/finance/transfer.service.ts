@@ -94,12 +94,20 @@ export async function executeWithdrawal(
     throw new ServiceUnavailableError(classified.safeMessage, classified.code);
   }
 
-  const canReceiveTransfers = account.payouts_enabled || account.charges_enabled || account.details_submitted;
-  if (!canReceiveTransfers) {
-    throw new BadRequestError(
-      'Your Stripe Express account is not yet fully enabled to receive transfers. Please complete identity or payout verification in the Stripe dashboard.',
-      'ACCOUNT_NOT_READY_FOR_TRANSFERS'
-    );
+  const transfersActive = account.capabilities?.transfers === 'active';
+  const disabledReason = account.requirements?.disabled_reason;
+  const pastDue = account.requirements?.past_due || [];
+
+  if (!transfersActive || disabledReason || pastDue.length > 0) {
+    let safeReason = 'Your Stripe Express account is not yet fully enabled to receive transfers.';
+    if (disabledReason) {
+      safeReason = `Transfers are disabled by Stripe: ${disabledReason}. Please update your account details in the Stripe dashboard.`;
+    } else if (pastDue.length > 0) {
+      safeReason = 'Your Stripe account has past-due verification requirements. Please complete identity or bank verification in the Stripe dashboard.';
+    } else if (!transfersActive) {
+      safeReason = 'Your Stripe account transfer capability is pending activation by Stripe. Please complete your Stripe onboarding.';
+    }
+    throw new BadRequestError(safeReason, 'ACCOUNT_NOT_READY_FOR_TRANSFERS');
   }
 
   const clientKey = idempotencyKey || `withdr_${nanoid(20)}`;
@@ -126,6 +134,64 @@ export async function executeWithdrawal(
       };
     }
     if (existingTransfer.status === TransferStatus.PENDING) {
+      try {
+        const existingStripeTransfers = await stripe.transfers.list({
+          transfer_group: existingTransfer.transferNumber,
+          limit: 1,
+        });
+        if (existingStripeTransfers.data.length > 0) {
+          const st = existingStripeTransfers.data[0];
+          const finalized = await prisma.$transaction(async (tx) => {
+            const updTransfer = await tx.organizerTransfer.update({
+              where: { id: existingTransfer.id },
+              data: {
+                status: TransferStatus.SUCCEEDED,
+                stripeTransferId: st.id,
+              },
+            });
+            const updBalance = await tx.organizerBalance.update({
+              where: { userId },
+              data: {
+                transferredBalanceInCents: { increment: existingTransfer.amountInCents },
+              },
+            });
+            await tx.financialLedgerEntry.create({
+              data: {
+                type: LedgerEntryType.TRANSFER_SUCCEEDED,
+                balanceType: LedgerBalanceType.TRANSFERRED,
+                amountInCents: existingTransfer.amountInCents,
+                currency: 'USD',
+                organizerId: userId,
+                transferId: updTransfer.id,
+                stripeReferenceId: st.id,
+                description: `Transferred $${(existingTransfer.amountInCents / 100).toFixed(2)} to Stripe Express account (${user.stripeAccountId})`,
+                metadata: {
+                  transferNumber: updTransfer.transferNumber,
+                  stripeTransferId: st.id,
+                  sourceType: updTransfer.sourceType,
+                },
+              },
+            });
+            return { updTransfer, updBalance };
+          });
+
+          return {
+            transferId: finalized.updTransfer.id,
+            transferNumber: finalized.updTransfer.transferNumber,
+            stripeTransferId: finalized.updTransfer.stripeTransferId,
+            amountInCents: finalized.updTransfer.amountInCents,
+            currency: finalized.updTransfer.currency.toUpperCase(),
+            status: finalized.updTransfer.status,
+            sourceType: finalized.updTransfer.sourceType,
+            remainingAvailableInCents: finalized.updBalance.availableBalanceInCents,
+            transferredInCents: finalized.updBalance.transferredBalanceInCents,
+            createdAt: finalized.updTransfer.createdAt.toISOString(),
+          };
+        }
+      } catch {
+        // fallback to in-progress message
+      }
+
       throw new BadRequestError(
         'A transfer with this reference is already in progress. Please wait a moment.',
         'DUPLICATE_TRANSFER_IN_PROGRESS'
@@ -175,7 +241,15 @@ export async function executeWithdrawal(
 
       const transferNumber = `TRF-${new Date().getFullYear()}-${nanoid(8).toUpperCase()}`;
 
-      return await tx.organizerTransfer.create({
+      // Reserve funds immediately by decrementing available balance during initial row-lock transaction
+      await tx.organizerBalance.update({
+        where: { userId },
+        data: {
+          availableBalanceInCents: { decrement: amountInCents },
+        },
+      });
+
+      const record = await tx.organizerTransfer.create({
         data: {
           transferNumber,
           organizerId: userId,
@@ -188,6 +262,24 @@ export async function executeWithdrawal(
           initiatedByUserId: initiatedByUserId || userId,
         },
       });
+
+      await tx.financialLedgerEntry.create({
+        data: {
+          type: LedgerEntryType.TRANSFER_INITIATED,
+          balanceType: LedgerBalanceType.AVAILABLE,
+          amountInCents: -amountInCents,
+          currency: 'USD',
+          organizerId: userId,
+          transferId: record.id,
+          description: `Transfer initiated to Stripe Express account (#${transferNumber})`,
+          metadata: {
+            transferNumber,
+            sourceType: record.sourceType,
+          },
+        },
+      });
+
+      return record;
     },
     { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted }
   );
@@ -212,7 +304,6 @@ export async function executeWithdrawal(
       { idempotencyKey: `stripe_${transferRecord.idempotencyKey}` }
     );
   } catch (error: any) {
-    // Mark transfer as failed without deducting from available balance
     logStripeDiagnostic('executeWithdrawal:transfers.create', error, {
       userId,
       stripeAccountId: user.stripeAccountId,
@@ -223,13 +314,39 @@ export async function executeWithdrawal(
     const failureMessage = error?.message ? String(error.message).slice(0, 500) : 'Stripe transfer failed';
     const failureCode = error?.code || 'transfer_failed';
 
-    await prisma.organizerTransfer.update({
-      where: { id: transferRecord.id },
-      data: {
-        status: TransferStatus.FAILED,
-        failureCode,
-        failureMessage,
-      },
+    // Atomically restore the reserved available balance and record the failed attempt
+    await prisma.$transaction(async (tx) => {
+      await tx.organizerTransfer.update({
+        where: { id: transferRecord.id },
+        data: {
+          status: TransferStatus.FAILED,
+          failureCode,
+          failureMessage,
+        },
+      });
+
+      await tx.organizerBalance.update({
+        where: { userId },
+        data: {
+          availableBalanceInCents: { increment: amountInCents },
+        },
+      });
+
+      await tx.financialLedgerEntry.create({
+        data: {
+          type: LedgerEntryType.TRANSFER_FAILED,
+          balanceType: LedgerBalanceType.AVAILABLE,
+          amountInCents,
+          currency: 'USD',
+          organizerId: userId,
+          transferId: transferRecord.id,
+          description: `Transfer failed (${failureCode}); available balance restored for transfer #${transferRecord.transferNumber}`,
+          metadata: {
+            failureCode,
+            failureMessage,
+          },
+        },
+      });
     });
 
     const classified = classifyStripeError(error);
@@ -253,10 +370,10 @@ export async function executeWithdrawal(
       },
     });
 
+    // Available balance was already decremented when transfer was initiated; increment transferred balance
     const updatedBalance = await tx.organizerBalance.update({
       where: { userId },
       data: {
-        availableBalanceInCents: { decrement: amountInCents },
         transferredBalanceInCents: { increment: amountInCents },
       },
     });

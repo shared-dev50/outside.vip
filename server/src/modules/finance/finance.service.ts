@@ -1,4 +1,5 @@
 import Stripe from 'stripe';
+import { LedgerEntryType } from '@prisma/client';
 import { prisma } from '../../db/prisma.js';
 import { stripe } from '../../lib/stripe.js';
 import { env } from '../../config/env.js';
@@ -272,22 +273,28 @@ export async function getConnectedAccountStatus(
     }
 
     // Transfer Balance evaluation:
-    const transfersActive =
-      account.capabilities?.transfers === 'active' || Boolean(account.payouts_enabled);
+    // Strictly requires active transfers capability on Stripe Connected Account
+    const transfersActive = account.capabilities?.transfers === 'active';
 
     let transferStatus: 'enabled' | 'action_required' | 'disabled' = 'disabled';
     let transferMessage = '';
 
-    if (transfersActive && Boolean(account.payouts_enabled)) {
-      transferStatus = 'enabled';
-      transferMessage = 'Enabled: Automated balance transfers and bank payouts are fully functional.';
-    } else if (disabledReason) {
+    if (disabledReason) {
       transferStatus = 'disabled';
       transferMessage = `Disabled by Stripe: ${disabledReason}`;
-    } else if (currentlyDueRaw.length > 0 || pastDueRaw.length > 0) {
+    } else if (pastDueRaw.length > 0) {
       transferStatus = 'action_required';
       transferMessage =
-        'Action required: Complete required banking or tax documentation to unlock payouts.';
+        'Action required: Your Stripe account has past-due verification requirements. Please complete them in Stripe.';
+    } else if (transfersActive) {
+      transferStatus = 'enabled';
+      transferMessage = Boolean(account.payouts_enabled)
+        ? 'Enabled: Balance transfers and external bank payouts are fully functional.'
+        : 'Enabled: Transfers to your Stripe Express account are active. Link a verified bank account to enable automatic bank payouts.';
+    } else if (currentlyDueRaw.length > 0) {
+      transferStatus = 'action_required';
+      transferMessage =
+        'Action required: Complete required banking or identity documentation to enable withdrawals.';
     } else {
       transferStatus = 'action_required';
       transferMessage =
@@ -737,7 +744,9 @@ export async function getConnectedAccountPayouts(
 }
 
 /**
- * Retrieves disputes associated with the connected Stripe account.
+ * Retrieves disputes associated with ticket sales from the platform Stripe account.
+ * Customer charges are created on the Outside.vip platform account (merchant of record),
+ * so disputes must be retrieved from the platform Stripe account, NOT the organizer's Express account.
  */
 export async function getConnectedAccountDisputes(
   userId: string,
@@ -757,10 +766,10 @@ export async function getConnectedAccountDisputes(
   }
 
   try {
-    const disputes = await stripe.disputes.list(
-      { limit: Math.min(Math.max(limit, 1), 50) },
-      { stripeAccount: user.stripeAccountId }
-    );
+    // Platform-level dispute retrieval: Query platform Stripe account without { stripeAccount } header
+    const disputes = await stripe.disputes.list({
+      limit: Math.min(Math.max(limit, 1), 50),
+    });
 
     const sanitized: SanitizedDisputeItem[] = disputes.data.map((d) => ({
       id: d.id,
