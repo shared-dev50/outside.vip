@@ -137,16 +137,33 @@ export async function executeWithdrawal(
       try {
         const existingStripeTransfers = await stripe.transfers.list({
           transfer_group: existingTransfer.transferNumber,
-          limit: 1,
+          limit: 10,
         });
-        if (existingStripeTransfers.data.length > 0) {
-          const st = existingStripeTransfers.data[0];
+
+        // Match exact internal withdrawal: transfer ID, amount, currency, and destination connected account
+        const matchingTransfer = existingStripeTransfers.data.find((st) => {
+          const matchMeta = st.metadata?.transferId === existingTransfer.id;
+          const matchAmount = st.amount === existingTransfer.amountInCents;
+          const matchCurrency = st.currency.toLowerCase() === existingTransfer.currency.toLowerCase();
+          const matchDestination = st.destination === user.stripeAccountId;
+          return matchAmount && matchCurrency && matchDestination && (matchMeta || !st.metadata?.transferId);
+        });
+
+        if (matchingTransfer) {
           const finalized = await prisma.$transaction(async (tx) => {
+            const current = await tx.organizerTransfer.findUnique({
+              where: { id: existingTransfer.id },
+            });
+            if (current && current.status === TransferStatus.SUCCEEDED) {
+              const bal = await tx.organizerBalance.findUnique({ where: { userId } });
+              return { updTransfer: current, updBalance: bal! };
+            }
+
             const updTransfer = await tx.organizerTransfer.update({
               where: { id: existingTransfer.id },
               data: {
                 status: TransferStatus.SUCCEEDED,
-                stripeTransferId: st.id,
+                stripeTransferId: matchingTransfer.id,
               },
             });
             const updBalance = await tx.organizerBalance.update({
@@ -163,11 +180,11 @@ export async function executeWithdrawal(
                 currency: 'USD',
                 organizerId: userId,
                 transferId: updTransfer.id,
-                stripeReferenceId: st.id,
+                stripeReferenceId: matchingTransfer.id,
                 description: `Transferred $${(existingTransfer.amountInCents / 100).toFixed(2)} to Stripe Express account (${user.stripeAccountId})`,
                 metadata: {
                   transferNumber: updTransfer.transferNumber,
-                  stripeTransferId: st.id,
+                  stripeTransferId: matchingTransfer.id,
                   sourceType: updTransfer.sourceType,
                 },
               },
@@ -188,7 +205,8 @@ export async function executeWithdrawal(
             createdAt: finalized.updTransfer.createdAt.toISOString(),
           };
         }
-      } catch {
+      } catch (err: any) {
+        if (err instanceof BadRequestError) throw err;
         // fallback to in-progress message
       }
 

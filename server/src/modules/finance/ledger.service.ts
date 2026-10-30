@@ -232,6 +232,23 @@ export async function settleOrderEarnings(
     return;
   }
 
+  // If settleOrderEarnings was called out-of-order before recordTicketSalePending,
+  // establish the initial pending ledger entry and pending balance first
+  const existingPending = await tx.financialLedgerEntry.findFirst({
+    where: {
+      orderId: order.id,
+      type: LedgerEntryType.TICKET_SALE_PENDING,
+    },
+  });
+
+  if (!existingPending) {
+    await recordTicketSalePending(tx, {
+      orderId: order.id,
+      stripeChargeId,
+      autoSettle: false,
+    });
+  }
+
   const balance = await getOrCreateOrganizerBalance(tx, organizerId, order.currency);
   const decrementPending = Math.min(balance.pendingBalanceInCents, organizerEarnings);
 
@@ -551,13 +568,13 @@ export async function recordDisputeLedger(
   params: RecordDisputeParams
 ): Promise<void> {
   const { stripeDisputeId, stripeChargeId, orderId, amountInCents, status, reason } = params;
-
   let organizerId: string | null = null;
   let eventId: string | null = null;
+  let resolvedOrderId: string | null = orderId || null;
 
-  if (orderId) {
+  if (resolvedOrderId) {
     const order = await tx.order.findUnique({
-      where: { id: orderId },
+      where: { id: resolvedOrderId },
       include: { event: true },
     });
     if (order) {
@@ -573,6 +590,9 @@ export async function recordDisputeLedger(
     if (entry) {
       organizerId = entry.organizerId;
       eventId = entry.eventId;
+      if (!resolvedOrderId && entry.orderId) {
+        resolvedOrderId = entry.orderId;
+      }
     }
   }
 
@@ -588,21 +608,78 @@ export async function recordDisputeLedger(
     entryType = LedgerEntryType.DISPUTE_LOST;
   }
 
+  // Idempotency: do not re-record if this exact dispute event type has already been logged for this dispute
+  const existingDisputeEntry = await tx.financialLedgerEntry.findFirst({
+    where: {
+      stripeReferenceId: stripeDisputeId,
+      type: entryType,
+    },
+  });
+  if (existingDisputeEntry) {
+    return;
+  }
+
+  // Out-of-order protection: if dispute is already closed (won or lost), do not accept an older hold
+  if (entryType === LedgerEntryType.DISPUTE_HOLD) {
+    const alreadyClosed = await tx.financialLedgerEntry.findFirst({
+      where: {
+        stripeReferenceId: stripeDisputeId,
+        type: { in: [LedgerEntryType.DISPUTE_WON, LedgerEntryType.DISPUTE_LOST] },
+      },
+    });
+    if (alreadyClosed) {
+      return;
+    }
+  }
+
+  // Calculate organizer's net liability:
+  // The organizer is only liable up to their net ticket earnings on the order (less any already-refunded amounts)
+  let organizerLiability = amountInCents;
+  if (resolvedOrderId) {
+    const order = await tx.order.findUnique({ where: { id: resolvedOrderId } });
+    if (order) {
+      const previousDeductions = await tx.financialLedgerEntry.findMany({
+        where: {
+          orderId: order.id,
+          type: {
+            in: [
+              LedgerEntryType.REFUND_PENDING,
+              LedgerEntryType.REFUND_CLEARED,
+              LedgerEntryType.REFUND_POST_TRANSFER,
+              LedgerEntryType.DISPUTE_LOST,
+            ],
+          },
+        },
+      });
+      const totalPrevious = previousDeductions.reduce(
+        (sum, e) => sum + Math.abs(e.amountInCents),
+        0
+      );
+      const remainingEntitlement = Math.max(0, order.organizerNetInCents - totalPrevious);
+      const proportionalLiability = Math.min(
+        order.organizerNetInCents,
+        Math.round((amountInCents / order.totalInCents) * order.organizerNetInCents)
+      );
+      organizerLiability = Math.min(remainingEntitlement, proportionalLiability);
+    }
+  }
+
   await tx.financialLedgerEntry.create({
     data: {
       type: entryType,
       balanceType: entryType === LedgerEntryType.DISPUTE_LOST ? LedgerBalanceType.RECOVERABLE : LedgerBalanceType.AVAILABLE,
-      amountInCents: entryType === LedgerEntryType.DISPUTE_LOST ? -amountInCents : 0,
+      amountInCents: entryType === LedgerEntryType.DISPUTE_LOST ? -organizerLiability : 0,
       currency: 'USD',
       organizerId,
       eventId,
-      orderId,
+      orderId: resolvedOrderId,
       stripeReferenceId: stripeDisputeId,
       description: `Dispute ${status} (${stripeDisputeId})${reason ? `: ${reason}` : ''}`,
       metadata: {
         stripeChargeId: stripeChargeId || null,
         disputeStatus: status,
         disputeAmountInCents: amountInCents,
+        organizerLiabilityInCents: organizerLiability,
         reason,
       },
     },

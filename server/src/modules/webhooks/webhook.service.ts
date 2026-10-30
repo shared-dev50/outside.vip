@@ -366,12 +366,14 @@ async function handleChargeUpdated(
     // Financially correct settlement detection:
     // Only transition organizer earnings from PENDING to AVAILABLE if the underlying
     // Stripe BalanceTransaction has actually become available in the platform Stripe balance
-    // (status === 'available' or available_on <= now).
-    // If funds are still in Stripe's rolling settlement window, they remain strictly PENDING.
-    const isFundsAvailable = balanceTx
-      ? balanceTx.status === 'available' ||
-        (typeof balanceTx.available_on === 'number' && balanceTx.available_on * 1000 <= Date.now())
-      : false;
+    // (status === 'available').
+    // An authoritative 'pending' status in Stripe is never overridden by an estimated 'available_on' timestamp.
+    // If funds are still in Stripe's rolling settlement window or retrieval fails, they remain strictly PENDING.
+    const isFundsAvailable = Boolean(
+      balanceTx &&
+      balanceTx.status === 'available' &&
+      (typeof balanceTx.available_on !== 'number' || balanceTx.available_on * 1000 <= Date.now())
+    );
 
     if (charge.status === 'succeeded' && isFundsAvailable) {
       await settleOrderEarnings(tx, {
@@ -435,15 +437,51 @@ async function handleDisputeEvent(
     ? dispute.charge
     : (dispute.charge as Stripe.Charge)?.id;
 
-  let order = chargeId
-    ? await tx.order.findFirst({
+  let order: any = null;
+
+  if (chargeId) {
+    // 1. Try finding by existing financial ledger entry for this charge
+    const existingLedger = await tx.financialLedgerEntry.findFirst({
+      where: { stripeReferenceId: chargeId },
+    });
+    if (existingLedger?.orderId) {
+      order = await tx.order.findUnique({
+        where: { id: existingLedger.orderId },
+      });
+    }
+
+    // 2. Try finding by payment transaction
+    if (!order) {
+      order = await tx.order.findFirst({
         where: {
           transactions: {
             some: { providerTransactionId: chargeId },
           },
         },
-      })
-    : null;
+      });
+    }
+
+    // 3. If still not found and Stripe key available, retrieve charge to inspect payment_intent
+    if (!order && env.STRIPE_SECRET_KEY && env.STRIPE_SECRET_KEY !== 'sk_test_placeholder') {
+      try {
+        const stripeCharge = await stripe.charges.retrieve(chargeId);
+        const piId = typeof stripeCharge.payment_intent === 'string'
+          ? stripeCharge.payment_intent
+          : (stripeCharge.payment_intent as Stripe.PaymentIntent)?.id;
+        const metaOrderId = stripeCharge.metadata?.orderId;
+        if (metaOrderId) {
+          order = await tx.order.findUnique({ where: { id: metaOrderId } });
+        }
+        if (!order && piId) {
+          order = await tx.order.findFirst({
+            where: { paymentReference: piId },
+          });
+        }
+      } catch (err: any) {
+        console.warn(`[Dispute] Could not retrieve charge ${chargeId}: ${err?.message}`);
+      }
+    }
+  }
 
   let status: 'needs_response' | 'under_review' | 'won' | 'lost' | 'warning_needs_response' = 'needs_response';
   if (dispute.status === 'won') {

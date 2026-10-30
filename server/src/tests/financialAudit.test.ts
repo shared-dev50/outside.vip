@@ -197,6 +197,35 @@ describe('Stripe Connect Financial Correctness & Money Movement Audit Suite', ()
     // Funds must be recorded in PENDING, not prematurely in AVAILABLE
     expect(balance?.pendingBalanceInCents).toBe(2000);
     expect(balance?.availableBalanceInCents).toBe(0);
+
+    // Also verify that an elapsed available_on timestamp CANNOT override an authoritative 'pending' status
+    const passedAvailableOn = Math.floor(Date.now() / 1000) - 3600; // 1 hour ago
+    await processStripeWebhookEvent({
+      id: `evt_ch_passed_pending_${nanoid(16)}`,
+      type: 'charge.updated',
+      data: {
+        object: {
+          id: chargeId,
+          payment_intent: paymentIntentId,
+          currency: 'usd',
+          status: 'succeeded',
+          metadata: { orderId: order.id },
+          balance_transaction: {
+            id: `txn_passed_pending_${nanoid(12)}`,
+            status: 'pending', // Authoritative pending in Stripe
+            available_on: passedAvailableOn,
+            fee: 99,
+          } as any,
+        } as any,
+      },
+    } as any);
+
+    const balanceAfterPassedPending = await prisma.organizerBalance.findUnique({
+      where: { userId: organizerUserId },
+    });
+    // Authoritative 'pending' status must prevail: funds must remain in PENDING
+    expect(balanceAfterPassedPending?.pendingBalanceInCents).toBe(2000);
+    expect(balanceAfterPassedPending?.availableBalanceInCents).toBe(0);
   });
 
   // 2. Funds become available according to actual Stripe balance transaction
@@ -376,7 +405,7 @@ describe('Stripe Connect Financial Correctness & Money Movement Audit Suite', ()
 
     // Create a pending transfer as if Stripe was called but client timed out
     const transferNumber = `TRF-AUDIT-${nanoid(8).toUpperCase()}`;
-    await prisma.organizerTransfer.create({
+    const pendingTransfer = await prisma.organizerTransfer.create({
       data: {
         transferNumber,
         organizerId: organizerUserId,
@@ -389,17 +418,27 @@ describe('Stripe Connect Financial Correctness & Money Movement Audit Suite', ()
       },
     });
 
-    // Mock stripe.transfers.list returning the succeeded transfer created on Stripe
+    // Mock stripe.transfers.list returning multiple transfers in the group:
+    // One transfer belonging to another withdrawal/amount, and one matching our exact withdrawal
+    const unmatchingStripeTransferId = `tr_other_${nanoid(14)}`;
     const mockStripeTransferId = `tr_recovered_${nanoid(14)}`;
     vi.spyOn(stripe.transfers, 'list').mockResolvedValueOnce({
       object: 'list',
       data: [
+        {
+          id: unmatchingStripeTransferId,
+          amount: 9999, // Unrelated amount
+          currency: 'usd',
+          destination: 'acct_unrelated_account',
+          transfer_group: transferNumber,
+        } as any,
         {
           id: mockStripeTransferId,
           amount: 1000,
           currency: 'usd',
           destination: organizerStripeAccountId,
           transfer_group: transferNumber,
+          metadata: { transferId: pendingTransfer.id },
         } as any,
       ],
       has_more: false,
@@ -633,15 +672,31 @@ describe('Stripe Connect Financial Correctness & Money Movement Audit Suite', ()
   // 13. Dispute created and resolved
   it('13. Dispute created and resolved records hold, win and loss accurately', async () => {
     const disputeId = `dp_audit_${nanoid(12)}`;
+    const disputeChargeId = `ch_audit_disp_${nanoid(12)}`;
 
-    // Dispute created
+    // Associate disputeChargeId with testOrderId in ledger
+    await prisma.financialLedgerEntry.create({
+      data: {
+        type: LedgerEntryType.TICKET_SALE_CLEARED,
+        balanceType: LedgerBalanceType.AVAILABLE,
+        amountInCents: 2000,
+        currency: 'USD',
+        organizerId: organizerUserId,
+        eventId: testEventId,
+        orderId: testOrderId,
+        stripeReferenceId: disputeChargeId,
+        description: 'Ticket sale cleared for dispute testing',
+      },
+    });
+
+    // 1. Dispute created (hold placed)
     await processStripeWebhookEvent({
       id: `evt_disp_created_${nanoid(16)}`,
       type: 'charge.dispute.created',
       data: {
         object: {
           id: disputeId,
-          charge: `ch_audit_${nanoid(12)}`,
+          charge: disputeChargeId,
           amount: 2394,
           status: 'needs_response',
           reason: 'fraudulent',
@@ -649,28 +704,80 @@ describe('Stripe Connect Financial Correctness & Money Movement Audit Suite', ()
       },
     } as any);
 
-    // Dispute resolved as won
+    // Duplicate dispute created notification must be strictly idempotent
     await processStripeWebhookEvent({
-      id: `evt_disp_closed_${nanoid(16)}`,
-      type: 'charge.dispute.closed',
+      id: `evt_disp_created_dup_${nanoid(16)}`,
+      type: 'charge.dispute.created',
       data: {
         object: {
           id: disputeId,
-          charge: `ch_audit_${nanoid(12)}`,
+          charge: disputeChargeId,
           amount: 2394,
-          status: 'won',
+          status: 'needs_response',
           reason: 'fraudulent',
         } as any,
       },
     } as any);
 
-    const wonEntry = await prisma.financialLedgerEntry.findFirst({
-      where: {
-        stripeReferenceId: disputeId,
-        type: LedgerEntryType.DISPUTE_WON,
-      },
+    const holds = await prisma.financialLedgerEntry.findMany({
+      where: { stripeReferenceId: disputeId, type: LedgerEntryType.DISPUTE_HOLD },
     });
-    expect(wonEntry).toBeDefined();
+    expect(holds.length).toBe(1);
+
+    // 2. Dispute resolved as lost (creates recoverable liability capped at organizer net entitlement)
+    await processStripeWebhookEvent({
+      id: `evt_disp_closed_lost_${nanoid(16)}`,
+      type: 'charge.dispute.closed',
+      data: {
+        object: {
+          id: disputeId,
+          charge: disputeChargeId,
+          amount: 2394,
+          status: 'lost',
+          reason: 'fraudulent',
+        } as any,
+      },
+    } as any);
+
+    // Duplicate closed event must be idempotent and not double-count liability
+    await processStripeWebhookEvent({
+      id: `evt_disp_closed_lost_dup_${nanoid(16)}`,
+      type: 'charge.dispute.closed',
+      data: {
+        object: {
+          id: disputeId,
+          charge: disputeChargeId,
+          amount: 2394,
+          status: 'lost',
+          reason: 'fraudulent',
+        } as any,
+      },
+    } as any);
+
+    const lostEntries = await prisma.financialLedgerEntry.findMany({
+      where: { stripeReferenceId: disputeId, type: LedgerEntryType.DISPUTE_LOST },
+    });
+    expect(lostEntries.length).toBe(1);
+
+    // 3. Out-of-order delayed dispute.created arriving after dispute is closed must be safely ignored
+    await processStripeWebhookEvent({
+      id: `evt_disp_delayed_created_${nanoid(16)}`,
+      type: 'charge.dispute.created',
+      data: {
+        object: {
+          id: disputeId,
+          charge: disputeChargeId,
+          amount: 2394,
+          status: 'needs_response',
+          reason: 'fraudulent',
+        } as any,
+      },
+    } as any);
+
+    const holdsAfterClosed = await prisma.financialLedgerEntry.findMany({
+      where: { stripeReferenceId: disputeId, type: LedgerEntryType.DISPUTE_HOLD },
+    });
+    expect(holdsAfterClosed.length).toBe(1); // Still exactly 1, no duplicate hold opened after close
   });
 
   // 14. Transfer reversal
