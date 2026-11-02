@@ -14,6 +14,7 @@ import { checkoutRouter } from './modules/checkout/checkout.routes.js';
 import { webhookRouter } from './modules/webhooks/webhook.routes.js';
 import { ordersRouter } from './modules/orders/orders.routes.js';
 import { waitlistRouter } from './modules/waitlist/waitlist.routes.js';
+import { placesRouter } from './modules/places/places.routes.js';
 
 export const app = express();
 
@@ -45,6 +46,7 @@ app.use('/api/checkout', checkoutRouter);
 app.use('/api/webhooks', webhookRouter);
 app.use('/api/orders', ordersRouter);
 app.use('/api/waitlist', waitlistRouter);
+app.use('/api/places', placesRouter);
 
 app.use('/api/*', (_req, res) => {
   res.status(404).json({

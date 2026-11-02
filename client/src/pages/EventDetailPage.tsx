@@ -498,9 +498,15 @@ export const EventDetailPage: React.FC = () => {
     );
   }
 
-  const mapSearchUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
-    `${event.venueName}, ${event.venueAddress}, ${event.city}`
-  )}`;
+  const mapSearchUrl = event.placeId
+    ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
+        `${event.venueName}, ${event.venueAddress || event.city}`
+      )}&query_place_id=${encodeURIComponent(event.placeId)}`
+    : event.latitude && event.longitude
+    ? `https://www.google.com/maps/search/?api=1&query=${event.latitude},${event.longitude}`
+    : `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
+        `${event.venueName}, ${event.venueAddress}, ${event.city}`
+      )}`;
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8 bg-white">

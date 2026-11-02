@@ -24,6 +24,8 @@ const envSchema = z.object({
   CLOUDINARY_CLOUD_NAME: z.string().default(''),
   CLOUDINARY_API_KEY: z.string().default(''),
   CLOUDINARY_API_SECRET: z.string().default(''),
+  GOOGLE_PLACES_API_KEY: z.string().default(''),
+  GOOGLE_MAPS_API_KEY: z.string().default(''),
 });
 
 const parsed = envSchema.safeParse(process.env);

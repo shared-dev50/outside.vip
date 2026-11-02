@@ -46,6 +46,7 @@ import { calculateTierEarnings, calculateCombinedEarnings, formatCents } from '.
 import { extractYouTubeVideoId, getYouTubeEmbedUrl } from '../lib/youtube';
 import { ImageCropModal } from '../components/events/ImageCropModal';
 import { UploadProgressCard, UploadProgressInfo } from '../components/events/UploadProgressCard';
+import { LocationAutocompleteInput } from '../components/events/LocationAutocompleteInput';
 import { validateImageFile } from '../lib/imageCrop';
 
 export type WizardStep = 1 | 2 | 3 | 4;
@@ -86,8 +87,6 @@ const PRESET_COVERS = [
     url: 'https://images.unsplash.com/photo-1492684223066-81342ee5ff30?auto=format&fit=crop&w=1600&q=85',
   },
 ];
-
-const KENYA_CITIES = ['Nairobi', 'Kilifi', 'Mombasa', 'Diani', 'Naivasha', 'Kisumu', 'Nakuru'];
 
 const WEEKDAY_NAMES = [
   { label: 'Sun', value: 0 },
@@ -203,6 +202,9 @@ export const CreateEventPage: React.FC = () => {
   const [venueAddress, setVenueAddress] = useState('');
   const [city, setCity] = useState('Nairobi');
   const [country, setCountry] = useState('Kenya');
+  const [latitude, setLatitude] = useState<number | null>(null);
+  const [longitude, setLongitude] = useState<number | null>(null);
+  const [placeId, setPlaceId] = useState<string | null>(null);
 
   const [ageRestriction, setAgeRestriction] = useState('18+');
   const [dressCode, setDressCode] = useState('');
@@ -275,6 +277,9 @@ export const CreateEventPage: React.FC = () => {
       setVenueAddress(evt.venueAddress || '');
       setCity(evt.city || 'Nairobi');
       setCountry(evt.country || 'Kenya');
+      setLatitude(evt.latitude ?? null);
+      setLongitude(evt.longitude ?? null);
+      setPlaceId(evt.placeId ?? null);
       setAgeRestriction(evt.ageRestriction || '18+');
       setDressCode(evt.dressCode || '');
       setCurrentStatus(evt.status as 'DRAFT' | 'PUBLISHED' | 'CANCELLED');
@@ -949,6 +954,9 @@ export const CreateEventPage: React.FC = () => {
       venueAddress: venueAddress.trim() || '',
       city: city.trim() || 'Nairobi',
       country: country.trim() || 'Kenya',
+      latitude: latitude ?? null,
+      longitude: longitude ?? null,
+      placeId: placeId ?? null,
       startAt: toIsoValue(startAt) || new Date().toISOString(),
       endAt: toIsoValue(endAt) || new Date(Date.now() + 86400000).toISOString(),
       timezone,
@@ -2215,84 +2223,28 @@ export const CreateEventPage: React.FC = () => {
                     </div>
                   )}
 
-                  <div className="pt-4 border-t border-stone-200 space-y-4">
-                    <div>
-                      <h3 className="text-sm font-display font-black text-stone-900 uppercase tracking-tight">
-                        Physical Venue & Destination
-                      </h3>
-                      <p className="text-xs text-stone-500 mt-0.5 font-sans">
-                        Where will attendees arrive for this experience?
-                      </p>
-                    </div>
-
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                      <div>
-                        <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5">
-                          Venue / Location Name <span className="text-rose-600">*</span>
-                        </label>
-                        <input
-                          type="text"
-                          placeholder="e.g. The Baobab Amphitheatre"
-                          value={venueName}
-                          onChange={(e) => {
-                            setVenueName(e.target.value);
-                            setHasUnsavedChanges(true);
-                          }}
-                          className="w-full px-3.5 py-2.5 rounded-lg bg-[#FAF8F5] border border-stone-300 text-stone-900 placeholder-stone-400 text-sm focus:outline-none focus:border-stone-900 focus:bg-white transition-colors"
-                        />
-                      </div>
-
-                      <div>
-                        <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5">
-                          City / Destination <span className="text-rose-600">*</span>
-                        </label>
-                        <input
-                          type="text"
-                          placeholder="Nairobi, Kilifi, Mombasa..."
-                          value={city}
-                          onChange={(e) => {
-                            setCity(e.target.value);
-                            setHasUnsavedChanges(true);
-                          }}
-                          className="w-full px-3.5 py-2.5 rounded-lg bg-[#FAF8F5] border border-stone-300 text-stone-900 placeholder-stone-400 text-sm focus:outline-none focus:border-stone-900 focus:bg-white transition-colors"
-                        />
-                        <div className="flex flex-wrap gap-1.5 mt-2">
-                          {KENYA_CITIES.map((c) => (
-                            <button
-                              key={c}
-                              type="button"
-                              onClick={() => {
-                                setCity(c);
-                                setHasUnsavedChanges(true);
-                              }}
-                              className={`px-2.5 py-1 rounded text-[10px] font-mono transition-colors ${
-                                city === c
-                                  ? 'bg-stone-900 text-white font-bold'
-                                  : 'bg-stone-100 hover:bg-stone-200 text-stone-600'
-                              }`}
-                            >
-                              {c}
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-                    </div>
-
-                    <div>
-                      <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5">
-                        Physical Address & Landmarks
-                      </label>
-                      <input
-                        type="text"
-                        placeholder="e.g. Bofa Beach Road, Kilifi Creek Crossing"
-                        value={venueAddress}
-                        onChange={(e) => {
-                          setVenueAddress(e.target.value);
-                          setHasUnsavedChanges(true);
-                        }}
-                        className="w-full px-3.5 py-2.5 rounded-lg bg-[#FAF8F5] border border-stone-300 text-stone-900 placeholder-stone-400 text-sm focus:outline-none focus:border-stone-900 focus:bg-white transition-colors"
-                      />
-                    </div>
+                  <div className="pt-4 border-t border-stone-200">
+                    <LocationAutocompleteInput
+                      value={{
+                        venueName,
+                        venueAddress,
+                        city,
+                        country,
+                        latitude,
+                        longitude,
+                        placeId,
+                      }}
+                      onChange={(loc) => {
+                        setVenueName(loc.venueName);
+                        setVenueAddress(loc.venueAddress);
+                        setCity(loc.city);
+                        setCountry(loc.country);
+                        setLatitude(loc.latitude);
+                        setLongitude(loc.longitude);
+                        setPlaceId(loc.placeId);
+                        setHasUnsavedChanges(true);
+                      }}
+                    />
                   </div>
                 </div>
 

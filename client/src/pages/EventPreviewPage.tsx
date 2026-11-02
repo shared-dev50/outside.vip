@@ -133,9 +133,15 @@ export const EventPreviewPage: React.FC = () => {
     return acc + qty * tier.priceInCents;
   }, 0);
 
-  const mapSearchUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
-    `${event.venueName}, ${event.venueAddress}, ${event.city}`
-  )}`;
+  const mapSearchUrl = event.placeId
+    ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
+        `${event.venueName}, ${event.venueAddress || event.city}`
+      )}&query_place_id=${encodeURIComponent(event.placeId)}`
+    : event.latitude && event.longitude
+    ? `https://www.google.com/maps/search/?api=1&query=${event.latitude},${event.longitude}`
+    : `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
+        `${event.venueName}, ${event.venueAddress}, ${event.city}`
+      )}`;
 
   return (
     <div className="min-h-screen bg-white text-gray-900 pb-24">

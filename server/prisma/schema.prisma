@@ -224,6 +224,7 @@ model Event {
   country        String        @default("Kenya")
   latitude       Float?
   longitude      Float?
+  placeId        String?
   
   startAt        DateTime
   endAt          DateTime
@@ -268,6 +269,7 @@ model Event {
   @@index([isFeatured, status])
   @@index([seriesId])
   @@index([showOnExplore, status])
+  @@index([placeId])
 }
 
 model EventSeries {

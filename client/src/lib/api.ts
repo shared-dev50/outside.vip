@@ -662,6 +662,45 @@ export const api = {
         body: JSON.stringify(payload),
       }),
   },
+  places: {
+    status: () =>
+      request<{
+        configured: boolean;
+      }>('/places/status'),
+    autocomplete: (params: { input: string; sessionToken?: string; countryCode?: string }) => {
+      const searchParams = new URLSearchParams();
+      searchParams.append('input', params.input);
+      if (params.sessionToken) searchParams.append('sessionToken', params.sessionToken);
+      if (params.countryCode) searchParams.append('countryCode', params.countryCode);
+      return request<{
+        configured: boolean;
+        suggestions: Array<{
+          placeId: string;
+          text: string;
+          mainText: string;
+          secondaryText: string;
+          types: string[];
+        }>;
+      }>(`/places/autocomplete?${searchParams.toString()}`);
+    },
+    details: (placeId: string, sessionToken?: string) => {
+      const searchParams = new URLSearchParams();
+      if (sessionToken) searchParams.append('sessionToken', sessionToken);
+      const query = searchParams.toString() ? `?${searchParams.toString()}` : '';
+      return request<{
+        configured: boolean;
+        details: {
+          placeId: string;
+          venueName: string;
+          venueAddress: string;
+          latitude: number | null;
+          longitude: number | null;
+          city: string;
+          country: string;
+        } | null;
+      }>(`/places/details/${encodeURIComponent(placeId)}${query}`);
+    },
+  },
 };
 
 

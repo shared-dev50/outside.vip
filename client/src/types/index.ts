@@ -163,6 +163,7 @@ export interface Event {
   country: string;
   latitude?: number | null;
   longitude?: number | null;
+  placeId?: string | null;
   startAt: string;
   endAt: string;
   timezone: string;

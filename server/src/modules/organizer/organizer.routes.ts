@@ -47,6 +47,7 @@ organizerRouter.post('/events', createOrganizerEvent);
 organizerRouter.get('/events/:id', getOrganizerEventById);
 organizerRouter.get('/events/:id/waitlist', handleGetOrganizerWaitlist);
 organizerRouter.put('/events/:id', updateOrganizerEvent);
+organizerRouter.patch('/events/:id', updateOrganizerEvent);
 organizerRouter.post('/events/:id/publish', publishEvent);
 organizerRouter.post('/events/:id/unpublish', unpublishEvent);
 organizerRouter.post('/events/:id/cancel', cancelOrganizerEvent);

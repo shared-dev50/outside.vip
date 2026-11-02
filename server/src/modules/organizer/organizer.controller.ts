@@ -21,6 +21,7 @@ import {
 import { extractYouTubeVideoId, normalizeYouTubeUrl } from '../../utils/youtube.js';
 import { hashEventPassword } from '../events/passwordAccess.service.js';
 import { cancelWaitlistForEventIds, processWaitlistForTier } from '../waitlist/waitlist.service.js';
+import { verifyAndNormalizeLocation } from '../places/places.service.js';
 
 async function saveOrganizerPayoutDetails(
   tx: any,
@@ -379,6 +380,16 @@ export async function createOrganizerEvent(req: Request, res: Response, next: Ne
       passwordHash = await hashEventPassword(input.password);
     }
 
+    const normalizedLocation = await verifyAndNormalizeLocation({
+      venueName: input.venueName,
+      venueAddress: input.venueAddress,
+      city: input.city,
+      country: input.country,
+      latitude: input.latitude,
+      longitude: input.longitude,
+      placeId: input.placeId,
+    });
+
     if (input.recurrence) {
       const occurrences = calculateOccurrences({
         baseStartAt: input.startAt,
@@ -449,10 +460,13 @@ export async function createOrganizerEvent(req: Request, res: Response, next: Ne
               thumbnailUrl:
                 input.thumbnailUrl ||
                 (input.coverImagePublicId ? generateThumbnailUrl(input.coverImageUrl) : null),
-              venueName: input.venueName,
-              venueAddress: input.venueAddress,
-              city: input.city,
-              country: input.country,
+              venueName: normalizedLocation.venueName,
+              venueAddress: normalizedLocation.venueAddress,
+              city: normalizedLocation.city,
+              country: normalizedLocation.country,
+              latitude: normalizedLocation.latitude,
+              longitude: normalizedLocation.longitude,
+              placeId: normalizedLocation.placeId,
               startAt: occ.startAt,
               endAt: occ.endAt,
               timezone: input.timezone,
@@ -576,10 +590,13 @@ export async function createOrganizerEvent(req: Request, res: Response, next: Ne
           thumbnailUrl:
             input.thumbnailUrl ||
             (input.coverImagePublicId ? generateThumbnailUrl(input.coverImageUrl) : null),
-          venueName: input.venueName,
-          venueAddress: input.venueAddress,
-          city: input.city,
-          country: input.country,
+          venueName: normalizedLocation.venueName,
+          venueAddress: normalizedLocation.venueAddress,
+          city: normalizedLocation.city,
+          country: normalizedLocation.country,
+          latitude: normalizedLocation.latitude,
+          longitude: normalizedLocation.longitude,
+          placeId: normalizedLocation.placeId,
           startAt: new Date(input.startAt),
           endAt: new Date(input.endAt),
           timezone: input.timezone,
@@ -761,6 +778,70 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
       (input.coverImagePublicId !== undefined && input.coverImagePublicId !== oldPublicId) ||
       (input.coverImageUrl !== undefined && input.coverImageUrl !== existingEvent.coverImageUrl && oldPublicId);
 
+    const isLocationUpdated =
+      input.venueName !== undefined ||
+      input.venueAddress !== undefined ||
+      input.city !== undefined ||
+      input.country !== undefined ||
+      input.latitude !== undefined ||
+      input.longitude !== undefined ||
+      input.placeId !== undefined;
+
+    let normalizedLocation: {
+      venueName?: string;
+      venueAddress?: string;
+      city?: string;
+      country?: string;
+      latitude?: number | null;
+      longitude?: number | null;
+      placeId?: string | null;
+    } = {};
+
+    if (isLocationUpdated) {
+      if (input.placeId !== undefined) {
+        // placeId explicitly provided (either new placeId string or null for manual mode)
+        const verified = await verifyAndNormalizeLocation({
+          venueName: input.venueName !== undefined ? input.venueName : existingEvent.venueName,
+          venueAddress: input.venueAddress !== undefined ? input.venueAddress : existingEvent.venueAddress,
+          city: input.city !== undefined ? input.city : existingEvent.city,
+          country: input.country !== undefined ? input.country : existingEvent.country,
+          latitude: input.latitude,
+          longitude: input.longitude,
+          placeId: input.placeId,
+        });
+        normalizedLocation = {
+          venueName: verified.venueName,
+          venueAddress: verified.venueAddress,
+          city: verified.city,
+          country: verified.country,
+          latitude: verified.latitude,
+          longitude: verified.longitude,
+          placeId: verified.placeId,
+        };
+      } else {
+        // Backward compatibility: placeId not specified in input (preserve existing coordinates/placeId)
+        if (input.latitude !== undefined && input.latitude !== null) {
+          if (typeof input.latitude !== 'number' || input.latitude < -90 || input.latitude > 90) {
+            throw new BadRequestError('Latitude must be a valid number between -90 and 90');
+          }
+        }
+        if (input.longitude !== undefined && input.longitude !== null) {
+          if (typeof input.longitude !== 'number' || input.longitude < -180 || input.longitude > 180) {
+            throw new BadRequestError('Longitude must be a valid number between -180 and 180');
+          }
+        }
+
+        normalizedLocation = {
+          ...(input.venueName !== undefined && { venueName: input.venueName.trim() }),
+          ...(input.venueAddress !== undefined && { venueAddress: input.venueAddress.trim() }),
+          ...(input.city !== undefined && { city: input.city.trim() }),
+          ...(input.country !== undefined && { country: input.country.trim() }),
+          ...(input.latitude !== undefined && { latitude: input.latitude }),
+          ...(input.longitude !== undefined && { longitude: input.longitude }),
+        };
+      }
+    }
+
     const updatedEvent = await prisma.$transaction(async (tx) => {
       let payoutDetailsId = existingEvent.payoutDetailsId;
       if (input.payoutDetails) {
@@ -824,10 +905,13 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
                   input.thumbnailUrl ||
                   (input.coverImagePublicId ? generateThumbnailUrl(input.coverImageUrl || occ.coverImageUrl) : null),
               }),
-              ...(input.venueName !== undefined && { venueName: input.venueName }),
-              ...(input.venueAddress !== undefined && { venueAddress: input.venueAddress }),
-              ...(input.city !== undefined && { city: input.city }),
-              ...(input.country !== undefined && { country: input.country }),
+              ...(normalizedLocation.venueName !== undefined && { venueName: normalizedLocation.venueName }),
+              ...(normalizedLocation.venueAddress !== undefined && { venueAddress: normalizedLocation.venueAddress }),
+              ...(normalizedLocation.city !== undefined && { city: normalizedLocation.city }),
+              ...(normalizedLocation.country !== undefined && { country: normalizedLocation.country }),
+              ...(normalizedLocation.latitude !== undefined && { latitude: normalizedLocation.latitude }),
+              ...(normalizedLocation.longitude !== undefined && { longitude: normalizedLocation.longitude }),
+              ...(normalizedLocation.placeId !== undefined && { placeId: normalizedLocation.placeId }),
               ...(input.timezone !== undefined && { timezone: input.timezone }),
               ...(input.ageRestriction !== undefined && { ageRestriction: input.ageRestriction }),
               ...(input.dressCode !== undefined && { dressCode: input.dressCode }),
@@ -917,10 +1001,13 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
                 ? generateThumbnailUrl(input.coverImageUrl || existingEvent.coverImageUrl)
                 : null),
           }),
-          ...(input.venueName !== undefined && { venueName: input.venueName }),
-          ...(input.venueAddress !== undefined && { venueAddress: input.venueAddress }),
-          ...(input.city !== undefined && { city: input.city }),
-          ...(input.country !== undefined && { country: input.country }),
+          ...(normalizedLocation.venueName !== undefined && { venueName: normalizedLocation.venueName }),
+          ...(normalizedLocation.venueAddress !== undefined && { venueAddress: normalizedLocation.venueAddress }),
+          ...(normalizedLocation.city !== undefined && { city: normalizedLocation.city }),
+          ...(normalizedLocation.country !== undefined && { country: normalizedLocation.country }),
+          ...(normalizedLocation.latitude !== undefined && { latitude: normalizedLocation.latitude }),
+          ...(normalizedLocation.longitude !== undefined && { longitude: normalizedLocation.longitude }),
+          ...(normalizedLocation.placeId !== undefined && { placeId: normalizedLocation.placeId }),
           ...(input.startAt !== undefined && { startAt: new Date(input.startAt) }),
           ...(input.endAt !== undefined && { endAt: new Date(input.endAt) }),
           ...(input.timezone !== undefined && { timezone: input.timezone }),
