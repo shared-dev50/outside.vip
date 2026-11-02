@@ -121,6 +121,114 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
   return json.data;
 }
 
+export interface UploadProgressPayload {
+  loaded: number;
+  total: number;
+  percent: number;
+  state: 'uploading' | 'processing';
+}
+
+function xhrPost<T>(
+  url: string,
+  formData: FormData,
+  headers: Record<string, string> = {},
+  onProgress?: (progress: UploadProgressPayload) => void,
+  signal?: AbortSignal
+): Promise<T> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      return reject(new Error('Upload was aborted by user.'));
+    }
+
+    const xhr = new XMLHttpRequest();
+
+    const onAbort = () => {
+      xhr.abort();
+      reject(new Error('Upload was cancelled.'));
+    };
+
+    if (signal) {
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+
+    if (xhr.upload && onProgress) {
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable && event.total > 0) {
+          const rawPercent = Math.round((event.loaded / event.total) * 100);
+          const percent = Math.min(99, Math.max(0, rawPercent));
+          onProgress({
+            loaded: event.loaded,
+            total: event.total,
+            percent,
+            state: 'uploading',
+          });
+        }
+      };
+
+      xhr.upload.onload = () => {
+        onProgress({
+          loaded: 1,
+          total: 1,
+          percent: 100,
+          state: 'processing',
+        });
+      };
+    }
+
+    xhr.open('POST', url);
+
+    Object.entries(headers).forEach(([key, val]) => {
+      xhr.setRequestHeader(key, val);
+    });
+
+    xhr.onload = () => {
+      if (signal) {
+        signal.removeEventListener('abort', onAbort);
+      }
+
+      let parsed: any = null;
+      try {
+        parsed = JSON.parse(xhr.responseText);
+      } catch {
+        parsed = null;
+      }
+
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(parsed);
+      } else {
+        const errorMsg =
+          parsed?.error?.message ||
+          parsed?.message ||
+          `Upload failed with status code ${xhr.status}`;
+        reject(new Error(errorMsg));
+      }
+    };
+
+    xhr.onerror = () => {
+      if (signal) {
+        signal.removeEventListener('abort', onAbort);
+      }
+      reject(new Error('Network error occurred during image upload. Please check your internet connection.'));
+    };
+
+    xhr.ontimeout = () => {
+      if (signal) {
+        signal.removeEventListener('abort', onAbort);
+      }
+      reject(new Error('Image upload timed out.'));
+    };
+
+    xhr.onabort = () => {
+      if (signal) {
+        signal.removeEventListener('abort', onAbort);
+      }
+      reject(new Error('Upload was cancelled.'));
+    };
+
+    xhr.send(formData);
+  });
+}
+
 export const api = {
   events: {
     list: (params?: {
@@ -225,10 +333,17 @@ export const api = {
         method: 'POST',
         body: JSON.stringify(payload),
       }),
-    uploadCoverImage: async (file: File): Promise<{
+    uploadCoverImage: async (
+      file: File,
+      onProgress?: (progress: UploadProgressPayload) => void,
+      signal?: AbortSignal
+    ): Promise<{
       secure_url: string;
       public_id: string;
       thumbnailUrl?: string;
+      format?: string;
+      width?: number;
+      height?: number;
     }> => {
       const token =
         typeof window !== 'undefined' && typeof window.localStorage !== 'undefined'
@@ -246,6 +361,7 @@ export const api = {
           uploadUrl: string;
         }>('/organizer/upload/sign', {
           method: 'POST',
+          signal,
         });
 
         const formData = new FormData();
@@ -255,9 +371,28 @@ export const api = {
         formData.append('signature', signData.signature);
         formData.append('folder', signData.folder);
 
+        if (typeof XMLHttpRequest !== 'undefined') {
+          const cldJson = await xhrPost<any>(signData.uploadUrl, formData, {}, onProgress, signal);
+          const secure_url = cldJson.secure_url;
+          const public_id = cldJson.public_id;
+          const thumbnailUrl = secure_url.includes('/upload/')
+            ? secure_url.replace('/upload/', '/upload/c_fill,g_auto,w_600,h_400,q_auto,f_auto/')
+            : secure_url;
+
+          return {
+            secure_url,
+            public_id,
+            thumbnailUrl,
+            format: cldJson.format,
+            width: cldJson.width,
+            height: cldJson.height,
+          };
+        }
+
         const cldRes = await fetch(signData.uploadUrl, {
           method: 'POST',
           body: formData,
+          signal,
         });
 
         if (!cldRes.ok) {
@@ -272,18 +407,56 @@ export const api = {
           ? secure_url.replace('/upload/', '/upload/c_fill,g_auto,w_600,h_400,q_auto,f_auto/')
           : secure_url;
 
-        return { secure_url, public_id, thumbnailUrl };
+        if (onProgress) {
+          onProgress({ loaded: file.size, total: file.size, percent: 100, state: 'processing' });
+        }
+
+        return {
+          secure_url,
+          public_id,
+          thumbnailUrl,
+          format: cldJson.format,
+          width: cldJson.width,
+          height: cldJson.height,
+        };
       } catch (directUploadErr: any) {
+        if (signal?.aborted) {
+          throw new Error('Upload was cancelled.');
+        }
+
         // Fallback: upload via server
         const serverFormData = new FormData();
         serverFormData.append('image', file);
 
+        const headers: Record<string, string> = {};
+        if (token) {
+          headers['Authorization'] = `Bearer ${token}`;
+        }
+
+        if (typeof XMLHttpRequest !== 'undefined') {
+          const serverJson = await xhrPost<any>(
+            buildApiUrl('/organizer/upload'),
+            serverFormData,
+            headers,
+            onProgress,
+            signal
+          );
+
+          if (!serverJson?.success) {
+            throw new ApiError(
+              serverJson?.error?.message || directUploadErr?.message || 'Failed to upload cover image',
+              serverJson?.error?.statusCode || 500
+            );
+          }
+
+          return serverJson.data;
+        }
+
         const serverRes = await fetch(buildApiUrl('/organizer/upload'), {
           method: 'POST',
-          headers: {
-            ...(token ? { Authorization: `Bearer ${token}` } : {}),
-          },
+          headers,
           body: serverFormData,
+          signal,
         });
 
         const serverJson = await serverRes.json().catch(() => null);
@@ -295,6 +468,10 @@ export const api = {
           );
         }
 
+        if (onProgress) {
+          onProgress({ loaded: file.size, total: file.size, percent: 100, state: 'processing' });
+        }
+
         return serverJson.data;
       }
     },
@@ -303,7 +480,11 @@ export const api = {
         method: 'POST',
         body: JSON.stringify(payload),
       }),
-    uploadImage: (file: File) => api.organizer.uploadCoverImage(file),
+    uploadImage: (
+      file: File,
+      onProgress?: (progress: UploadProgressPayload) => void,
+      signal?: AbortSignal
+    ) => api.organizer.uploadCoverImage(file, onProgress, signal),
   },
   auth: {
     me: () => request<{ user: User }>('/auth/me'),

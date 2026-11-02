@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../lib/api';
@@ -44,6 +44,9 @@ import {
 } from 'lucide-react';
 import { calculateTierEarnings, calculateCombinedEarnings, formatCents } from '../lib/fees';
 import { extractYouTubeVideoId, getYouTubeEmbedUrl } from '../lib/youtube';
+import { ImageCropModal } from '../components/events/ImageCropModal';
+import { UploadProgressCard, UploadProgressInfo } from '../components/events/UploadProgressCard';
+import { validateImageFile } from '../lib/imageCrop';
 
 export type WizardStep = 1 | 2 | 3 | 4;
 
@@ -137,6 +140,34 @@ export const CreateEventPage: React.FC = () => {
   const [isUploadingGallery, setIsUploadingGallery] = useState(false);
   const [galleryUploadError, setGalleryUploadError] = useState<string | null>(null);
   const [galleryUrlInput, setGalleryUrlInput] = useState('');
+
+  // Cover Artwork Crop & Upload State
+  const [coverCropModalOpen, setCoverCropModalOpen] = useState(false);
+  const [selectedCoverRawFile, setSelectedCoverRawFile] = useState<File | null>(null);
+  const [coverCroppedFile, setCoverCroppedFile] = useState<File | null>(null);
+  const [coverUploadProgress, setCoverUploadProgress] = useState<UploadProgressInfo>({
+    state: 'idle',
+    filename: '',
+    loadedBytes: 0,
+    totalBytes: 0,
+    percent: 0,
+  });
+  const coverAbortControllerRef = useRef<AbortController | null>(null);
+
+  // Gallery Photo Crop & Upload State
+  const [galleryCropModalOpen, setGalleryCropModalOpen] = useState(false);
+  const [selectedGalleryRawFile, setSelectedGalleryRawFile] = useState<File | null>(null);
+  const [galleryCroppedFile, setGalleryCroppedFile] = useState<File | null>(null);
+  const [galleryUploadProgress, setGalleryUploadProgress] = useState<UploadProgressInfo>({
+    state: 'idle',
+    filename: '',
+    loadedBytes: 0,
+    totalBytes: 0,
+    percent: 0,
+  });
+  const galleryAbortControllerRef = useRef<AbortController | null>(null);
+
+  const isAnyImageUploading = isUploadingImage || isUploadingGallery;
 
   const [youtubeVideoUrl, setYoutubeVideoUrl] = useState('');
   const [showOnExplore, setShowOnExplore] = useState(true);
@@ -343,49 +374,125 @@ export const CreateEventPage: React.FC = () => {
     setHasUnsavedChanges(true);
   };
 
-  const handleImageFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  // --- Cover Flyer Crop & Upload ---
+  const handleCoverFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    const allowedMimeTypes = ['image/jpeg', 'image/png', 'image/webp'];
-    if (!allowedMimeTypes.includes(file.type)) {
-      const msg = 'Please upload a valid image file (JPEG, PNG, or WebP).';
+    const validation = validateImageFile(file);
+    if (!validation.valid) {
+      const msg = validation.error || 'Please upload a valid image file.';
       setImageUploadError(msg);
       showNotification('error', msg);
+      if (e.target) e.target.value = '';
       return;
     }
 
-    if (file.size > 5 * 1024 * 1024) {
-      const msg = 'Image size exceeds maximum allowed size of 5MB.';
-      setImageUploadError(msg);
-      showNotification('error', msg);
-      return;
-    }
+    setImageUploadError(null);
+    setSelectedCoverRawFile(file);
+    setCoverCropModalOpen(true);
+    if (e.target) e.target.value = '';
+  };
 
+  const handleCancelCoverCrop = () => {
+    setCoverCropModalOpen(false);
+    setSelectedCoverRawFile(null);
+  };
+
+  const startCoverUpload = async (file: File, previewUrl: string) => {
     try {
       setIsUploadingImage(true);
       setImageUploadError(null);
-      showNotification('success', 'Uploading image to Cloudinary...');
+      setCoverUploadProgress({
+        state: 'uploading',
+        filename: file.name,
+        fileSizeBytes: file.size,
+        previewUrl,
+        loadedBytes: 0,
+        totalBytes: file.size,
+        percent: 0,
+      });
 
-      const result = await api.organizer.uploadCoverImage(file);
+      const controller = new AbortController();
+      coverAbortControllerRef.current = controller;
+
+      const result = await api.organizer.uploadCoverImage(
+        file,
+        (prog) => {
+          setCoverUploadProgress((prev) => ({
+            ...prev,
+            loadedBytes: prog.loaded,
+            totalBytes: prog.total,
+            percent: prog.percent,
+            state: prog.state,
+          }));
+        },
+        controller.signal
+      );
 
       setCoverImageUrl(result.secure_url);
       setCoverImagePublicId(result.public_id);
       setHasUnsavedChanges(true);
+      setCoverUploadProgress((prev) => ({
+        ...prev,
+        state: 'success',
+        percent: 100,
+      }));
       showNotification('success', 'Artwork uploaded to Cloudinary successfully.');
     } catch (err: any) {
+      if (coverAbortControllerRef.current?.signal.aborted) {
+        setCoverUploadProgress({
+          state: 'idle',
+          filename: '',
+          loadedBytes: 0,
+          totalBytes: 0,
+          percent: 0,
+        });
+        return;
+      }
       const msg = err.message || 'Failed to upload image to Cloudinary.';
       setImageUploadError(msg);
+      setCoverUploadProgress((prev) => ({
+        ...prev,
+        state: 'error',
+        errorMessage: msg,
+      }));
       showNotification('error', msg);
     } finally {
       setIsUploadingImage(false);
-      if (e.target) {
-        e.target.value = '';
-      }
+      coverAbortControllerRef.current = null;
     }
   };
 
-  const handleGalleryFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleConfirmCoverCrop = (croppedFile: File, previewUrl: string) => {
+    setCoverCropModalOpen(false);
+    setSelectedCoverRawFile(null);
+    setCoverCroppedFile(croppedFile);
+    startCoverUpload(croppedFile, previewUrl);
+  };
+
+  const handleRetryCoverUpload = () => {
+    if (coverCroppedFile && coverUploadProgress.previewUrl) {
+      startCoverUpload(coverCroppedFile, coverUploadProgress.previewUrl);
+    }
+  };
+
+  const handleCancelCoverUpload = () => {
+    if (coverAbortControllerRef.current) {
+      coverAbortControllerRef.current.abort();
+    }
+    setCoverUploadProgress({
+      state: 'idle',
+      filename: '',
+      loadedBytes: 0,
+      totalBytes: 0,
+      percent: 0,
+    });
+    setIsUploadingImage(false);
+  };
+
+  // --- Gallery Crop & Upload ---
+  const handleGalleryFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
@@ -393,28 +500,61 @@ export const CreateEventPage: React.FC = () => {
       const msg = 'Maximum limit of 10 gallery images reached.';
       setGalleryUploadError(msg);
       showNotification('error', msg);
+      if (e.target) e.target.value = '';
       return;
     }
 
-    const allowedMimeTypes = ['image/jpeg', 'image/png', 'image/webp'];
-    if (!allowedMimeTypes.includes(file.type)) {
-      const msg = 'Please upload a valid image file (JPEG, PNG, or WebP).';
+    const validation = validateImageFile(file);
+    if (!validation.valid) {
+      const msg = validation.error || 'Please upload a valid image file.';
       setGalleryUploadError(msg);
       showNotification('error', msg);
+      if (e.target) e.target.value = '';
       return;
     }
 
-    if (file.size > 5 * 1024 * 1024) {
-      const msg = 'Gallery image exceeds 5MB limit.';
-      setGalleryUploadError(msg);
-      showNotification('error', msg);
-      return;
-    }
+    setGalleryUploadError(null);
+    setSelectedGalleryRawFile(file);
+    setGalleryCropModalOpen(true);
+    if (e.target) e.target.value = '';
+  };
 
+  const handleCancelGalleryCrop = () => {
+    setGalleryCropModalOpen(false);
+    setSelectedGalleryRawFile(null);
+  };
+
+  const startGalleryUpload = async (file: File, previewUrl: string) => {
     try {
       setIsUploadingGallery(true);
       setGalleryUploadError(null);
-      const result = await api.organizer.uploadImage(file);
+      setGalleryUploadProgress({
+        state: 'uploading',
+        filename: file.name,
+        fileSizeBytes: file.size,
+        previewUrl,
+        loadedBytes: 0,
+        totalBytes: file.size,
+        percent: 0,
+      });
+
+      const controller = new AbortController();
+      galleryAbortControllerRef.current = controller;
+
+      const result = await api.organizer.uploadImage(
+        file,
+        (prog) => {
+          setGalleryUploadProgress((prev) => ({
+            ...prev,
+            loadedBytes: prog.loaded,
+            totalBytes: prog.total,
+            percent: prog.percent,
+            state: prog.state,
+          }));
+        },
+        controller.signal
+      );
+
       setGalleryImages((prev) => [
         ...prev,
         {
@@ -424,15 +564,62 @@ export const CreateEventPage: React.FC = () => {
         },
       ]);
       setHasUnsavedChanges(true);
+      setGalleryUploadProgress((prev) => ({
+        ...prev,
+        state: 'success',
+        percent: 100,
+      }));
       showNotification('success', 'Gallery image uploaded successfully.');
     } catch (err: any) {
+      if (galleryAbortControllerRef.current?.signal.aborted) {
+        setGalleryUploadProgress({
+          state: 'idle',
+          filename: '',
+          loadedBytes: 0,
+          totalBytes: 0,
+          percent: 0,
+        });
+        return;
+      }
       const msg = err.message || 'Failed to upload gallery image.';
       setGalleryUploadError(msg);
+      setGalleryUploadProgress((prev) => ({
+        ...prev,
+        state: 'error',
+        errorMessage: msg,
+      }));
       showNotification('error', msg);
     } finally {
       setIsUploadingGallery(false);
-      if (e.target) e.target.value = '';
+      galleryAbortControllerRef.current = null;
     }
+  };
+
+  const handleConfirmGalleryCrop = (croppedFile: File, previewUrl: string) => {
+    setGalleryCropModalOpen(false);
+    setSelectedGalleryRawFile(null);
+    setGalleryCroppedFile(croppedFile);
+    startGalleryUpload(croppedFile, previewUrl);
+  };
+
+  const handleRetryGalleryUpload = () => {
+    if (galleryCroppedFile && galleryUploadProgress.previewUrl) {
+      startGalleryUpload(galleryCroppedFile, galleryUploadProgress.previewUrl);
+    }
+  };
+
+  const handleCancelGalleryUpload = () => {
+    if (galleryAbortControllerRef.current) {
+      galleryAbortControllerRef.current.abort();
+    }
+    setGalleryUploadProgress({
+      state: 'idle',
+      filename: '',
+      loadedBytes: 0,
+      totalBytes: 0,
+      percent: 0,
+    });
+    setIsUploadingGallery(false);
   };
 
   const handleAddGalleryUrl = () => {
@@ -794,8 +981,8 @@ export const CreateEventPage: React.FC = () => {
 
   const saveMutation = useMutation({
     mutationFn: async ({ publish }: { publish: boolean }) => {
-      if (isUploadingImage) {
-        throw new Error('Please wait for the image upload to complete before saving.');
+      if (isUploadingImage || isUploadingGallery) {
+        throw new Error('Please wait for the image uploads to complete before saving.');
       }
 
       if (!coverImageUrl || !coverImageUrl.trim()) {
@@ -1055,7 +1242,7 @@ export const CreateEventPage: React.FC = () => {
             <button
               type="button"
               onClick={() => saveMutation.mutate({ publish: false })}
-              disabled={saveMutation.isPending || isUploadingImage}
+              disabled={saveMutation.isPending || isAnyImageUploading}
               className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-white hover:bg-stone-100 text-stone-900 border border-stone-300 text-xs font-mono font-semibold transition-colors disabled:opacity-50 shadow-2xs"
             >
               <Save className="w-3.5 h-3.5 text-stone-500" />
@@ -1067,7 +1254,7 @@ export const CreateEventPage: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => unpublishMutation.mutate({})}
-                  disabled={unpublishMutation.isPending || isUploadingImage}
+                  disabled={unpublishMutation.isPending || isAnyImageUploading}
                   className="px-3 py-2 rounded-lg bg-stone-100 hover:bg-stone-200 text-stone-700 border border-stone-300 text-xs font-mono font-semibold transition-colors disabled:opacity-50 shadow-2xs"
                 >
                   Unpublish
@@ -1075,7 +1262,7 @@ export const CreateEventPage: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => saveMutation.mutate({ publish: false })}
-                  disabled={saveMutation.isPending || isUploadingImage}
+                  disabled={saveMutation.isPending || isAnyImageUploading}
                   className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-stone-900 hover:bg-black text-white font-semibold text-xs font-mono uppercase tracking-wider transition-all duration-200 shadow-2xs disabled:opacity-50"
                 >
                   Update Live
@@ -1085,7 +1272,7 @@ export const CreateEventPage: React.FC = () => {
               <button
                 type="button"
                 onClick={() => saveMutation.mutate({ publish: true })}
-                disabled={saveMutation.isPending || isUploadingImage}
+                disabled={saveMutation.isPending || isAnyImageUploading}
                 className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-stone-900 hover:bg-black text-white font-semibold text-xs font-mono uppercase tracking-wider transition-all duration-200 shadow-2xs disabled:opacity-50"
               >
                 <Globe className="w-3.5 h-3.5" />
@@ -1400,40 +1587,57 @@ export const CreateEventPage: React.FC = () => {
                             htmlFor="flyer-file-upload"
                             className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5 cursor-pointer"
                           >
-                            Upload Local Flyer (Max 5MB)
+                            Upload Local Flyer (Max 15MB)
                           </label>
                           <label
                             htmlFor="flyer-file-upload"
                             className={`w-full px-3.5 py-2.5 rounded-lg bg-[#FAF8F5] border border-dashed text-xs font-mono flex items-center justify-center gap-2 transition-colors ${
-                              isUploadingImage
-                                ? 'border-stone-400 text-stone-400 cursor-not-allowed'
+                              isAnyImageUploading
+                                ? 'border-stone-400 text-stone-400 cursor-not-allowed bg-stone-100'
                                 : 'border-stone-300 hover:border-stone-900 text-stone-700 hover:text-stone-900 cursor-pointer'
                             }`}
                           >
-                            {isUploadingImage ? (
-                              <>
-                                <RefreshCw className="w-4 h-4 text-stone-600 animate-spin" />
-                                <span>Uploading to Cloudinary...</span>
-                              </>
-                            ) : (
-                              <>
-                                <Upload className="w-4 h-4 text-stone-600" />
-                                <span>Choose Local File (JPEG, PNG, WebP)</span>
-                              </>
-                            )}
+                            <Upload className="w-4 h-4 text-stone-600" />
+                            <span>
+                              {isUploadingImage
+                                ? 'Uploading Flyer...'
+                                : 'Choose Local File (JPEG, PNG, WebP)'}
+                            </span>
                             <input
                               id="flyer-file-upload"
                               type="file"
                               accept="image/jpeg,image/png,image/webp"
-                              disabled={isUploadingImage}
+                              disabled={isAnyImageUploading}
                               onClick={(e) => {
                                 (e.target as HTMLInputElement).value = '';
                               }}
-                              onChange={handleImageFileChange}
+                              onChange={handleCoverFileSelect}
                               className="sr-only"
                             />
                           </label>
-                          {imageUploadError && (
+
+                          {/* Cover Flyer Upload Progress Card */}
+                          {coverUploadProgress.state !== 'idle' && (
+                            <div className="mt-2.5">
+                              <UploadProgressCard
+                                info={coverUploadProgress}
+                                onRetry={handleRetryCoverUpload}
+                                onCancel={handleCancelCoverUpload}
+                                onDismiss={() =>
+                                  setCoverUploadProgress({
+                                    state: 'idle',
+                                    filename: '',
+                                    loadedBytes: 0,
+                                    totalBytes: 0,
+                                    percent: 0,
+                                  })
+                                }
+                                title="Cover Artwork Upload"
+                              />
+                            </div>
+                          )}
+
+                          {imageUploadError && coverUploadProgress.state === 'idle' && (
                             <p className="mt-1.5 text-[11px] font-mono text-rose-600 flex items-center gap-1">
                               <AlertCircle className="w-3.5 h-3.5 shrink-0" />
                               <span>{imageUploadError}</span>
@@ -1451,13 +1655,22 @@ export const CreateEventPage: React.FC = () => {
                             <button
                               key={preset.name}
                               type="button"
+                              disabled={isAnyImageUploading}
                               onClick={() => {
+                                if (isAnyImageUploading) return;
                                 setCoverImageUrl(preset.url);
                                 setCoverImagePublicId(null);
                                 setImageUploadError(null);
+                                setCoverUploadProgress({
+                                  state: 'idle',
+                                  filename: '',
+                                  loadedBytes: 0,
+                                  totalBytes: 0,
+                                  percent: 0,
+                                });
                                 setHasUnsavedChanges(true);
                               }}
-                              className={`p-2 rounded-lg border text-left space-y-1.5 transition-all ${
+                              className={`p-2 rounded-lg border text-left space-y-1.5 transition-all disabled:opacity-50 ${
                                 coverImageUrl === preset.url
                                   ? 'bg-stone-50 border-stone-900 ring-2 ring-stone-900'
                                   : 'bg-white border-stone-200 hover:border-stone-400'
@@ -1524,35 +1737,54 @@ export const CreateEventPage: React.FC = () => {
                         <label
                           htmlFor="gallery-file-upload"
                           className={`w-full px-3.5 py-2.5 rounded-lg bg-[#FAF8F5] border border-dashed text-xs font-mono flex items-center justify-center gap-2 transition-colors ${
-                            isUploadingGallery || galleryImages.length >= 10
-                              ? 'border-stone-300 text-stone-400 cursor-not-allowed'
+                            isAnyImageUploading || galleryImages.length >= 10
+                              ? 'border-stone-300 text-stone-400 cursor-not-allowed bg-stone-100'
                               : 'border-stone-300 hover:border-stone-900 text-stone-700 hover:text-stone-900 cursor-pointer'
                           }`}
                         >
-                          {isUploadingGallery ? (
-                            <>
-                              <RefreshCw className="w-4 h-4 text-stone-600 animate-spin" />
-                              <span>Uploading to Gallery...</span>
-                            </>
-                          ) : (
-                            <>
-                              <Upload className="w-4 h-4 text-stone-600" />
-                              <span>Choose Photo (Max 5MB)</span>
-                            </>
-                          )}
+                          <Upload className="w-4 h-4 text-stone-600" />
+                          <span>
+                            {isUploadingGallery
+                              ? 'Uploading to Gallery...'
+                              : galleryImages.length >= 10
+                              ? 'Max 10 Images Reached'
+                              : 'Choose Photo (JPEG, PNG, WebP)'}
+                          </span>
                           <input
                             id="gallery-file-upload"
                             type="file"
                             accept="image/jpeg,image/png,image/webp"
-                            disabled={isUploadingGallery || galleryImages.length >= 10}
+                            disabled={isAnyImageUploading || galleryImages.length >= 10}
                             onClick={(e) => {
                               (e.target as HTMLInputElement).value = '';
                             }}
-                            onChange={handleGalleryFileChange}
+                            onChange={handleGalleryFileSelect}
                             className="sr-only"
                           />
                         </label>
-                        {galleryUploadError && (
+
+                        {/* Gallery Upload Progress Card */}
+                        {galleryUploadProgress.state !== 'idle' && (
+                          <div className="mt-2.5">
+                            <UploadProgressCard
+                              info={galleryUploadProgress}
+                              onRetry={handleRetryGalleryUpload}
+                              onCancel={handleCancelGalleryUpload}
+                              onDismiss={() =>
+                                setGalleryUploadProgress({
+                                  state: 'idle',
+                                  filename: '',
+                                  loadedBytes: 0,
+                                  totalBytes: 0,
+                                  percent: 0,
+                                })
+                              }
+                              title="Gallery Image Upload"
+                            />
+                          </div>
+                        )}
+
+                        {galleryUploadError && galleryUploadProgress.state === 'idle' && (
                           <p className="mt-1.5 text-[11px] font-mono text-rose-600 flex items-center gap-1">
                             <AlertCircle className="w-3.5 h-3.5 shrink-0" />
                             <span>{galleryUploadError}</span>
@@ -1569,7 +1801,7 @@ export const CreateEventPage: React.FC = () => {
                             type="url"
                             placeholder="https://images.unsplash.com/..."
                             value={galleryUrlInput}
-                            disabled={galleryImages.length >= 10}
+                            disabled={galleryImages.length >= 10 || isAnyImageUploading}
                             onChange={(e) => setGalleryUrlInput(e.target.value)}
                             onKeyDown={(e) => {
                               if (e.key === 'Enter') {
@@ -1582,7 +1814,7 @@ export const CreateEventPage: React.FC = () => {
                           <button
                             type="button"
                             onClick={handleAddGalleryUrl}
-                            disabled={!galleryUrlInput.trim() || galleryImages.length >= 10}
+                            disabled={!galleryUrlInput.trim() || galleryImages.length >= 10 || isAnyImageUploading}
                             className="px-3 py-2 rounded-lg bg-stone-900 hover:bg-black text-white font-mono text-xs font-semibold disabled:opacity-40 transition-colors shrink-0"
                           >
                             Add
@@ -2954,7 +3186,7 @@ export const CreateEventPage: React.FC = () => {
                     <button
                       type="button"
                       onClick={() => saveMutation.mutate({ publish: false })}
-                      disabled={saveMutation.isPending || isUploadingImage}
+                      disabled={saveMutation.isPending || isAnyImageUploading}
                       className="px-4 py-2.5 rounded-lg border border-stone-300 bg-white hover:bg-stone-100 text-stone-900 font-mono text-xs font-semibold transition-colors shadow-2xs disabled:opacity-50"
                     >
                       {saveMutation.isPending ? 'Saving...' : 'Save Draft'}
@@ -2963,7 +3195,7 @@ export const CreateEventPage: React.FC = () => {
                     <button
                       type="button"
                       onClick={() => saveMutation.mutate({ publish: true })}
-                      disabled={saveMutation.isPending || isUploadingImage}
+                      disabled={saveMutation.isPending || isAnyImageUploading}
                       className="inline-flex items-center gap-2 px-6 py-2.5 rounded-lg bg-stone-900 hover:bg-black text-white font-mono text-xs font-semibold uppercase tracking-wider transition-colors shadow-2xs disabled:opacity-50"
                     >
                       <Globe className="w-4 h-4" />
@@ -3031,6 +3263,26 @@ export const CreateEventPage: React.FC = () => {
           </div>
         </div>
       )}
+
+      {/* Cover Artwork Image Crop Modal */}
+      <ImageCropModal
+        isOpen={coverCropModalOpen}
+        file={selectedCoverRawFile}
+        mode="cover"
+        title="Crop Event Cover Flyer"
+        onCancel={handleCancelCoverCrop}
+        onConfirm={handleConfirmCoverCrop}
+      />
+
+      {/* Gallery Photo Image Crop Modal */}
+      <ImageCropModal
+        isOpen={galleryCropModalOpen}
+        file={selectedGalleryRawFile}
+        mode="gallery"
+        title="Crop Gallery Image"
+        onCancel={handleCancelGalleryCrop}
+        onConfirm={handleConfirmGalleryCrop}
+      />
     </div>
   );
 };
