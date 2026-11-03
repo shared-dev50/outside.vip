@@ -208,7 +208,7 @@ export const JoinWaitlistDialog: React.FC<JoinWaitlistDialogProps> = ({
                   type="tel"
                   value={phone}
                   onChange={(e) => setPhone(e.target.value)}
-                  placeholder="+254 700 000 000"
+                  placeholder="(555) 000-0000"
                   className="w-full px-3 py-2 rounded-lg bg-stone-50 border border-stone-300 text-stone-900 text-xs focus:outline-none focus:border-stone-900"
                 />
               </div>

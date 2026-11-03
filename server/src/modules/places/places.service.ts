@@ -1,5 +1,6 @@
 import { env } from '../../config/env.js';
 import { BadRequestError } from '../../utils/errors.js';
+import { inferTimezoneFromLocation } from '../../utils/timezone.js';
 
 export interface PlaceSuggestion {
   placeId: string;
@@ -16,7 +17,10 @@ export interface PlaceDetailsResult {
   latitude: number | null;
   longitude: number | null;
   city: string;
+  stateCode?: string | null;
   country: string;
+  countryCode?: string | null;
+  suggestedTimezone?: string | null;
 }
 
 export interface AutocompleteResponse {
@@ -61,12 +65,20 @@ export async function getAutocompleteSuggestions(params: {
     };
   }
 
-  const regionCode = (params.countryCode || 'KE').toUpperCase();
+  // Configurable default country (defaults to US)
+  const defaultCountry = (env.DEFAULT_PLACES_COUNTRY_CODE || 'US').trim().toUpperCase();
+  const requestedCountry = params.countryCode !== undefined ? params.countryCode.trim().toUpperCase() : defaultCountry;
+
+  // Support international / worldwide searching when requested or configured as ALL/GLOBAL
+  const isWorldwide = !requestedCountry || requestedCountry === 'ALL' || requestedCountry === 'GLOBAL' || requestedCountry === 'WORLDWIDE';
 
   const requestBody: Record<string, any> = {
     input: trimmedInput,
-    includedRegionCodes: [regionCode],
   };
+
+  if (!isWorldwide) {
+    requestBody.includedRegionCodes = [requestedCountry];
+  }
 
   if (params.sessionToken && params.sessionToken.trim()) {
     requestBody.sessionToken = params.sessionToken.trim();
@@ -188,26 +200,42 @@ export async function getPlaceDetails(params: {
     const longitude = typeof data.location?.longitude === 'number' ? data.location.longitude : null;
 
     let city = '';
-    let country = 'Kenya';
+    let stateCode: string | null = null;
+    let country = 'United States';
+    let countryCode: string | null = null;
 
     if (Array.isArray(data.addressComponents)) {
       for (const comp of data.addressComponents) {
         const types: string[] = comp.types || [];
         if (types.includes('locality') || types.includes('postal_town')) {
           city = comp.longText || comp.shortText || city;
-        } else if (!city && (types.includes('administrative_area_level_2') || types.includes('administrative_area_level_1'))) {
+        } else if (!city && types.includes('administrative_area_level_2')) {
           city = comp.longText || comp.shortText || city;
+        } else if (!city && types.includes('sublocality')) {
+          city = comp.longText || comp.shortText || city;
+        }
+
+        if (types.includes('administrative_area_level_1')) {
+          stateCode = comp.shortText || comp.longText || null;
+          if (!city && stateCode) {
+            city = comp.longText || comp.shortText || city;
+          }
         }
 
         if (types.includes('country')) {
           country = comp.longText || comp.shortText || country;
+          countryCode = comp.shortText || null;
         }
       }
     }
 
-    if (!city) {
-      city = 'Nairobi';
-    }
+    const suggestedTimezone = inferTimezoneFromLocation({
+      latitude,
+      longitude,
+      stateCode,
+      country,
+      countryCode,
+    });
 
     return {
       configured: true,
@@ -218,7 +246,10 @@ export async function getPlaceDetails(params: {
         latitude,
         longitude,
         city,
+        stateCode,
         country,
+        countryCode,
+        suggestedTimezone,
       },
     };
   } catch (error: any) {
@@ -295,8 +326,8 @@ export async function verifyAndNormalizeLocation(data: {
       return {
         venueName: (data.venueName || '').trim(),
         venueAddress: (data.venueAddress || '').trim(),
-        city: (data.city || 'Nairobi').trim(),
-        country: (data.country || 'Kenya').trim(),
+        city: (data.city || '').trim(),
+        country: (data.country || 'United States').trim(),
         latitude: data.latitude ?? null,
         longitude: data.longitude ?? null,
         placeId,
@@ -309,8 +340,8 @@ export async function verifyAndNormalizeLocation(data: {
   return {
     venueName: (data.venueName || '').trim(),
     venueAddress: (data.venueAddress || '').trim(),
-    city: (data.city || 'Nairobi').trim(),
-    country: (data.country || 'Kenya').trim(),
+    city: (data.city || '').trim(),
+    country: (data.country || 'United States').trim(),
     latitude: null,
     longitude: null,
     placeId: null,

@@ -9,6 +9,7 @@ import {
   Building2,
   ExternalLink,
   Sparkles,
+  Globe,
 } from 'lucide-react';
 import { api } from '../../lib/api';
 
@@ -25,12 +26,11 @@ export interface LocationData {
 export interface LocationAutocompleteInputProps {
   value: LocationData;
   onChange: (value: LocationData) => void;
+  onTimezoneSuggested?: (suggestedTimezone: string) => void;
   countryCode?: string;
   className?: string;
   disabled?: boolean;
 }
-
-const KENYA_CITIES = ['Nairobi', 'Kilifi', 'Mombasa', 'Diani', 'Naivasha', 'Kisumu', 'Nakuru'];
 
 function generateSessionToken(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -46,7 +46,8 @@ function generateSessionToken(): string {
 export const LocationAutocompleteInput: React.FC<LocationAutocompleteInputProps> = ({
   value,
   onChange,
-  countryCode = 'KE',
+  onTimezoneSuggested,
+  countryCode: propCountryCode,
   className = '',
   disabled = false,
 }) => {
@@ -74,6 +75,10 @@ export const LocationAutocompleteInput: React.FC<LocationAutocompleteInputProps>
   const [apiConfigured, setApiConfigured] = useState<boolean | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
+  // Active search region: defaults to US, configurable, toggleable to Worldwide ('ALL')
+  const [searchRegion, setSearchRegion] = useState<string>(propCountryCode || 'US');
+  const [backendDefaultCountry, setBackendDefaultCountry] = useState<string>('US');
+
   // Show active search box when user chooses to change location
   const [isChangingLocation, setIsChangingLocation] = useState<boolean>(false);
 
@@ -82,7 +87,7 @@ export const LocationAutocompleteInput: React.FC<LocationAutocompleteInputProps>
   const containerRef = useRef<HTMLDivElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Check if Places API is configured on the backend
+  // Check if Places API is configured on the backend and get default region
   useEffect(() => {
     let isMounted = true;
     api.places
@@ -91,6 +96,12 @@ export const LocationAutocompleteInput: React.FC<LocationAutocompleteInputProps>
         if (isMounted) {
           const configured = res?.configured ?? false;
           setApiConfigured(configured);
+          if (res?.defaultCountryCode) {
+            setBackendDefaultCountry(res.defaultCountryCode);
+            if (!propCountryCode) {
+              setSearchRegion(res.defaultCountryCode);
+            }
+          }
           if (!configured && !value.placeId) {
             setIsManualMode(true);
           }
@@ -108,7 +119,7 @@ export const LocationAutocompleteInput: React.FC<LocationAutocompleteInputProps>
     return () => {
       isMounted = false;
     };
-  }, [value.placeId]);
+  }, [value.placeId, propCountryCode]);
 
   // Click outside listener to close dropdown
   useEffect(() => {
@@ -144,7 +155,7 @@ export const LocationAutocompleteInput: React.FC<LocationAutocompleteInputProps>
         const res = await api.places.autocomplete({
           input: trimmed,
           sessionToken: sessionTokenRef.current || undefined,
-          countryCode,
+          countryCode: searchRegion,
         });
 
         if (res?.configured === false) {
@@ -166,7 +177,7 @@ export const LocationAutocompleteInput: React.FC<LocationAutocompleteInputProps>
     }, 280);
 
     return () => clearTimeout(timer);
-  }, [searchQuery, countryCode, isManualMode]);
+  }, [searchQuery, searchRegion, isManualMode]);
 
   // Handle selecting a place suggestion
   const handleSelectSuggestion = async (placeId: string, mainText: string) => {
@@ -184,12 +195,17 @@ export const LocationAutocompleteInput: React.FC<LocationAutocompleteInputProps>
         onChange({
           venueName: details.venueName || mainText,
           venueAddress: details.venueAddress || '',
-          city: details.city || value.city || 'Nairobi',
-          country: details.country || value.country || 'Kenya',
+          city: details.city || value.city || '',
+          country: details.country || value.country || 'United States',
           latitude: details.latitude,
           longitude: details.longitude,
           placeId: details.placeId,
         });
+
+        if (details.suggestedTimezone && onTimezoneSuggested) {
+          onTimezoneSuggested(details.suggestedTimezone);
+        }
+
         setSearchQuery('');
         setIsChangingLocation(false);
       } else {
@@ -207,8 +223,8 @@ export const LocationAutocompleteInput: React.FC<LocationAutocompleteInputProps>
     onChange({
       venueName: '',
       venueAddress: '',
-      city: 'Nairobi',
-      country: 'Kenya',
+      city: '',
+      country: 'United States',
       latitude: null,
       longitude: null,
       placeId: null,
@@ -228,8 +244,8 @@ export const LocationAutocompleteInput: React.FC<LocationAutocompleteInputProps>
     onChange({
       venueName: value.venueName,
       venueAddress: value.venueAddress,
-      city: value.city || 'Nairobi',
-      country: value.country || 'Kenya',
+      city: value.city,
+      country: value.country || 'United States',
       latitude: null,
       longitude: null,
       placeId: null,
@@ -376,9 +392,11 @@ export const LocationAutocompleteInput: React.FC<LocationAutocompleteInputProps>
                   </p>
                 )}
                 <div className="flex items-center gap-3 mt-2 text-[11px] font-mono text-stone-500">
-                  <span className="bg-stone-100 px-2 py-0.5 rounded text-stone-700 font-medium">
-                    {value.city}, {value.country}
-                  </span>
+                  {(value.city || value.country) && (
+                    <span className="bg-stone-100 px-2 py-0.5 rounded text-stone-700 font-medium">
+                      {[value.city, value.country].filter(Boolean).join(', ')}
+                    </span>
+                  )}
                   {value.latitude !== null && value.longitude !== null && (
                     <span className="text-stone-400 hidden sm:inline">
                       {value.latitude.toFixed(4)}, {value.longitude.toFixed(4)}
@@ -427,7 +445,7 @@ export const LocationAutocompleteInput: React.FC<LocationAutocompleteInputProps>
             </div>
           </div>
 
-          {/* Requirement 3: Separate editable input for venueName once location is selected */}
+          {/* Separate editable input for venueName once location is selected */}
           <div className="pt-3 border-t border-emerald-100/60">
             <label
               htmlFor={`venue-display-name-${componentInstanceId}`}
@@ -440,7 +458,7 @@ export const LocationAutocompleteInput: React.FC<LocationAutocompleteInputProps>
               type="text"
               value={value.venueName}
               onChange={(e) => handleCustomVenueNameChange(e.target.value)}
-              placeholder="e.g. Main Stage - The Alchemist"
+              placeholder="e.g. The Brooklyn Mirage"
               disabled={disabled}
               className="w-full px-3.5 py-2.5 rounded-lg bg-white border border-stone-300 text-stone-900 placeholder-stone-400 text-sm focus:outline-none focus:border-stone-900 transition-colors shadow-2xs"
             />
@@ -473,12 +491,43 @@ export const LocationAutocompleteInput: React.FC<LocationAutocompleteInputProps>
           )}
 
           <div className="relative">
-            <label
-              htmlFor={`places-search-input-${componentInstanceId}`}
-              className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5"
-            >
-              Search Venue or Destination <span className="text-rose-600">*</span>
-            </label>
+            <div className="flex items-center justify-between mb-1.5">
+              <label
+                htmlFor={`places-search-input-${componentInstanceId}`}
+                className="block text-xs font-mono uppercase text-stone-700 font-bold"
+              >
+                Search Venue or Destination <span className="text-rose-600">*</span>
+              </label>
+
+              {/* Search Region Switcher (US Default vs Worldwide) */}
+              <div className="flex items-center gap-1.5 text-xs font-mono">
+                <button
+                  type="button"
+                  onClick={() => setSearchRegion(backendDefaultCountry || 'US')}
+                  className={`px-2 py-0.5 rounded text-[11px] transition-colors ${
+                    searchRegion !== 'ALL'
+                      ? 'bg-stone-900 text-white font-bold'
+                      : 'bg-stone-100 hover:bg-stone-200 text-stone-600'
+                  }`}
+                  title="Search United States venues"
+                >
+                  US First
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSearchRegion('ALL')}
+                  className={`px-2 py-0.5 rounded text-[11px] transition-colors ${
+                    searchRegion === 'ALL'
+                      ? 'bg-stone-900 text-white font-bold'
+                      : 'bg-stone-100 hover:bg-stone-200 text-stone-600'
+                  }`}
+                  title="Search international and worldwide locations"
+                >
+                  Worldwide
+                </button>
+              </div>
+            </div>
+
             <div className="relative flex items-center">
               <Search className="w-4 h-4 text-stone-400 absolute left-3.5 pointer-events-none" />
               <input
@@ -487,7 +536,6 @@ export const LocationAutocompleteInput: React.FC<LocationAutocompleteInputProps>
                 type="text"
                 value={searchQuery}
                 onChange={(e) => {
-                  // Requirement 2: Do NOT immediately destroy the previously selected location!
                   setSearchQuery(e.target.value);
                 }}
                 onFocus={() => {
@@ -495,7 +543,11 @@ export const LocationAutocompleteInput: React.FC<LocationAutocompleteInputProps>
                     setIsDropdownOpen(true);
                   }
                 }}
-                placeholder="Search venue name, club, rooftop, hotel or street in Kenya..."
+                placeholder={
+                  searchRegion === 'ALL'
+                    ? 'Search venue name, club, rooftop, hotel or street address worldwide...'
+                    : 'Search venue name, club, rooftop, hotel or street address in the US...'
+                }
                 disabled={disabled || isFetchingDetails}
                 autoComplete="off"
                 className="w-full pl-10 pr-10 py-2.5 rounded-lg bg-[#FAF8F5] border border-stone-300 text-stone-900 placeholder-stone-400 text-sm focus:outline-none focus:border-stone-900 focus:bg-white transition-colors"
@@ -574,8 +626,15 @@ export const LocationAutocompleteInput: React.FC<LocationAutocompleteInputProps>
             )}
           </div>
 
-          <div className="flex items-center justify-between text-[11px] text-stone-500">
-            <span>Restricted to venues in Kenya (KE).</span>
+          <div className="flex items-center justify-between text-[11px] text-stone-500 flex-wrap gap-2">
+            <div className="flex items-center gap-1.5">
+              <Globe className="w-3.5 h-3.5 text-stone-400" />
+              <span>
+                {searchRegion === 'ALL'
+                  ? 'Searching international locations'
+                  : `Default search region: ${searchRegion}`}
+              </span>
+            </div>
             <button
               type="button"
               onClick={handleSwitchToManual}
@@ -588,7 +647,7 @@ export const LocationAutocompleteInput: React.FC<LocationAutocompleteInputProps>
       )}
 
       {/* ------------------------------------------------------------- */}
-      {/* 3. MANUAL ENTRY MODE */}
+      {/* 3. MANUAL ENTRY MODE (Redesigned Clean US-First Form) */}
       {/* ------------------------------------------------------------- */}
       {isManualMode && (
         <div className="space-y-4 p-4 rounded-xl border border-stone-200 bg-[#FAF8F5]/60">
@@ -614,12 +673,12 @@ export const LocationAutocompleteInput: React.FC<LocationAutocompleteInputProps>
                 htmlFor={`manual-venue-name-${componentInstanceId}`}
                 className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5"
               >
-                Venue / Location Name <span className="text-rose-600">*</span>
+                Venue Name <span className="text-rose-600">*</span>
               </label>
               <input
                 id={`manual-venue-name-${componentInstanceId}`}
                 type="text"
-                placeholder="e.g. The Baobab Amphitheatre"
+                placeholder="e.g. The Brooklyn Mirage"
                 value={value.venueName}
                 onChange={(e) => handleManualChange('venueName', e.target.value)}
                 disabled={disabled}
@@ -632,56 +691,60 @@ export const LocationAutocompleteInput: React.FC<LocationAutocompleteInputProps>
                 htmlFor={`manual-city-${componentInstanceId}`}
                 className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5"
               >
-                City / Destination <span className="text-rose-600">*</span>
+                City <span className="text-rose-600">*</span>
               </label>
               <input
                 id={`manual-city-${componentInstanceId}`}
                 type="text"
-                placeholder="Nairobi, Kilifi, Mombasa..."
+                placeholder="e.g. Brooklyn, NY"
                 value={value.city}
                 onChange={(e) => handleManualChange('city', e.target.value)}
                 disabled={disabled}
                 className="w-full px-3.5 py-2.5 rounded-lg bg-white border border-stone-300 text-stone-900 placeholder-stone-400 text-sm focus:outline-none focus:border-stone-900 transition-colors shadow-2xs"
               />
-              <div className="flex flex-wrap gap-1.5 mt-2">
-                {KENYA_CITIES.map((c) => (
-                  <button
-                    key={c}
-                    type="button"
-                    onClick={() => handleManualChange('city', c)}
-                    disabled={disabled}
-                    className={`px-2.5 py-1 rounded text-[10px] font-mono transition-colors ${value.city === c
-                        ? 'bg-stone-900 text-white font-bold'
-                        : 'bg-white border border-stone-200 hover:bg-stone-100 text-stone-600'
-                      }`}
-                  >
-                    {c}
-                  </button>
-                ))}
-              </div>
             </div>
           </div>
 
-          <div>
-            <label
-              htmlFor={`manual-venue-address-${componentInstanceId}`}
-              className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5"
-            >
-              Physical Address & Landmarks
-            </label>
-            <input
-              id={`manual-venue-address-${componentInstanceId}`}
-              type="text"
-              placeholder="e.g. Bofa Beach Road, Kilifi Creek Crossing"
-              value={value.venueAddress}
-              onChange={(e) => handleManualChange('venueAddress', e.target.value)}
-              disabled={disabled}
-              className="w-full px-3.5 py-2.5 rounded-lg bg-white border border-stone-300 text-stone-900 placeholder-stone-400 text-sm focus:outline-none focus:border-stone-900 transition-colors shadow-2xs"
-            />
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <div className="sm:col-span-2">
+              <label
+                htmlFor={`manual-venue-address-${componentInstanceId}`}
+                className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5"
+              >
+                Physical Address
+              </label>
+              <input
+                id={`manual-venue-address-${componentInstanceId}`}
+                type="text"
+                placeholder="Street address, building or landmark"
+                value={value.venueAddress}
+                onChange={(e) => handleManualChange('venueAddress', e.target.value)}
+                disabled={disabled}
+                className="w-full px-3.5 py-2.5 rounded-lg bg-white border border-stone-300 text-stone-900 placeholder-stone-400 text-sm focus:outline-none focus:border-stone-900 transition-colors shadow-2xs"
+              />
+            </div>
+
+            <div>
+              <label
+                htmlFor={`manual-country-${componentInstanceId}`}
+                className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5"
+              >
+                Country
+              </label>
+              <input
+                id={`manual-country-${componentInstanceId}`}
+                type="text"
+                placeholder="e.g. United States"
+                value={value.country || 'United States'}
+                onChange={(e) => handleManualChange('country', e.target.value)}
+                disabled={disabled}
+                className="w-full px-3.5 py-2.5 rounded-lg bg-white border border-stone-300 text-stone-900 placeholder-stone-400 text-sm focus:outline-none focus:border-stone-900 transition-colors shadow-2xs"
+              />
+            </div>
           </div>
 
           <div className="text-[11px] font-mono text-stone-400 pt-1">
-            In manual mode, location coordinates and Google Place ID are set to null.
+            In manual mode, location coordinates and Google Place ID are saved as null.
           </div>
         </div>
       )}

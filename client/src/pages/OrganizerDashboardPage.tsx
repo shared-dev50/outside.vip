@@ -256,7 +256,7 @@ export const OrganizerDashboardPage: React.FC = () => {
               Event Management & Inventory
             </h1>
             <p className="text-xs sm:text-sm text-stone-600 mt-1 max-w-2xl font-sans">
-              Create and manage event drafts, configure multi-tier ticket capacity, and monitor live sales performance across Kenya.
+              Create and manage event drafts, configure multi-tier ticket capacity, and monitor live sales performance across your events.
             </p>
           </div>
 

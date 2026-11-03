@@ -26,6 +26,7 @@ const envSchema = z.object({
   CLOUDINARY_API_SECRET: z.string().default(''),
   GOOGLE_PLACES_API_KEY: z.string().default(''),
   GOOGLE_MAPS_API_KEY: z.string().default(''),
+  DEFAULT_PLACES_COUNTRY_CODE: z.string().default('US'),
 });
 
 const parsed = envSchema.safeParse(process.env);

@@ -1,19 +1,78 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import request from 'supertest';
 import { app } from '../app.js';
 import { prisma } from '../db/prisma.js';
+import { env } from '../config/env.js';
 import {
   verifyAndNormalizeLocation,
   getAutocompleteSuggestions,
   getPlaceDetails,
   isGooglePlacesConfigured,
 } from '../modules/places/places.service.js';
+import { inferTimezoneFromLocation } from '../utils/timezone.js';
 
 describe('Google Places API & Location Selection Module', () => {
+  const originalFetch = globalThis.fetch;
+
+  beforeEach(() => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url: any, init?: any) => {
+      const urlStr = String(url);
+      if (urlStr.includes('places.googleapis.com')) {
+        if (urlStr.includes('places:autocomplete')) {
+          return new Response(
+            JSON.stringify({
+              suggestions: [
+                {
+                  placePrediction: {
+                    placeId: 'ChIJg_k_places_test_123',
+                    text: { text: 'The Alchemist, Parklands Road, Nairobi, Kenya' },
+                    structuredFormat: {
+                      mainText: { text: 'The Alchemist' },
+                      secondaryText: { text: 'Parklands Road, Nairobi, Kenya' },
+                    },
+                  },
+                },
+              ],
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+        if (urlStr.includes('places/')) {
+          const isRooftop = urlStr.includes('rooftop');
+          return new Response(
+            JSON.stringify({
+              displayName: { text: isRooftop ? 'K1 Klub House Rooftop' : 'The Alchemist Bar' },
+              formattedAddress: isRooftop ? 'Ojijo Road, Parklands' : 'Parklands Road, Westlands, Nairobi, Kenya',
+              location: isRooftop ? { latitude: -1.2655, longitude: 36.8122 } : { latitude: -1.2618, longitude: 36.8045 },
+              addressComponents: [
+                { longText: 'Nairobi', types: ['locality'] },
+                { longText: 'Kenya', shortText: 'KE', types: ['country'] },
+              ],
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+      }
+      return originalFetch(url, init);
+    });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   describe('1. Places Service & Verification', () => {
     it('returns configured=false when no API key is set', () => {
-      // In current test env, GOOGLE_PLACES_API_KEY is not set
-      expect(isGooglePlacesConfigured()).toBe(false);
+      const savedKey = env.GOOGLE_PLACES_API_KEY;
+      const savedMapsKey = env.GOOGLE_MAPS_API_KEY;
+      try {
+        (env as any).GOOGLE_PLACES_API_KEY = '';
+        (env as any).GOOGLE_MAPS_API_KEY = '';
+        expect(isGooglePlacesConfigured()).toBe(false);
+      } finally {
+        (env as any).GOOGLE_PLACES_API_KEY = savedKey;
+        (env as any).GOOGLE_MAPS_API_KEY = savedMapsKey;
+      }
     });
 
     it('enforces null placeId, latitude, and longitude in manual mode (clearing stale coordinates)', async () => {
@@ -37,57 +96,95 @@ describe('Google Places API & Location Selection Module', () => {
       expect(normalized.longitude).toBeNull();
     });
 
-    it('validates coordinate bounds when placeId is provided without Google API configured', async () => {
-      // Valid coordinates
-      const valid = await verifyAndNormalizeLocation({
-        venueName: 'The Alchemist',
-        venueAddress: 'Parklands Rd',
-        city: 'Nairobi',
-        country: 'Kenya',
-        latitude: -1.2618,
-        longitude: 36.8045,
-        placeId: 'ChIJg_k_places_test_123',
+    it('applies US defaults in manual mode when country is not explicitly provided', async () => {
+      const normalized = await verifyAndNormalizeLocation({
+        venueName: 'The Brooklyn Mirage',
+        venueAddress: '1020 Grand St',
+        city: 'Brooklyn, NY',
+        placeId: null,
       });
-      expect(valid.placeId).toBe('ChIJg_k_places_test_123');
-      expect(valid.latitude).toBe(-1.2618);
-      expect(valid.longitude).toBe(36.8045);
 
-      // Invalid latitude (> 90)
-      await expect(
-        verifyAndNormalizeLocation({
-          venueName: 'Invalid Lat',
-          latitude: 95.0,
-          longitude: 36.0,
-          placeId: 'ChIJ_invalid_lat',
-        })
-      ).rejects.toThrow('Latitude must be a valid number between -90 and 90');
+      expect(normalized.venueName).toBe('The Brooklyn Mirage');
+      expect(normalized.city).toBe('Brooklyn, NY');
+      expect(normalized.country).toBe('United States');
+      expect(normalized.placeId).toBeNull();
+      expect(normalized.latitude).toBeNull();
+      expect(normalized.longitude).toBeNull();
+    });
 
-      // Invalid longitude (> 180)
-      await expect(
-        verifyAndNormalizeLocation({
-          venueName: 'Invalid Lng',
-          latitude: -1.0,
-          longitude: 195.0,
-          placeId: 'ChIJ_invalid_lng',
-        })
-      ).rejects.toThrow('Longitude must be a valid number between -180 and 180');
+    it('validates coordinate bounds when placeId is provided without Google API configured', async () => {
+      const savedKey = env.GOOGLE_PLACES_API_KEY;
+      const savedMapsKey = env.GOOGLE_MAPS_API_KEY;
+      (env as any).GOOGLE_PLACES_API_KEY = '';
+      (env as any).GOOGLE_MAPS_API_KEY = '';
+
+      try {
+        // Valid coordinates
+        const valid = await verifyAndNormalizeLocation({
+          venueName: 'The Alchemist',
+          venueAddress: 'Parklands Rd',
+          city: 'Nairobi',
+          country: 'Kenya',
+          latitude: -1.2618,
+          longitude: 36.8045,
+          placeId: 'ChIJg_k_places_test_123',
+        });
+        expect(valid.placeId).toBe('ChIJg_k_places_test_123');
+        expect(valid.latitude).toBe(-1.2618);
+        expect(valid.longitude).toBe(36.8045);
+
+        // Invalid latitude (> 90)
+        await expect(
+          verifyAndNormalizeLocation({
+            venueName: 'Invalid Lat',
+            latitude: 95.0,
+            longitude: 36.0,
+            placeId: 'ChIJ_invalid_lat',
+          })
+        ).rejects.toThrow('Latitude must be a valid number between -90 and 90');
+
+        // Invalid longitude (> 180)
+        await expect(
+          verifyAndNormalizeLocation({
+            venueName: 'Invalid Lng',
+            latitude: -1.0,
+            longitude: 195.0,
+            placeId: 'ChIJ_invalid_lng',
+          })
+        ).rejects.toThrow('Longitude must be a valid number between -180 and 180');
+      } finally {
+        (env as any).GOOGLE_PLACES_API_KEY = savedKey;
+        (env as any).GOOGLE_MAPS_API_KEY = savedMapsKey;
+      }
     });
 
     it('handles autocomplete gracefully when unconfigured', async () => {
-      const result = await getAutocompleteSuggestions({
-        input: 'Alchemist',
-      });
-      expect(result.configured).toBe(false);
-      expect(result.suggestions).toEqual([]);
+      const savedKey = env.GOOGLE_PLACES_API_KEY;
+      const savedMapsKey = env.GOOGLE_MAPS_API_KEY;
+      (env as any).GOOGLE_PLACES_API_KEY = '';
+      (env as any).GOOGLE_MAPS_API_KEY = '';
+
+      try {
+        const result = await getAutocompleteSuggestions({
+          input: 'Alchemist',
+        });
+        expect(result.configured).toBe(false);
+        expect(result.suggestions).toEqual([]);
+      } finally {
+        (env as any).GOOGLE_PLACES_API_KEY = savedKey;
+        (env as any).GOOGLE_MAPS_API_KEY = savedMapsKey;
+      }
     });
   });
 
   describe('2. HTTP Endpoints (/api/places)', () => {
-    it('GET /api/places/status returns configured status', async () => {
+    it('GET /api/places/status returns configured status and defaultCountryCode', async () => {
       const res = await request(app).get('/api/places/status');
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
       expect(res.body.data).toHaveProperty('configured');
+      expect(res.body.data).toHaveProperty('defaultCountryCode');
+      expect(res.body.data.defaultCountryCode).toBe('US');
     });
 
     it('GET /api/places/autocomplete returns suggestions payload structure', async () => {
@@ -335,6 +432,27 @@ describe('Google Places API & Location Selection Module', () => {
 
       // Clean up
       await prisma.event.delete({ where: { id: legacy.id } });
+    });
+  });
+
+  describe('4. Timezone Resolution & Location Inference', () => {
+    it('infers standard IANA timezone correctly from coordinates or US state', () => {
+      // US States
+      expect(inferTimezoneFromLocation({ stateCode: 'NY' })).toBe('America/New_York');
+      expect(inferTimezoneFromLocation({ stateCode: 'CA' })).toBe('America/Los_Angeles');
+      expect(inferTimezoneFromLocation({ stateCode: 'IL' })).toBe('America/Chicago');
+      expect(inferTimezoneFromLocation({ stateCode: 'CO' })).toBe('America/Denver');
+      expect(inferTimezoneFromLocation({ stateCode: 'AZ' })).toBe('America/Phoenix');
+      expect(inferTimezoneFromLocation({ stateCode: 'HI' })).toBe('Pacific/Honolulu');
+      expect(inferTimezoneFromLocation({ stateCode: 'AK' })).toBe('America/Anchorage');
+
+      // East Africa / Kenya
+      expect(inferTimezoneFromLocation({ country: 'Kenya' })).toBe('Africa/Nairobi');
+      expect(inferTimezoneFromLocation({ countryCode: 'KE' })).toBe('Africa/Nairobi');
+
+      // US Coordinates
+      expect(inferTimezoneFromLocation({ latitude: 40.7128, longitude: -74.006 })).toBe('America/New_York');
+      expect(inferTimezoneFromLocation({ latitude: 34.0522, longitude: -118.2437 })).toBe('America/Los_Angeles');
     });
   });
 });

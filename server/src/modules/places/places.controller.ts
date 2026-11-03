@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
+import { env } from '../../config/env.js';
 import {
   getAutocompleteSuggestions,
   getPlaceDetails,
@@ -16,6 +17,7 @@ export async function checkPlacesStatus(
       success: true,
       data: {
         configured: isGooglePlacesConfigured(),
+        defaultCountryCode: (env.DEFAULT_PLACES_COUNTRY_CODE || 'US').trim().toUpperCase(),
       },
     });
   } catch (error) {

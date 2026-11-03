@@ -395,7 +395,7 @@ const PaymentContent: React.FC<PaymentContentProps> = ({
                   setPhone(val);
                   onUpdateAttendee?.({ name, email, phone: val });
                 }}
-                placeholder="e.g. +254 700 000 000"
+                placeholder="e.g. (555) 000-0000"
                 className="w-full px-3 py-2 rounded-lg bg-gray-50/60 border border-gray-200 text-gray-900 text-xs focus:bg-white focus:outline-none focus:border-gray-900 transition-colors disabled:opacity-60"
               />
             </div>

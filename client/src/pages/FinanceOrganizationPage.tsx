@@ -125,13 +125,13 @@ export const FinanceOrganizationPage: React.FC = () => {
     orgTypeOther: '',
     registeredName: '',
     registrationNumber: '',
-    country: 'Kenya',
+    country: 'United States',
     address: '',
     contactPersonName: '',
     contactEmail: '',
     accountHolderName: '',
     bankName: '',
-    bankCountry: 'Kenya',
+    bankCountry: 'United States',
     accountCurrency: 'USD',
   });
   const [isSavingOrg, setIsSavingOrg] = useState<boolean>(false);

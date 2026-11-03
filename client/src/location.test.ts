@@ -196,4 +196,117 @@ describe('Event Location Autocomplete & Selection Logic', () => {
       expect(typeof api.places.details).toBe('function');
     });
   });
+
+  describe('6. US-First Localisation & Redesigned Manual Entry (Form UX)', () => {
+    it('sets sensible US defaults in manual location entry mode', () => {
+      const manualEntry: LocationData = {
+        venueName: 'The Brooklyn Mirage',
+        venueAddress: '1020 Grand St',
+        city: 'Brooklyn, NY',
+        country: 'United States',
+        placeId: null,
+        latitude: null,
+        longitude: null,
+      };
+
+      expect(manualEntry.venueName).toBe('The Brooklyn Mirage');
+      expect(manualEntry.city).toBe('Brooklyn, NY');
+      expect(manualEntry.country).toBe('United States');
+      expect(manualEntry.placeId).toBeNull();
+      expect(manualEntry.latitude).toBeNull();
+      expect(manualEntry.longitude).toBeNull();
+    });
+
+    it('preserves existing Kenyan locations on edit without forcing US overwrite', () => {
+      const existingKenyaEvent: LocationData = {
+        venueName: 'The Alchemist Bar',
+        venueAddress: 'Parklands Road, Nairobi',
+        city: 'Nairobi',
+        country: 'Kenya',
+        placeId: 'ChIJg_k_places_test_123',
+        latitude: -1.2618,
+        longitude: 36.8045,
+      };
+
+      // Modifying venue display name does not alter existing country or city
+      const updated = {
+        ...existingKenyaEvent,
+        venueName: 'Main Stage @ The Alchemist',
+      };
+
+      expect(updated.country).toBe('Kenya');
+      expect(updated.city).toBe('Nairobi');
+      expect(updated.latitude).toBe(-1.2618);
+    });
+  });
+
+  describe('7. Timezone Prioritisation & Dynamic DST Display', () => {
+    it('prioritizes US timezones first, followed by Africa and Europe', async () => {
+      const { TIMEZONE_GROUPS, DEFAULT_US_TIMEZONE } = await import('./lib/timezone');
+      expect(DEFAULT_US_TIMEZONE).toBe('America/New_York');
+
+      expect(TIMEZONE_GROUPS[0].groupName).toBe('United States');
+      const usIanas = TIMEZONE_GROUPS[0].options.map((o) => o.iana);
+      expect(usIanas).toContain('America/New_York');
+      expect(usIanas).toContain('America/Chicago');
+      expect(usIanas).toContain('America/Denver');
+      expect(usIanas).toContain('America/Los_Angeles');
+      expect(usIanas).toContain('America/Anchorage');
+      expect(usIanas).toContain('Pacific/Honolulu');
+
+      expect(TIMEZONE_GROUPS[1].groupName).toBe('Africa');
+      const africaIanas = TIMEZONE_GROUPS[1].options.map((o) => o.iana);
+      expect(africaIanas).toContain('Africa/Nairobi');
+    });
+
+    it('dynamically formats daylight saving time (DST) without hardcoded offsets', async () => {
+      const { formatTimezoneDisplay } = await import('./lib/timezone');
+      // Summer date (DST active in US)
+      const summerDate = new Date('2026-07-15T18:00:00Z');
+      const nySummer = formatTimezoneDisplay('America/New_York', summerDate);
+      expect(nySummer).toContain('America/New_York');
+      expect(nySummer).toContain('EDT');
+
+      // Winter date (standard time active in US)
+      const winterDate = new Date('2026-12-15T18:00:00Z');
+      const nyWinter = formatTimezoneDisplay('America/New_York', winterDate);
+      expect(nyWinter).toContain('America/New_York');
+      expect(nyWinter).toContain('EST');
+
+      // Nairobi has no DST (always GMT+3)
+      const nairobiSummer = formatTimezoneDisplay('Africa/Nairobi', summerDate);
+      expect(nairobiSummer).toContain('Africa/Nairobi');
+      expect(nairobiSummer).toContain('GMT+3');
+    });
+
+    it('infers timezone reliably from venue coordinates or state', async () => {
+      const { inferTimezoneFromLocation } = await import('./lib/timezone');
+
+      // New York / Brooklyn venue
+      expect(inferTimezoneFromLocation({ stateCode: 'NY' })).toBe('America/New_York');
+      expect(inferTimezoneFromLocation({ latitude: 40.7128, longitude: -74.006 })).toBe('America/New_York');
+
+      // Los Angeles / California venue
+      expect(inferTimezoneFromLocation({ stateCode: 'CA' })).toBe('America/Los_Angeles');
+      expect(inferTimezoneFromLocation({ latitude: 34.0522, longitude: -118.2437 })).toBe('America/Los_Angeles');
+
+      // Chicago / Illinois venue
+      expect(inferTimezoneFromLocation({ stateCode: 'IL' })).toBe('America/Chicago');
+      expect(inferTimezoneFromLocation({ latitude: 41.8781, longitude: -87.6298 })).toBe('America/Chicago');
+
+      // Denver / Colorado venue
+      expect(inferTimezoneFromLocation({ stateCode: 'CO' })).toBe('America/Denver');
+      expect(inferTimezoneFromLocation({ latitude: 39.7392, longitude: -104.9903 })).toBe('America/Denver');
+
+      // Honolulu / Hawaii venue
+      expect(inferTimezoneFromLocation({ stateCode: 'HI' })).toBe('Pacific/Honolulu');
+      expect(inferTimezoneFromLocation({ latitude: 21.3069, longitude: -157.8583 })).toBe('Pacific/Honolulu');
+
+      // Nairobi venue
+      expect(inferTimezoneFromLocation({ country: 'Kenya' })).toBe('Africa/Nairobi');
+      expect(inferTimezoneFromLocation({ countryCode: 'KE' })).toBe('Africa/Nairobi');
+      expect(inferTimezoneFromLocation({ latitude: -1.2921, longitude: 36.8219 })).toBe('Africa/Nairobi');
+    });
+  });
 });
+

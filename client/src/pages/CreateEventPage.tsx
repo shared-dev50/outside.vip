@@ -48,6 +48,7 @@ import { ImageCropModal } from '../components/events/ImageCropModal';
 import { UploadProgressCard, UploadProgressInfo } from '../components/events/UploadProgressCard';
 import { LocationAutocompleteInput } from '../components/events/LocationAutocompleteInput';
 import { validateImageFile } from '../lib/imageCrop';
+import { TIMEZONE_GROUPS, formatTimezoneDisplay, DEFAULT_US_TIMEZONE } from '../lib/timezone';
 
 export type WizardStep = 1 | 2 | 3 | 4;
 
@@ -71,7 +72,7 @@ interface FormTicketTier {
 
 const PRESET_COVERS = [
   {
-    name: 'Baobab Stage',
+    name: 'Open Air Stage',
     url: 'https://images.unsplash.com/photo-1514525253161-7a46d19cd819?auto=format&fit=crop&w=1600&q=85',
   },
   {
@@ -187,7 +188,8 @@ export const CreateEventPage: React.FC = () => {
 
   const [startAt, setStartAt] = useState('2026-11-20T20:00');
   const [endAt, setEndAt] = useState('2026-11-21T04:00');
-  const [timezone, setTimezone] = useState('Africa/Nairobi');
+  const [timezone, setTimezone] = useState(DEFAULT_US_TIMEZONE);
+  const [isTimezoneManuallySelected, setIsTimezoneManuallySelected] = useState(false);
 
   const [isRecurring, setIsRecurring] = useState(false);
   const [recurrenceFrequency, setRecurrenceFrequency] = useState<RecurrenceFrequency>('WEEKLY');
@@ -200,8 +202,8 @@ export const CreateEventPage: React.FC = () => {
 
   const [venueName, setVenueName] = useState('');
   const [venueAddress, setVenueAddress] = useState('');
-  const [city, setCity] = useState('Nairobi');
-  const [country, setCountry] = useState('Kenya');
+  const [city, setCity] = useState('');
+  const [country, setCountry] = useState('United States');
   const [latitude, setLatitude] = useState<number | null>(null);
   const [longitude, setLongitude] = useState<number | null>(null);
   const [placeId, setPlaceId] = useState<string | null>(null);
@@ -272,11 +274,12 @@ export const CreateEventPage: React.FC = () => {
       setCoverImagePublicId(evt.coverImagePublicId || null);
       setStartAt(toInputValue(evt.startAt));
       setEndAt(toInputValue(evt.endAt));
-      setTimezone(evt.timezone || 'Africa/Nairobi');
+      setTimezone(evt.timezone || DEFAULT_US_TIMEZONE);
+      setIsTimezoneManuallySelected(true);
       setVenueName(evt.venueName || '');
       setVenueAddress(evt.venueAddress || '');
-      setCity(evt.city || 'Nairobi');
-      setCountry(evt.country || 'Kenya');
+      setCity(evt.city || '');
+      setCountry(evt.country || 'United States');
       setLatitude(evt.latitude ?? null);
       setLongitude(evt.longitude ?? null);
       setPlaceId(evt.placeId ?? null);
@@ -941,7 +944,7 @@ export const CreateEventPage: React.FC = () => {
       byWeekday: recurrenceFrequency === 'WEEKLY' ? (recurrenceWeekdays.length ? recurrenceWeekdays : [new Date(startAt).getDay()]) : undefined,
       until: recurrenceEndType === 'until' ? toIsoValue(recurrenceEndDate) : undefined,
       count: recurrenceEndType === 'count' ? Math.max(1, Number(recurrenceCount) || 1) : undefined,
-      timezone: timezone || 'Africa/Nairobi',
+      timezone: timezone || DEFAULT_US_TIMEZONE,
     } : undefined;
 
     return {
@@ -952,14 +955,14 @@ export const CreateEventPage: React.FC = () => {
       coverImagePublicId: coverImagePublicId || null,
       venueName: venueName.trim() || '',
       venueAddress: venueAddress.trim() || '',
-      city: city.trim() || 'Nairobi',
-      country: country.trim() || 'Kenya',
+      city: city.trim() || '',
+      country: country.trim() || 'United States',
       latitude: latitude ?? null,
       longitude: longitude ?? null,
       placeId: placeId ?? null,
       startAt: toIsoValue(startAt) || new Date().toISOString(),
       endAt: toIsoValue(endAt) || new Date(Date.now() + 86400000).toISOString(),
-      timezone,
+      timezone: timezone || DEFAULT_US_TIMEZONE,
       ageRestriction: ageRestriction || '18+',
       dressCode: dressCode.trim() || null,
       status: statusOverride || currentStatus,
@@ -1511,7 +1514,7 @@ export const CreateEventPage: React.FC = () => {
                     </label>
                     <input
                       type="text"
-                      placeholder="e.g. SOL FEST: Under The Baobab Tree"
+                      placeholder="e.g. AFTERLIFE: Mirage Season Opening"
                       value={title}
                       onChange={(e) => {
                         setTitle(e.target.value);
@@ -1979,22 +1982,37 @@ export const CreateEventPage: React.FC = () => {
                   </div>
 
                   <div>
-                    <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5">
-                      Event Timezone
-                    </label>
+                    <div className="flex items-center justify-between mb-1.5">
+                      <label className="block text-xs font-mono uppercase text-stone-700 font-bold">
+                        Event Timezone
+                      </label>
+                      <span className="text-[11px] font-mono text-stone-400">
+                        Auto-detected from venue or customize
+                      </span>
+                    </div>
                     <select
                       value={timezone}
                       onChange={(e) => {
                         setTimezone(e.target.value);
+                        setIsTimezoneManuallySelected(true);
                         setHasUnsavedChanges(true);
                       }}
                       className="w-full px-3.5 py-2.5 rounded-lg bg-[#FAF8F5] border border-stone-300 text-stone-900 text-sm focus:outline-none focus:border-stone-900 focus:bg-white transition-colors cursor-pointer"
                     >
-                      <option value="Africa/Nairobi">Africa/Nairobi (EAT, UTC+3)</option>
-                      <option value="Africa/Cairo">Africa/Cairo (EET, UTC+2)</option>
-                      <option value="Africa/Johannesburg">Africa/Johannesburg (SAST, UTC+2)</option>
-                      <option value="Europe/London">Europe/London (GMT/BST)</option>
-                      <option value="America/New_York">America/New_York (EST/EDT)</option>
+                      {TIMEZONE_GROUPS.map((group) => (
+                        <optgroup key={group.groupName} label={group.groupName}>
+                          {group.options.map((opt) => (
+                            <option key={opt.iana} value={opt.iana}>
+                              {formatTimezoneDisplay(opt.iana, new Date(startAt || Date.now()))}
+                            </option>
+                          ))}
+                        </optgroup>
+                      ))}
+                      {!TIMEZONE_GROUPS.some((g) => g.options.some((o) => o.iana === timezone)) && (
+                        <optgroup label="Custom / Other">
+                          <option value={timezone}>{timezone}</option>
+                        </optgroup>
+                      )}
                     </select>
                   </div>
 
@@ -2233,6 +2251,11 @@ export const CreateEventPage: React.FC = () => {
                         latitude,
                         longitude,
                         placeId,
+                      }}
+                      onTimezoneSuggested={(suggestedTz) => {
+                        if (!isTimezoneManuallySelected && suggestedTz) {
+                          setTimezone(suggestedTz);
+                        }
                       }}
                       onChange={(loc) => {
                         setVenueName(loc.venueName);
@@ -2522,7 +2545,7 @@ export const CreateEventPage: React.FC = () => {
                       </label>
                       <input
                         type="text"
-                        placeholder="e.g. Minimalist Black / Savannah Chic"
+                        placeholder="e.g. Minimalist Black / Cocktail Attire"
                         value={dressCode}
                         onChange={(e) => {
                           setDressCode(e.target.value);
@@ -2823,7 +2846,7 @@ export const CreateEventPage: React.FC = () => {
                           </label>
                           <input
                             type="text"
-                            placeholder="e.g. DJ Maphorisa, Red Bull, Dr. Jane Doe"
+                            placeholder="e.g. John Summit, Red Bull, Dr. Jane Doe"
                             value={newFeatureName}
                             onChange={(e) => setNewFeatureName(e.target.value)}
                             className="w-full px-3 py-2 rounded-lg bg-[#FAF8F5] border border-stone-300 text-stone-900 text-xs focus:outline-none focus:border-stone-900 font-sans"
@@ -2898,7 +2921,7 @@ export const CreateEventPage: React.FC = () => {
                         </label>
                         <input
                           type="text"
-                          placeholder="e.g. Amapiano Pioneer, Official Energy Drink Partner, Keynote on AI"
+                          placeholder="e.g. Headline Performer, Official Energy Drink Partner, Keynote Speaker"
                           value={newFeatureDesc}
                           onChange={(e) => setNewFeatureDesc(e.target.value)}
                           className="w-full px-3 py-2 rounded-lg bg-[#FAF8F5] border border-stone-300 text-stone-900 text-xs focus:outline-none focus:border-stone-900 font-sans"
@@ -3044,7 +3067,7 @@ export const CreateEventPage: React.FC = () => {
                         </h3>
                         <div className="text-xs text-stone-500 flex items-center justify-between pt-1">
                           <span className="truncate max-w-[150px] font-mono text-[11px]">
-                            {venueName || city || 'Kenya'}
+                            {venueName || city || country || 'United States'}
                           </span>
                           <span className="font-bold text-stone-900 font-mono text-xs">
                             From ${Math.min(...ticketTiers.map((t) => Number(t.price) || 0))}

@@ -51,7 +51,7 @@ interface TicketPdfOrder {
  * Format event date range matching the ticket reference:
  * e.g. "Sat, Nov 21, 2026, 10:00 PM – Sun, Nov 22, 2026, 2:00 AM"
  */
-function formatEventDateRange(start: Date | string, end?: Date | string | null, timezone = 'Africa/Nairobi'): string {
+function formatEventDateRange(start: Date | string, end?: Date | string | null, timezone = 'America/New_York'): string {
   try {
     const startDate = new Date(start);
     const startStr = new Intl.DateTimeFormat('en-US', {
@@ -61,7 +61,7 @@ function formatEventDateRange(start: Date | string, end?: Date | string | null, 
       year: 'numeric',
       hour: 'numeric',
       minute: '2-digit',
-      timeZone: timezone || 'Africa/Nairobi',
+      timeZone: timezone || 'America/New_York',
     }).format(startDate);
 
     if (!end) return startStr;
@@ -74,7 +74,7 @@ function formatEventDateRange(start: Date | string, end?: Date | string | null, 
       year: 'numeric',
       hour: 'numeric',
       minute: '2-digit',
-      timeZone: timezone || 'Africa/Nairobi',
+      timeZone: timezone || 'America/New_York',
     }).format(endDate);
 
     return `${startStr} – ${endStr}`;
@@ -248,7 +248,7 @@ export async function generateTicketsPdf(
           order.event.city,
           order.event.country,
         ].filter(Boolean);
-        const addressText = addressParts.join(', ') || 'Nairobi, Kenya';
+        const addressText = addressParts.join(', ') || 'Venue Location';
 
         doc.font('Helvetica').fontSize(8.5).fillColor('#1F2937')
            .text(addressText, col2X, rightHeaderY, { width: col2Width });

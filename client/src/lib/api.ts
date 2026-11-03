@@ -666,6 +666,7 @@ export const api = {
     status: () =>
       request<{
         configured: boolean;
+        defaultCountryCode?: string;
       }>('/places/status'),
     autocomplete: (params: { input: string; sessionToken?: string; countryCode?: string }) => {
       const searchParams = new URLSearchParams();
@@ -696,7 +697,10 @@ export const api = {
           latitude: number | null;
           longitude: number | null;
           city: string;
+          stateCode?: string | null;
           country: string;
+          countryCode?: string | null;
+          suggestedTimezone?: string | null;
         } | null;
       }>(`/places/details/${encodeURIComponent(placeId)}${query}`);
     },
