@@ -3,6 +3,7 @@ import { useParams, Link } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../lib/api';
 import { TicketTier } from '../types';
+import { calculateDisplayPriceFromGross, calculateCheckoutFeeBreakdown } from '../lib/fees';
 import {
   Calendar,
   MapPin,
@@ -128,10 +129,14 @@ export const EventPreviewPage: React.FC = () => {
 
   const isPublished = event.status === 'PUBLISHED';
   const totalTickets = Object.values(selectedQuantities).reduce((a, b) => a + b, 0);
-  const totalInCents = event.ticketTiers.reduce((acc, tier) => {
-    const qty = selectedQuantities[tier.id] || 0;
-    return acc + qty * tier.priceInCents;
-  }, 0);
+  const ticketSubtotalInCents = event
+    ? event.ticketTiers.reduce((acc, tier) => {
+        const qty = selectedQuantities[tier.id] || 0;
+        return acc + qty * tier.priceInCents;
+      }, 0)
+    : 0;
+  const previewFees = calculateCheckoutFeeBreakdown(ticketSubtotalInCents, totalTickets);
+  const totalInCents = previewFees.buyerTotalInCents;
 
   const mapSearchUrl = event.placeId
     ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
@@ -409,9 +414,22 @@ export const EventPreviewPage: React.FC = () => {
                                 {tier.description}
                               </p>
                             )}
+                            {(tier.salesStartAt || tier.salesEndAt) && (
+                              <div className="text-[10px] font-mono text-amber-800 bg-amber-50 border border-amber-200/60 rounded px-1.5 py-0.5 mt-1 inline-block">
+                                Sales: {tier.salesStartAt ? new Date(tier.salesStartAt).toLocaleDateString() : 'Now'} – {tier.salesEndAt ? new Date(tier.salesEndAt).toLocaleDateString() : 'End'}
+                              </div>
+                            )}
+                            {(tier.validityStartAt || tier.validityEndAt) && (
+                              <div className="text-[10px] font-mono text-indigo-800 bg-indigo-50 border border-indigo-200/60 rounded px-1.5 py-0.5 mt-1 ml-1.5 inline-block">
+                                Valid: {tier.validityStartAt ? new Date(tier.validityStartAt).toLocaleDateString() : 'Doors'} – {tier.validityEndAt ? new Date(tier.validityEndAt).toLocaleDateString() : 'Close'}
+                              </div>
+                            )}
                             <div className="pt-1 flex items-center gap-3 text-xs">
                               <span className="font-semibold text-gray-900">
-                                {formatPrice(tier.priceInCents, tier.currency)}
+                                {formatPrice(
+                                  tier.displayPriceInCents ?? calculateDisplayPriceFromGross(tier.priceInCents),
+                                  tier.currency
+                                )}
                               </span>
                               <span className="text-[11px] font-mono text-gray-400">
                                 Capacity: {tier.totalCapacity}
@@ -448,11 +466,34 @@ export const EventPreviewPage: React.FC = () => {
               )}
 
               {totalTickets > 0 && (
-                <div className="pt-3 border-t border-gray-100 space-y-3 text-xs">
-                  <div className="flex items-center justify-between text-sm font-bold text-gray-900">
-                    <span>Selected ({totalTickets} ticket{totalTickets > 1 ? 's' : ''})</span>
-                    <span className="text-base">{formatPrice(totalInCents, event.currency)}</span>
+                <div className="pt-3 border-t border-gray-100 space-y-2 text-xs">
+                  <div className="flex justify-between text-gray-600">
+                    <span>
+                      Ticket price{totalTickets > 1 ? ` (${totalTickets} tickets)` : ''}
+                    </span>
+                    <span className="font-semibold text-gray-900 font-mono">
+                      {previewFees.ticketSubtotalInCents === 0
+                        ? 'Free'
+                        : formatPrice(previewFees.ticketSubtotalInCents, event.currency)}
+                    </span>
                   </div>
+
+                  {previewFees.customerServiceFeeInCents > 0 && (
+                    <div className="flex justify-between text-gray-600">
+                      <span>Service fee</span>
+                      <span className="font-semibold text-gray-900 font-mono">
+                        {formatPrice(previewFees.customerServiceFeeInCents, event.currency)}
+                      </span>
+                    </div>
+                  )}
+
+                  <div className="pt-2 border-t border-gray-200 flex items-center justify-between text-sm font-bold text-gray-900">
+                    <span>Total</span>
+                    <span className="text-base font-mono text-gray-900">
+                      {totalInCents === 0 ? 'Free' : formatPrice(totalInCents, event.currency)}
+                    </span>
+                  </div>
+
                   <div className="p-2.5 rounded-lg bg-gray-100 text-gray-600 text-[11px] text-center font-mono">
                     Attendee Checkout Disabled in Preview Mode
                   </div>

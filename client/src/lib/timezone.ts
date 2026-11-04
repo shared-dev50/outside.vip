@@ -229,3 +229,92 @@ export function inferTimezoneFromLocation(params: {
 
   return null;
 }
+
+/**
+ * Converts a datetime-local input string ("YYYY-MM-DDTHH:mm") interpreted in an IANA timezone
+ * to an exact UTC ISO 8601 string, correctly adjusting for daylight saving time (DST).
+ */
+export function toIsoValueInTimezone(localString?: string | null, timezone?: string | null): string | null {
+  if (!localString || !localString.trim()) return null;
+  const match = localString.trim().match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
+  if (!match) {
+    const d = new Date(localString);
+    return isNaN(d.getTime()) ? null : d.toISOString();
+  }
+  const [, yearStr, monthStr, dayStr, hourStr, minStr] = match;
+  const year = parseInt(yearStr, 10);
+  const month = parseInt(monthStr, 10);
+  const day = parseInt(dayStr, 10);
+  const hour = parseInt(hourStr, 10);
+  const minute = parseInt(minStr, 10);
+
+  const tz = timezone || 'UTC';
+  try {
+    const pad = (n: number) => n.toString().padStart(2, '0');
+    const targetIsoString = `${year}-${pad(month)}-${pad(day)}T${pad(hour)}:${pad(minute)}:00`;
+    let guess = new Date(Date.UTC(year, month - 1, day, hour, minute, 0));
+
+    const getParts = (d: Date) => {
+      const f = new Intl.DateTimeFormat('en-US', {
+        timeZone: tz,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+      });
+      const parts = f.formatToParts(d);
+      const res: Record<string, string> = {};
+      for (const p of parts) res[p.type] = p.value;
+      const h = res.hour === '24' ? '00' : res.hour;
+      return `${res.year}-${res.month}-${res.day}T${h}:${res.minute}:00`;
+    };
+
+    const guessLocal = getParts(guess);
+    const diffMs = new Date(targetIsoString + 'Z').getTime() - new Date(guessLocal + 'Z').getTime();
+    guess = new Date(guess.getTime() + diffMs);
+
+    // Double check for DST transition boundary accuracy
+    const refinedLocal = getParts(guess);
+    const diffMs2 = new Date(targetIsoString + 'Z').getTime() - new Date(refinedLocal + 'Z').getTime();
+    if (diffMs2 !== 0) {
+      guess = new Date(guess.getTime() + diffMs2);
+    }
+
+    return guess.toISOString();
+  } catch {
+    const d = new Date(localString);
+    return isNaN(d.getTime()) ? null : d.toISOString();
+  }
+}
+
+/**
+ * Formats a UTC ISO string or Date into "YYYY-MM-DDTHH:mm" in the specified IANA timezone,
+ * suitable for binding directly into <input type="datetime-local" />.
+ */
+export function toInputValueInTimezone(dateInput?: string | Date | null, timezone?: string | null): string {
+  if (!dateInput) return '';
+  const dt = typeof dateInput === 'string' ? new Date(dateInput) : dateInput;
+  if (isNaN(dt.getTime())) return '';
+  const tz = timezone || 'UTC';
+  try {
+    const f = new Intl.DateTimeFormat('en-US', {
+      timeZone: tz,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    });
+    const parts = f.formatToParts(dt);
+    const res: Record<string, string> = {};
+    for (const p of parts) res[p.type] = p.value;
+    const hr = res.hour === '24' ? '00' : res.hour;
+    return `${res.year}-${res.month}-${res.day}T${hr}:${res.minute}`;
+  } catch {
+    const pad = (n: number) => n.toString().padStart(2, '0');
+    return `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}T${pad(dt.getHours())}:${pad(dt.getMinutes())}`;
+  }
+}

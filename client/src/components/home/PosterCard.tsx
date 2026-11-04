@@ -79,12 +79,19 @@ export const PosterCard: React.FC<PosterCardProps> = ({
           <div className="absolute inset-0 pointer-events-none border border-black/10" />
         </div>
 
-        <div className="pt-3 pb-3 sm:pb-3.5 space-y-1">
-          <div className="font-display font-black text-xs sm:text-sm tracking-wider text-stone-900 uppercase">
+        <div className="pt-2.5 sm:pt-3 pb-2 sm:pb-2.5 space-y-1 sm:space-y-1.5">
+          <h3
+            className="font-display font-black text-sm sm:text-base text-stone-900 uppercase tracking-tight leading-snug line-clamp-2 break-words group-hover:text-stone-700 transition-colors"
+            title={event.title}
+          >
+            {event.title}
+          </h3>
+
+          <div className="font-display font-bold text-[11px] sm:text-xs tracking-wider text-stone-700 uppercase">
             {formatPosterDate(event.startAt)}
           </div>
 
-          <div className="flex items-center justify-between text-[11px] font-mono uppercase tracking-widest text-stone-600 font-bold truncate">
+          <div className="flex items-center justify-between text-[11px] font-mono uppercase tracking-widest text-stone-600 font-bold truncate pt-0.5">
             <span className="truncate max-w-[170px]">{venueLabel}</span>
             <span className="text-[10px] text-stone-500 font-normal">
               {event.isSoldOut ? 'SOLD OUT' : formatPrice(event.minPriceInCents, event.currency)}

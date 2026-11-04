@@ -3,6 +3,8 @@ import {
   calculateTierEarnings,
   calculateCombinedEarnings,
   calculateCheckoutFeeBreakdown,
+  calculateDisplayPriceFromGross,
+  calculateGrossPriceFromDisplay,
   formatCents,
   PLATFORM_FEE_PERCENT,
   SERVICE_FEE_CENTS,
@@ -326,6 +328,67 @@ describe('Client Fees & Organizer Earnings Breakdown', () => {
 
       // After Stripe takes its cut, the net proceeds exactly equal preProcessingTotal
       expect(b.buyerTotalInCents - expectedStripeCut).toBe(b.preProcessingTotalInCents);
+    });
+
+    it('provides customerServiceFeeInCents reconciling the customer-facing 3-line breakdown', () => {
+      // 1 x $20.00 ticket
+      const b1 = calculateCheckoutFeeBreakdown(2000, 1);
+      expect(b1.ticketSubtotalInCents).toBe(2000);
+      expect(b1.customerServiceFeeInCents).toBe(394); // $2.00 (platform) + $0.95 (service) + $0.99 (stripe)
+      expect(b1.buyerTotalInCents).toBe(2394);
+
+      // Customer 3-line breakdown reconciliation:
+      // Line 1: Ticket Price ($20.00)
+      // Line 2: Service Fee ($3.94)
+      // Line 3: Total ($23.94)
+      expect(b1.ticketSubtotalInCents + b1.customerServiceFeeInCents).toBe(b1.buyerTotalInCents);
+
+      // Free tickets: customer service fee must be 0
+      const bFree = calculateCheckoutFeeBreakdown(0, 3);
+      expect(bFree.ticketSubtotalInCents).toBe(0);
+      expect(bFree.customerServiceFeeInCents).toBe(0);
+      expect(bFree.buyerTotalInCents).toBe(0);
+    });
+  });
+
+  describe('Gross Price and All-In Display Price Calculations', () => {
+    it('calculates Display Price from Gross Price correctly ($20.00 -> $23.94)', () => {
+      expect(calculateDisplayPriceFromGross(2000)).toBe(2394);
+    });
+
+    it('calculates Display Price for free tickets ($0.00 -> $0.00)', () => {
+      expect(calculateDisplayPriceFromGross(0)).toBe(0);
+      expect(calculateDisplayPriceFromGross(-500)).toBe(0);
+    });
+
+    it('calculates Gross Price from Display Price correctly ($23.94 -> $20.00)', () => {
+      expect(calculateGrossPriceFromDisplay(2394)).toBe(2000);
+    });
+
+    it('calculates Gross Price for free tickets ($0.00 -> $0.00)', () => {
+      expect(calculateGrossPriceFromDisplay(0)).toBe(0);
+      expect(calculateGrossPriceFromDisplay(-100)).toBe(0);
+    });
+
+    it('supports two-way round-trip precision without unwanted drift', () => {
+      const grossPrices = [500, 1000, 1500, 2000, 2500, 5000, 7500, 10000];
+      for (const gross of grossPrices) {
+        const display = calculateDisplayPriceFromGross(gross);
+        const recoveredGross = calculateGrossPriceFromDisplay(display);
+        expect(recoveredGross).toBe(gross);
+      }
+    });
+
+    it('calculates customerServiceFeeInCents, grossPriceInCents, and displayPriceInCents in calculateTierEarnings', () => {
+      const breakdown = calculateTierEarnings(2000, 100);
+      expect(breakdown.grossPriceInCents).toBe(2000);
+      expect(breakdown.displayPriceInCents).toBe(2394);
+      expect(breakdown.customerServiceFeeInCents).toBe(394);
+
+      // Customer line items: gross (2000) + service fee (394) === display (2394)
+      expect(breakdown.grossPriceInCents + breakdown.customerServiceFeeInCents).toBe(
+        breakdown.displayPriceInCents
+      );
     });
   });
 });

@@ -113,6 +113,8 @@ enum CheckInResult {
   INVALID_TOKEN
   WRONG_EVENT
   CANCELLED_TICKET
+  TICKET_NOT_YET_VALID
+  TICKET_EXPIRED
 }
 
 enum LedgerEntryType {
@@ -341,6 +343,8 @@ model TicketTier {
   maxPerOrder      Int              @default(10)
   salesStartAt     DateTime?
   salesEndAt       DateTime?
+  validityStartAt  DateTime?
+  validityEndAt    DateTime?
   status           TicketTierStatus @default(ACTIVE)
   waitlistEnabled  Boolean          @default(false)
   

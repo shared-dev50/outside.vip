@@ -64,6 +64,8 @@ const orderInclude = {
           description: true,
           priceInCents: true,
           currency: true,
+          validityStartAt: true,
+          validityEndAt: true,
         },
       },
     },

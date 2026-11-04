@@ -325,7 +325,7 @@ export const api = {
       request<OrganizerWaitlistResponse>(`/organizer/events/${eventId}/waitlist`),
     checkInTicket: (payload: { token: string; eventId?: string }) =>
       request<{
-        result: 'SUCCESS' | 'ALREADY_CHECKED_IN' | 'INVALID_TOKEN' | 'WRONG_EVENT' | 'CANCELLED_TICKET' | 'UNPAID_ORDER';
+        result: 'SUCCESS' | 'ALREADY_CHECKED_IN' | 'INVALID_TOKEN' | 'WRONG_EVENT' | 'CANCELLED_TICKET' | 'UNPAID_ORDER' | 'TICKET_NOT_YET_VALID' | 'TICKET_EXPIRED';
         message: string;
         ticket?: any;
         totalCheckedIn?: number;

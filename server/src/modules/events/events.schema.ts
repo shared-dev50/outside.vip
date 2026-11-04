@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { EventCategory, EventStatus, TicketTierStatus } from '@prisma/client';
+import { calculateGrossPriceFromDisplay } from '../checkout/checkout.financials.js';
 
 export const listEventsQuerySchema = z.object({
   search: z.string().optional(),
@@ -12,18 +13,62 @@ export const listEventsQuerySchema = z.object({
   limit: z.string().optional().default('12').transform((v) => Math.min(50, Math.max(1, parseInt(v, 10) || 12))),
 });
 
-export const createTicketTierSchema = z.object({
+export const createTicketTierBaseSchema = z.object({
+  id: z.string().optional(),
   name: z.string().min(1, 'Tier name is required'),
   description: z.string().optional(),
-  priceInCents: z.number().int().min(0, 'Price must be 0 or positive'),
+  priceInCents: z.number().int().min(0, 'Price must be 0 or positive').optional(),
+  displayPriceInCents: z.number().int().min(0, 'Display price must be 0 or positive').optional().nullable(),
   currency: z.string().default('USD'),
   totalCapacity: z.number().int().min(1, 'Capacity must be at least 1'),
   minPerOrder: z.number().int().min(1).default(1),
   maxPerOrder: z.number().int().min(1).default(10),
   salesStartAt: z.string().datetime().optional().nullable(),
   salesEndAt: z.string().datetime().optional().nullable(),
+  validityStartAt: z.string().datetime().optional().nullable(),
+  validityEndAt: z.string().datetime().optional().nullable(),
   status: z.nativeEnum(TicketTierStatus).default(TicketTierStatus.ACTIVE),
 });
+
+export const createTicketTierSchema = createTicketTierBaseSchema
+  .refine(
+    (data) => {
+      if (data.salesStartAt && data.salesEndAt) {
+        return new Date(data.salesStartAt) < new Date(data.salesEndAt);
+      }
+      return true;
+    },
+    {
+      message: 'Sales start time must precede sales end time',
+      path: ['salesEndAt'],
+    }
+  )
+  .refine(
+    (data) => {
+      if (data.validityStartAt && data.validityEndAt) {
+        return new Date(data.validityStartAt) < new Date(data.validityEndAt);
+      }
+      return true;
+    },
+    {
+      message: 'Ticket validity start time must precede validity end time',
+      path: ['validityEndAt'],
+    }
+  )
+  .transform((data) => {
+    let priceInCents = data.priceInCents;
+    if (priceInCents === undefined || priceInCents === null) {
+      if (data.displayPriceInCents !== undefined && data.displayPriceInCents !== null) {
+        priceInCents = calculateGrossPriceFromDisplay(data.displayPriceInCents);
+      } else {
+        priceInCents = 0;
+      }
+    }
+    return {
+      ...data,
+      priceInCents,
+    };
+  });
 
 export const createEventSchema = z.object({
   title: z.string().min(3, 'Title must be at least 3 characters'),
@@ -48,11 +93,7 @@ export const createEventSchema = z.object({
 });
 
 export const updateEventSchema = createEventSchema.partial().extend({
-  ticketTiers: z.array(
-    createTicketTierSchema.extend({
-      id: z.string().optional(),
-    })
-  ).optional(),
+  ticketTiers: z.array(createTicketTierSchema).optional(),
 });
 
 export const verifyEventPasswordSchema = z.object({

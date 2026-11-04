@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { X, Clock, Users, CheckCircle2, AlertCircle, ArrowRight } from 'lucide-react';
 import { TicketTier, JoinWaitlistResult } from '../../types';
 import { api } from '../../lib/api';
+import { calculateDisplayPriceFromGross } from '../../lib/fees';
 
 export interface JoinWaitlistDialogProps {
   isOpen: boolean;
@@ -90,7 +91,7 @@ export const JoinWaitlistDialog: React.FC<JoinWaitlistDialogProps> = ({
                 Join Ticket Waitlist
               </h3>
               <p className="text-xs text-stone-500 font-sans">
-                {tier.name} · {formatPrice(tier.priceInCents, tier.currency)}
+                {tier.name} · {formatPrice(tier.displayPriceInCents ?? calculateDisplayPriceFromGross(tier.priceInCents), tier.currency)}
               </p>
             </div>
           </div>

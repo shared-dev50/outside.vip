@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { EventCategory, EventStatus, TicketTierStatus, RecurrenceFrequency, EventFeatureType } from '@prisma/client';
 import { extractYouTubeVideoId } from '../../utils/youtube.js';
+import { calculateGrossPriceFromDisplay } from '../checkout/checkout.financials.js';
 
 export const galleryImageInputSchema = z.object({
   id: z.string().optional(),
@@ -34,23 +35,66 @@ export const eventFeatureInputSchema = z.object({
 
 export type EventFeatureInput = z.infer<typeof eventFeatureInputSchema>;
 
-export const ticketTierInputSchema = z.object({
-  id: z.string().optional(),
-  name: z.string().min(1, 'Ticket name is required').max(100),
-  description: z.string().optional().nullable(),
-  priceInCents: z.number().int().min(0, 'Price must be 0 or greater'),
-  currency: z.string().default('USD'),
-  totalCapacity: z.number().int().min(1, 'Capacity must be at least 1'),
-  minPerOrder: z.number().int().min(1, 'Min per order must be at least 1').default(1),
-  maxPerOrder: z.number().int().min(1, 'Max per order must be at least 1').default(10),
-  salesStartAt: z.string().datetime().optional().nullable(),
-  salesEndAt: z.string().datetime().optional().nullable(),
-  status: z.nativeEnum(TicketTierStatus).default(TicketTierStatus.ACTIVE),
-  waitlistEnabled: z.boolean().default(false),
-}).refine((data) => data.maxPerOrder >= data.minPerOrder, {
-  message: 'Max tickets per order must be greater than or equal to min tickets per order',
-  path: ['maxPerOrder'],
-});
+export const ticketTierInputSchema = z
+  .object({
+    id: z.string().optional(),
+    name: z.string().min(1, 'Ticket name is required').max(100),
+    description: z.string().optional().nullable(),
+    priceInCents: z.number().int().min(0, 'Price must be 0 or greater').optional(),
+    displayPriceInCents: z.number().int().min(0, 'Display price must be 0 or greater').optional().nullable(),
+    currency: z.string().default('USD'),
+    totalCapacity: z.number().int().min(1, 'Capacity must be at least 1'),
+    minPerOrder: z.number().int().min(1, 'Min per order must be at least 1').default(1),
+    maxPerOrder: z.number().int().min(1, 'Max per order must be at least 1').default(10),
+    salesStartAt: z.string().datetime().optional().nullable(),
+    salesEndAt: z.string().datetime().optional().nullable(),
+    validityStartAt: z.string().datetime().optional().nullable(),
+    validityEndAt: z.string().datetime().optional().nullable(),
+    status: z.nativeEnum(TicketTierStatus).default(TicketTierStatus.ACTIVE),
+    waitlistEnabled: z.boolean().default(false),
+  })
+  .refine(
+    (data) => {
+      if (data.salesStartAt && data.salesEndAt) {
+        return new Date(data.salesStartAt) < new Date(data.salesEndAt);
+      }
+      return true;
+    },
+    {
+      message: 'Sales start time must precede sales end time',
+      path: ['salesEndAt'],
+    }
+  )
+  .refine(
+    (data) => {
+      if (data.validityStartAt && data.validityEndAt) {
+        return new Date(data.validityStartAt) < new Date(data.validityEndAt);
+      }
+      return true;
+    },
+    {
+      message: 'Ticket validity start time must precede validity end time',
+      path: ['validityEndAt'],
+    }
+  )
+  .transform((data) => {
+    let priceInCents = data.priceInCents;
+    if (priceInCents === undefined || priceInCents === null) {
+      if (data.displayPriceInCents !== undefined && data.displayPriceInCents !== null) {
+        priceInCents = calculateGrossPriceFromDisplay(data.displayPriceInCents);
+      } else {
+        priceInCents = 0;
+      }
+    }
+    return {
+      ...data,
+      priceInCents,
+    };
+  })
+  .refine((data) => data.maxPerOrder >= data.minPerOrder, {
+    message: 'Max tickets per order must be greater than or equal to min tickets per order',
+    path: ['maxPerOrder'],
+  });
 
 export const payoutDetailsInputSchema = z
   .object({

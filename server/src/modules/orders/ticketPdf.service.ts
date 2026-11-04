@@ -36,6 +36,8 @@ interface TicketPdfItem {
     description?: string | null;
     priceInCents: number;
     currency?: string | null;
+    validityStartAt?: Date | string | null;
+    validityEndAt?: Date | string | null;
   } | null;
 }
 
@@ -375,7 +377,16 @@ export async function generateTicketsPdf(
            .text('TICKET VALIDITY', col2X, rightHeaderY);
         rightHeaderY += 10;
 
-        const validityText = formatEventDateRange(order.event.startAt, order.event.endAt, order.event.timezone || undefined);
+        const hasCustomValidity = Boolean(ticket.ticketTier?.validityStartAt || ticket.ticketTier?.validityEndAt);
+        const validityText = hasCustomValidity
+          ? formatEventDateRange(
+              ticket.ticketTier?.validityStartAt || order.event.startAt,
+              ticket.ticketTier?.validityEndAt || order.event.endAt,
+              order.event.timezone || undefined
+            )
+          : formatEventDateRange(order.event.startAt, order.event.endAt, order.event.timezone || undefined);
+        const eventDateText = formatEventDateRange(order.event.startAt, order.event.endAt, order.event.timezone || undefined);
+
         doc.font('Helvetica-Bold').fontSize(8.5).fillColor('#1F2937')
            .text(validityText, col2X, rightHeaderY, { width: col2Width });
         rightHeaderY += doc.heightOfString(validityText, { width: col2Width }) + 6;
@@ -436,8 +447,14 @@ export async function generateTicketsPdf(
         leftColY += 13;
 
         doc.font('Helvetica-Bold').fontSize(8.5).fillColor('#111827')
-           .text(`Event date: ${validityText}`, leftMargin, leftColY, { width: bodyCol1Width });
-        leftColY += doc.heightOfString(`Event date: ${validityText}`, { width: bodyCol1Width }) + 4;
+           .text(`Event date: ${eventDateText}`, leftMargin, leftColY, { width: bodyCol1Width });
+        leftColY += doc.heightOfString(`Event date: ${eventDateText}`, { width: bodyCol1Width }) + 4;
+
+        if (hasCustomValidity) {
+          doc.font('Helvetica-Bold').fontSize(8.5).fillColor('#111827')
+             .text(`Entry validity: ${validityText}`, leftMargin, leftColY, { width: bodyCol1Width });
+          leftColY += doc.heightOfString(`Entry validity: ${validityText}`, { width: bodyCol1Width }) + 4;
+        }
 
         doc.font('Helvetica-Bold').fontSize(8.5).fillColor('#111827')
            .text(`Order #${order.orderNumber} – ${formatOrderDate(order.createdAt)}`, leftMargin, leftColY);

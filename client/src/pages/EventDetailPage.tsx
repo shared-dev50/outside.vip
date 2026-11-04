@@ -5,7 +5,7 @@ import { api } from '../lib/api';
 import { TicketTier, CheckoutSessionResult, WaitlistOfferInfo } from '../types';
 import { CheckoutDialog } from '../components/events/CheckoutDialog';
 import { JoinWaitlistDialog } from '../components/events/JoinWaitlistDialog';
-import { calculateCheckoutFeeBreakdown } from '../lib/fees';
+import { calculateCheckoutFeeBreakdown, calculateDisplayPriceFromGross } from '../lib/fees';
 import { getYouTubeEmbedUrl } from '../lib/youtube';
 import { validateAndNormalizePhone } from '../lib/phone';
 import { 
@@ -891,6 +891,25 @@ export const EventDetailPage: React.FC = () => {
               {event.ticketTiers.map((tier: TicketTier) => {
                 const qty = selectedQuantities[tier.id] || 0;
                 const isSoldOut = tier.status === 'SOLD_OUT' || (tier.remainingCapacity !== undefined && tier.remainingCapacity <= 0);
+                const now = new Date();
+                const isSalesPending = Boolean(tier.salesStartAt && new Date(tier.salesStartAt) > now);
+                const isSalesEnded = Boolean(tier.salesEndAt && new Date(tier.salesEndAt) < now);
+                const isPurchasable = !isSoldOut && !isSalesPending && !isSalesEnded && tier.status === 'ACTIVE';
+
+                const formatTimeInEventTz = (dateString?: string | null) => {
+                  if (!dateString) return '';
+                  try {
+                    return new Intl.DateTimeFormat('en-US', {
+                      timeZone: event.timezone || 'UTC',
+                      month: 'short',
+                      day: 'numeric',
+                      hour: 'numeric',
+                      minute: '2-digit',
+                    }).format(new Date(dateString));
+                  } catch {
+                    return new Date(dateString).toLocaleString();
+                  }
+                };
 
                 return (
                   <div
@@ -898,24 +917,32 @@ export const EventDetailPage: React.FC = () => {
                     className={`p-3.5 rounded-lg border transition-colors ${
                       qty > 0
                         ? 'bg-gray-50 border-gray-900'
-                        : isSoldOut
-                        ? tier.waitlistEnabled
-                          ? 'bg-amber-50/20 border-amber-200/60'
-                          : 'bg-gray-50/60 border-gray-200 opacity-60'
-                        : 'border-gray-200 hover:border-gray-300'
+                        : isPurchasable
+                        ? 'border-gray-200 hover:border-gray-300'
+                        : isSoldOut && tier.waitlistEnabled && !isSalesEnded
+                        ? 'bg-amber-50/20 border-amber-200/60'
+                        : 'bg-gray-50/60 border-gray-200 opacity-70'
                     }`}
                   >
                     <div className="flex items-start justify-between gap-3">
                       <div className="space-y-0.5 flex-1">
-                        <div className="flex items-center gap-2">
+                        <div className="flex flex-wrap items-center gap-2">
                           <span className="font-semibold text-gray-900 text-sm">
                             {tier.name}
                           </span>
-                          {isSoldOut && (
+                          {isSoldOut ? (
                             <span className="text-[10px] text-red-600 font-bold uppercase tracking-wider">
                               Sold out
                             </span>
-                          )}
+                          ) : isSalesPending ? (
+                            <span className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded font-mono font-bold uppercase tracking-wider">
+                              Sales start {formatTimeInEventTz(tier.salesStartAt)}
+                            </span>
+                          ) : isSalesEnded ? (
+                            <span className="text-[10px] text-stone-500 bg-stone-100 border border-stone-200 px-2 py-0.5 rounded font-mono font-bold uppercase tracking-wider">
+                              Sales ended
+                            </span>
+                          ) : null}
                         </div>
 
                         {tier.description && (
@@ -924,12 +951,28 @@ export const EventDetailPage: React.FC = () => {
                           </p>
                         )}
 
+                        {(tier.validityStartAt || tier.validityEndAt) && (
+                          <div className="text-[11px] font-mono text-indigo-800 bg-indigo-50/80 border border-indigo-200/80 rounded px-2 py-0.5 mt-1 inline-flex items-center gap-1">
+                            <span>Entry validity:</span>
+                            <span className="font-semibold">
+                              {tier.validityStartAt && tier.validityEndAt
+                                ? `${formatTimeInEventTz(tier.validityStartAt)} – ${formatTimeInEventTz(tier.validityEndAt)}`
+                                : tier.validityStartAt
+                                ? `From ${formatTimeInEventTz(tier.validityStartAt)}`
+                                : `Until ${formatTimeInEventTz(tier.validityEndAt)}`}
+                            </span>
+                          </div>
+                        )}
+
                         <div className="pt-1 font-semibold text-gray-900 text-xs">
-                          {formatPrice(tier.priceInCents, tier.currency)}
+                          {formatPrice(
+                            tier.displayPriceInCents ?? calculateDisplayPriceFromGross(tier.priceInCents),
+                            tier.currency
+                          )}
                         </div>
                       </div>
 
-                      {!isSoldOut ? (
+                      {isPurchasable ? (
                         <div className="flex items-center gap-1.5 bg-gray-50 border border-gray-200 rounded-md p-1 shrink-0">
                           <button
                             type="button"
@@ -953,7 +996,7 @@ export const EventDetailPage: React.FC = () => {
                             <Plus className="w-3 h-3" />
                           </button>
                         </div>
-                      ) : tier.waitlistEnabled ? (
+                      ) : isSoldOut && tier.waitlistEnabled && !isSalesEnded ? (
                         <button
                           type="button"
                           onClick={() => setWaitlistModalTier(tier)}
@@ -1071,43 +1114,38 @@ export const EventDetailPage: React.FC = () => {
                 </div>
               </div>
 
-              {totalTickets > 0 && checkoutFees.ticketSubtotalInCents > 0 && (
+              {totalTickets > 0 && (
                 <div className="p-3 rounded-lg bg-gray-50 border border-gray-200/80 space-y-2 text-xs">
                   <div className="flex justify-between text-gray-600">
                     <span>
-                      Ticket Subtotal ({totalTickets} ticket{totalTickets === 1 ? '' : 's'})
+                      Ticket price{totalTickets > 1 ? ` (${totalTickets} tickets)` : ''}
                     </span>
                     <span className="font-semibold text-gray-900 font-mono">
-                      {formatPriceWithCents(checkoutFees.ticketSubtotalInCents, event.currency)}
-                    </span>
-                  </div>
-                  <div className="flex justify-between text-gray-600">
-                    <span>Platform Fee (10%)</span>
-                    <span className="font-semibold text-gray-900 font-mono">
-                      {formatPriceWithCents(checkoutFees.platformFeeInCents, event.currency)}
+                      {checkoutFees.ticketSubtotalInCents === 0
+                        ? 'Free'
+                        : formatPriceWithCents(checkoutFees.ticketSubtotalInCents, event.currency)}
                     </span>
                   </div>
-                  <div className="flex justify-between text-gray-600">
-                    <span>Service Fee ($0.95 / ticket)</span>
-                    <span className="font-semibold text-gray-900 font-mono">
-                      {formatPriceWithCents(checkoutFees.serviceFeeInCents, event.currency)}
-                    </span>
-                  </div>
-                  <div className="flex justify-between text-gray-600">
-                    <span>Stripe Processing (est. 2.9% + $0.30)</span>
-                    <span className="font-semibold text-gray-900 font-mono">
-                      {formatPriceWithCents(checkoutFees.processingFeeInCents, event.currency)}
+
+                  {checkoutFees.customerServiceFeeInCents > 0 && (
+                    <div className="flex justify-between text-gray-600">
+                      <span>Service fee</span>
+                      <span className="font-semibold text-gray-900 font-mono">
+                        {formatPriceWithCents(checkoutFees.customerServiceFeeInCents, event.currency)}
+                      </span>
+                    </div>
+                  )}
+
+                  <div className="pt-2 flex items-center justify-between text-sm font-bold text-gray-900 border-t border-gray-200">
+                    <span>Total</span>
+                    <span className="text-base font-mono text-gray-900">
+                      {totalInCents === 0
+                        ? 'Free'
+                        : formatPriceWithCents(totalInCents, event.currency)}
                     </span>
                   </div>
                 </div>
               )}
-
-              <div className="pt-2 flex items-center justify-between text-sm font-bold text-gray-900 border-t border-gray-100">
-                <span>Total Payable</span>
-                <span className="text-base font-mono text-gray-900">
-                  {formatPriceWithCents(totalInCents, event.currency)}
-                </span>
-              </div>
 
               <button
                 type="submit"

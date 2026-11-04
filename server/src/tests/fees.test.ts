@@ -8,6 +8,8 @@ import {
   calculateCombinedEarnings,
   calculateFinancialBreakdown,
   calculateCheckoutFeeBreakdown,
+  calculateDisplayPriceFromGross,
+  calculateGrossPriceFromDisplay,
   PLATFORM_FEE_PERCENT,
   SERVICE_FEE_CENTS,
   STRIPE_PERCENT,
@@ -388,6 +390,153 @@ describe('Organizer Earnings & Fee Calculations (Server)', () => {
 
         const stripeTake = Math.round(b.buyerTotalInCents * STRIPE_PERCENT + STRIPE_FIXED_CENTS);
       expect(b.processingFeeInCents).toBe(stripeTake);
+    });
+  });
+
+  describe('Gross Price and All-In Display Price Model', () => {
+    describe('1. Gross to Display Price Calculation', () => {
+      it('calculates Display price correctly for $20.00 gross ticket -> $23.94', () => {
+        const display = calculateDisplayPriceFromGross(2000);
+        expect(display).toBe(2394); // $23.94
+      });
+
+      it('calculates Display price correctly for $0.00 free ticket -> $0.00', () => {
+        expect(calculateDisplayPriceFromGross(0)).toBe(0);
+        expect(calculateDisplayPriceFromGross(-500)).toBe(0);
+      });
+
+      it('calculates Display price correctly for $75.00 gross ticket -> $86.25', () => {
+        const display = calculateDisplayPriceFromGross(7500);
+        expect(display).toBe(8625); // $86.25
+      });
+    });
+
+    describe('2. Display to Gross Price Calculation (Reverse)', () => {
+      it('reverses $23.94 display price back to $20.00 gross ticket', () => {
+        const gross = calculateGrossPriceFromDisplay(2394);
+        expect(gross).toBe(2000); // exactly $20.00
+      });
+
+      it('returns $0.00 gross for $0.00 display price', () => {
+        expect(calculateGrossPriceFromDisplay(0)).toBe(0);
+        expect(calculateGrossPriceFromDisplay(-100)).toBe(0);
+      });
+
+      it('reverses $86.25 display price back to $75.00 gross ticket', () => {
+        const gross = calculateGrossPriceFromDisplay(8625);
+        expect(gross).toBe(7500); // exactly $75.00
+      });
+    });
+
+    describe('3. Rounding and Monetary Precision', () => {
+      it('round-trips clean 50-cent gross prices between $1 and $500 with zero drift', () => {
+        for (let dollars = 1; dollars <= 500; dollars += 0.5) {
+          const grossCents = Math.round(dollars * 100);
+          const displayCents = calculateDisplayPriceFromGross(grossCents);
+          const backGross = calculateGrossPriceFromDisplay(displayCents);
+          expect(backGross).toBe(grossCents);
+        }
+      });
+
+      it('maintains integer cents across all operations without floating-point artifacts', () => {
+        const testPrices = [1999, 2000, 2001, 4999, 5000, 10000, 25000];
+        for (const p of testPrices) {
+          const d = calculateDisplayPriceFromGross(p);
+          expect(Number.isInteger(d)).toBe(true);
+          const g = calculateGrossPriceFromDisplay(d);
+          expect(Number.isInteger(g)).toBe(true);
+        }
+      });
+    });
+
+    describe('4. Free Tickets', () => {
+      it('ensures free tickets have $0.00 gross, $0.00 display, and zero fees', () => {
+        const tier = calculateTierEarnings(0, 100);
+        expect(tier.grossPriceInCents).toBe(0);
+        expect(tier.displayPriceInCents).toBe(0);
+        expect(tier.customerServiceFeeInCents).toBe(0);
+        expect(tier.platformFeeInCents).toBe(0);
+        expect(tier.serviceFeeInCents).toBe(0);
+        expect(tier.processingFeeInCents).toBe(0);
+        expect(tier.buyerTotalInCents).toBe(0);
+
+        const checkout = calculateCheckoutFeeBreakdown(0, 2);
+        expect(checkout.ticketSubtotalInCents).toBe(0);
+        expect(checkout.customerServiceFeeInCents).toBe(0);
+        expect(checkout.buyerTotalInCents).toBe(0);
+      });
+    });
+
+    describe('5. Customer-Facing Three-Line Breakdown & Internal Fee Preservation', () => {
+      it('produces the exact three-line checkout breakdown for a $20.00 ticket ($20.00 + $3.94 = $23.94)', () => {
+        const breakdown = calculateCheckoutFeeBreakdown(2000, 1);
+
+        // Line 1: Ticket price
+        expect(breakdown.ticketSubtotalInCents).toBe(2000); // $20.00
+        // Line 2: Service fee (combined platform + fixed + processing)
+        expect(breakdown.customerServiceFeeInCents).toBe(394); // $3.94
+        // Line 3: Total
+        expect(breakdown.buyerTotalInCents).toBe(2394); // $23.94
+
+        // Exact match: Ticket price + Service fee === Total
+        expect(breakdown.ticketSubtotalInCents + breakdown.customerServiceFeeInCents).toBe(
+          breakdown.buyerTotalInCents
+        );
+
+        // Underlying accounting components are strictly preserved
+        expect(breakdown.platformFeeInCents).toBe(200); // $2.00 (10%)
+        expect(breakdown.serviceFeeInCents).toBe(95); // $0.95 ($0.95 fixed)
+        expect(breakdown.processingFeeInCents).toBe(99); // $0.99 (Stripe 2.9% + $0.30)
+        expect(
+          breakdown.platformFeeInCents +
+            breakdown.serviceFeeInCents +
+            breakdown.processingFeeInCents
+        ).toBe(breakdown.customerServiceFeeInCents);
+
+        // Total matches the advertised Display price for 1 ticket
+        expect(breakdown.buyerTotalInCents).toBe(calculateDisplayPriceFromGross(2000));
+      });
+
+      it('reconciles multi-ticket checkout to exact 3 lines without double charging fees', () => {
+        // 3 tickets of $20.00
+        const breakdown = calculateCheckoutFeeBreakdown(6000, 3);
+
+        // Line 1: Ticket price (3 x $20.00)
+        expect(breakdown.ticketSubtotalInCents).toBe(6000); // $60.00
+        // Line 2: Combined Service fee
+        expect(breakdown.customerServiceFeeInCents).toBe(1122); // $11.22
+        // Line 3: Total
+        expect(breakdown.buyerTotalInCents).toBe(7122); // $71.22
+
+        // Exact reconciliation
+        expect(breakdown.ticketSubtotalInCents + breakdown.customerServiceFeeInCents).toBe(
+          breakdown.buyerTotalInCents
+        );
+
+        // Internal accounting components
+        expect(breakdown.platformFeeInCents).toBe(600); // 10% of $60.00 = $6.00
+        expect(breakdown.serviceFeeInCents).toBe(285); // 3 x $0.95 = $2.85
+        expect(breakdown.processingFeeInCents).toBe(237); // Stripe 2.9% + $0.30 gross-up
+        expect(
+          breakdown.platformFeeInCents +
+            breakdown.serviceFeeInCents +
+            breakdown.processingFeeInCents
+        ).toBe(breakdown.customerServiceFeeInCents);
+      });
+    });
+
+    describe('6. Backward Compatibility with Existing Tiers', () => {
+      it('derives correct Display price for existing stored ticket tier priceInCents', () => {
+        // Legacy tier with priceInCents: 2500 ($25.00)
+        // (2500 * 1.10 + 95 + 30) / (1 - 0.029) = 2875 / 0.971 = 2960.86 -> 2961
+        const legacyPriceInCents = 2500;
+        const displayPrice = calculateDisplayPriceFromGross(legacyPriceInCents);
+        expect(displayPrice).toBe(2961); // $29.61
+
+        // Legacy tier with priceInCents: 4500 ($45.00)
+        // (4500 * 1.10 + 95 + 30) / (1 - 0.029) = 5075 / 0.971 = 5226.57 -> 5227
+        expect(calculateDisplayPriceFromGross(4500)).toBe(5227); // $52.27
+      });
     });
   });
 });

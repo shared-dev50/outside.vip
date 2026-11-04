@@ -11,6 +11,7 @@ import {
   signEventAccessToken,
   verifyEventAccessToken,
 } from './passwordAccess.service.js';
+import { calculateDisplayPriceFromGross } from '../checkout/checkout.financials.js';
 
 export async function listEvents(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
@@ -112,12 +113,18 @@ export async function listEvents(req: Request, res: Response, next: NextFunction
       prisma.event.count({ where }),
     ]);
 
-    // Enhance events with lowest price and availability status, ensuring passwordHash is stripped
+    // Enhance events with lowest display price and availability status, ensuring passwordHash is stripped
     let enhancedEvents = events.map((event) => {
       const { passwordHash: _, ...eventWithoutHash } = event;
+      const tiersWithDisplay = event.ticketTiers.map((t) => ({
+        ...t,
+        grossPriceInCents: t.priceInCents,
+        displayPriceInCents: calculateDisplayPriceFromGross(t.priceInCents),
+      }));
+
       const minPrice =
-        event.ticketTiers.length > 0
-          ? Math.min(...event.ticketTiers.map((t) => t.priceInCents))
+        tiersWithDisplay.length > 0
+          ? Math.min(...tiersWithDisplay.map((t) => t.displayPriceInCents))
           : 0;
 
       const currency = event.ticketTiers[0]?.currency || 'USD';
@@ -127,6 +134,7 @@ export async function listEvents(req: Request, res: Response, next: NextFunction
 
       return {
         ...eventWithoutHash,
+        ticketTiers: tiersWithDisplay,
         minPriceInCents: minPrice,
         currency,
         isSoldOut,
@@ -198,6 +206,8 @@ export async function getEventBySlug(req: Request, res: Response, next: NextFunc
             maxPerOrder: true,
             salesStartAt: true,
             salesEndAt: true,
+            validityStartAt: true,
+            validityEndAt: true,
             status: true,
             waitlistEnabled: true,
           },
@@ -302,15 +312,29 @@ export async function getEventBySlug(req: Request, res: Response, next: NextFunc
       return;
     }
 
-    // Calculate available remaining tickets per tier
+    // Calculate available remaining tickets per tier and all-in display prices
+    const now = new Date();
     const tiersWithAvailability = event.ticketTiers.map((tier) => {
       const remaining = Math.max(0, tier.totalCapacity - tier.soldQuantity - tier.reservedQuantity);
+      const displayPriceInCents = calculateDisplayPriceFromGross(tier.priceInCents);
+      const isSalesPending = Boolean(tier.salesStartAt && new Date(tier.salesStartAt) > now);
+      const isSalesEnded = Boolean(tier.salesEndAt && new Date(tier.salesEndAt) < now);
+
       return {
         ...tier,
+        grossPriceInCents: tier.priceInCents,
+        displayPriceInCents,
         remainingCapacity: remaining,
-        isAvailable: tier.status === 'ACTIVE' && remaining > 0,
+        isSalesPending,
+        isSalesEnded,
+        isAvailable: tier.status === 'ACTIVE' && remaining > 0 && !isSalesPending && !isSalesEnded,
       };
     });
+
+    const minPriceInCents =
+      tiersWithAvailability.length > 0
+        ? Math.min(...tiersWithAvailability.map((t) => t.displayPriceInCents))
+        : 0;
 
     // Compute verified attendee count if guest count is not hidden
     let guestCount: number | null = null;
@@ -333,6 +357,7 @@ export async function getEventBySlug(req: Request, res: Response, next: NextFunc
       data: {
         event: {
           ...eventWithoutHash,
+          minPriceInCents,
           isLocked: false,
           hasAccess: true,
           guestCount,
@@ -430,9 +455,15 @@ export async function getFeaturedEvents(_req: Request, res: Response, next: Next
 
     const enhanced = events.map((e) => {
       const { passwordHash: _, ...clean } = e;
+      const tiersWithDisplay = clean.ticketTiers.map((t) => ({
+        ...t,
+        grossPriceInCents: t.priceInCents,
+        displayPriceInCents: calculateDisplayPriceFromGross(t.priceInCents),
+      }));
       return {
         ...clean,
-        minPriceInCents: clean.ticketTiers.length > 0 ? Math.min(...clean.ticketTiers.map((t) => t.priceInCents)) : 0,
+        ticketTiers: tiersWithDisplay,
+        minPriceInCents: tiersWithDisplay.length > 0 ? Math.min(...tiersWithDisplay.map((t) => t.displayPriceInCents)) : 0,
         currency: clean.ticketTiers[0]?.currency || 'USD',
       };
     });

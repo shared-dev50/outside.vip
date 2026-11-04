@@ -308,34 +308,31 @@ const PaymentContent: React.FC<PaymentContentProps> = ({
             ))}
           </div>
 
-          {dialogFees.ticketSubtotalInCents > 0 && (
-            <div className="pt-3 border-t border-gray-100 space-y-1.5 text-xs text-gray-500">
-              <div className="flex justify-between">
-                <span>Platform fee (10%)</span>
-                <span className="text-gray-700 font-medium font-mono">
-                  {formatPrice(dialogFees.platformFeeInCents, currency)}
-                </span>
-              </div>
-              <div className="flex justify-between">
-                <span>Service fee ($0.95 / ticket)</span>
-                <span className="text-gray-700 font-medium font-mono">
-                  {formatPrice(dialogFees.serviceFeeInCents, currency)}
-                </span>
-              </div>
-              <div className="flex justify-between">
-                <span>Stripe processing (est. 2.9% + $0.30)</span>
-                <span className="text-gray-700 font-medium font-mono">
-                  {formatPrice(dialogFees.processingFeeInCents, currency)}
-                </span>
-              </div>
+          <div className="pt-3 border-t border-gray-100 space-y-2 text-xs">
+            <div className="flex justify-between text-gray-600">
+              <span>Ticket price</span>
+              <span className="font-semibold text-gray-900 font-mono">
+                {dialogFees.ticketSubtotalInCents === 0
+                  ? 'Free'
+                  : formatPrice(dialogFees.ticketSubtotalInCents, currency)}
+              </span>
             </div>
-          )}
 
-          <div className="pt-3 border-t border-gray-200 flex items-center justify-between text-sm font-bold text-gray-900">
-            <span>Total Payable</span>
-            <span className="text-base text-gray-900 font-mono">
-              {formatPrice(paymentSession.totalInCents || dialogFees.buyerTotalInCents || totalInCents, currency)}
-            </span>
+            {dialogFees.customerServiceFeeInCents > 0 && (
+              <div className="flex justify-between text-gray-600">
+                <span>Service fee</span>
+                <span className="font-semibold text-gray-900 font-mono">
+                  {formatPrice(dialogFees.customerServiceFeeInCents, currency)}
+                </span>
+              </div>
+            )}
+
+            <div className="pt-2 border-t border-gray-200 flex items-center justify-between text-sm font-bold text-gray-900">
+              <span>Total</span>
+              <span className="text-base text-gray-900 font-mono">
+                {formatPrice(paymentSession.totalInCents || dialogFees.buyerTotalInCents || totalInCents, currency)}
+              </span>
+            </div>
           </div>
         </div>
 

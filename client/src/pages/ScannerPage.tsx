@@ -29,7 +29,9 @@ type ScanStatus =
   | 'wrong_event'
   | 'cancelled'
   | 'unpaid'
-  | 'forbidden';
+  | 'forbidden'
+  | 'not_yet_valid'
+  | 'expired';
 
 interface EventOption {
   id: string;
@@ -343,6 +345,20 @@ export const ScannerPage: React.FC = () => {
       } else if (code === 'INVALID_TOKEN' || status === 404) {
         setScanStatus('invalid');
         setTicketMeta({ note: message || 'Scanned credential does not exist in the database.' });
+      } else if (code === 'TICKET_NOT_YET_VALID' || message.toLowerCase().includes('not yet valid')) {
+        setScanStatus('not_yet_valid');
+        setTicketMeta({
+          note: message || 'This ticket is not yet valid for entry.',
+          attendee: err.data?.ticket?.attendeeName,
+          tier: err.data?.ticket?.tierName,
+        });
+      } else if (code === 'TICKET_EXPIRED' || message.toLowerCase().includes('validity expired') || message.toLowerCase().includes('expired')) {
+        setScanStatus('expired');
+        setTicketMeta({
+          note: message || 'This ticket validity window has expired.',
+          attendee: err.data?.ticket?.attendeeName,
+          tier: err.data?.ticket?.tierName,
+        });
       } else if (status === 401 || status === 403) {
         setScanStatus('forbidden');
         setTicketMeta({
@@ -870,6 +886,54 @@ export const ScannerPage: React.FC = () => {
                   <p className="text-xs text-gray-500 mt-2 max-w-md mx-auto">
                     {ticketMeta?.note || 'You do not have organizer permissions to check in attendees for this event.'}
                   </p>
+                </div>
+              </div>
+            )}
+
+            {scanStatus === 'not_yet_valid' && (
+              <div className="space-y-4">
+                <div className="w-20 h-20 rounded-full bg-amber-50 text-amber-600 mx-auto flex items-center justify-center border border-amber-200">
+                  <AlertTriangle className="w-10 h-10" />
+                </div>
+                <div>
+                  <span className="px-3.5 py-1 rounded-full bg-amber-100 text-amber-800 font-mono font-semibold text-xs uppercase tracking-wider border border-amber-300 inline-block mb-3">
+                    Ticket Not Yet Valid
+                  </span>
+                  <h2 className="text-xl sm:text-2xl font-display font-bold text-gray-900">
+                    Admission Not Started
+                  </h2>
+                  <p className="text-xs text-gray-600 mt-2 max-w-md mx-auto">
+                    {ticketMeta?.note || 'This ticket is not yet valid for entry.'}
+                  </p>
+                  {ticketMeta?.tier && (
+                    <div className="mt-3 inline-block px-3 py-1 bg-gray-50 border border-gray-200 rounded-lg text-xs font-mono text-gray-700">
+                      Tier: <strong>{ticketMeta.tier}</strong>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {scanStatus === 'expired' && (
+              <div className="space-y-4">
+                <div className="w-20 h-20 rounded-full bg-rose-50 text-rose-600 mx-auto flex items-center justify-center border border-rose-200">
+                  <XCircle className="w-10 h-10" />
+                </div>
+                <div>
+                  <span className="px-3.5 py-1 rounded-full bg-rose-100 text-rose-800 font-mono font-semibold text-xs uppercase tracking-wider border border-rose-300 inline-block mb-3">
+                    Ticket Validity Expired
+                  </span>
+                  <h2 className="text-xl sm:text-2xl font-display font-bold text-gray-900">
+                    Entry Window Closed
+                  </h2>
+                  <p className="text-xs text-gray-600 mt-2 max-w-md mx-auto">
+                    {ticketMeta?.note || 'This ticket has expired and can no longer be used for admission.'}
+                  </p>
+                  {ticketMeta?.tier && (
+                    <div className="mt-3 inline-block px-3 py-1 bg-gray-50 border border-gray-200 rounded-lg text-xs font-mono text-gray-700">
+                      Tier: <strong>{ticketMeta.tier}</strong>
+                    </div>
+                  )}
                 </div>
               </div>
             )}

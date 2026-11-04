@@ -326,6 +326,19 @@ export const OrderConfirmationPage: React.FC = () => {
                         <Calendar className="w-4 h-4 text-gray-400 shrink-0" />
                         <span>{formatDate(order.event?.startAt)}</span>
                       </div>
+                      {(tkt.ticketTier?.validityStartAt || tkt.ticketTier?.validityEndAt) && (
+                        <div className="flex items-center gap-2 text-indigo-700 font-medium">
+                          <Clock className="w-4 h-4 text-indigo-500 shrink-0" />
+                          <span>
+                            Entry Validity:{' '}
+                            {tkt.ticketTier.validityStartAt && tkt.ticketTier.validityEndAt
+                              ? `${formatDate(tkt.ticketTier.validityStartAt || undefined)} – ${formatDate(tkt.ticketTier.validityEndAt || undefined)}`
+                              : tkt.ticketTier.validityStartAt
+                              ? `Starting ${formatDate(tkt.ticketTier.validityStartAt || undefined)}`
+                              : `Until ${formatDate(tkt.ticketTier.validityEndAt || undefined)}`}
+                          </span>
+                        </div>
+                      )}
                       {order.event?.venueName && (
                         <div className="flex items-center gap-2">
                           <MapPin className="w-4 h-4 text-gray-400 shrink-0" />

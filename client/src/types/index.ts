@@ -66,7 +66,9 @@ export type CheckInResult =
   | 'ALREADY_CHECKED_IN'
   | 'INVALID_TOKEN'
   | 'WRONG_EVENT'
-  | 'CANCELLED_TICKET';
+  | 'CANCELLED_TICKET'
+  | 'TICKET_NOT_YET_VALID'
+  | 'TICKET_EXPIRED';
 
 export interface User {
   id: string;
@@ -94,6 +96,8 @@ export interface TicketTier {
   name: string;
   description?: string | null;
   priceInCents: number;
+  grossPriceInCents?: number;
+  displayPriceInCents?: number;
   currency: string;
   totalCapacity: number;
   reservedQuantity: number;
@@ -103,8 +107,12 @@ export interface TicketTier {
   maxPerOrder: number;
   salesStartAt?: string | null;
   salesEndAt?: string | null;
+  validityStartAt?: string | null;
+  validityEndAt?: string | null;
   status: TicketTierStatus;
   isAvailable?: boolean;
+  isSalesPending?: boolean;
+  isSalesEnded?: boolean;
   waitlistEnabled?: boolean;
   waitlistWaitingCount?: number;
   waitlistOfferedCount?: number;

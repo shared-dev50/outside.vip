@@ -10,6 +10,9 @@ export const STRIPE_FIXED_CENTS = 30; // $0.30 (30 cents per transaction)
 
 export interface TierFeeBreakdown {
   ticketPriceInCents: number;
+  grossPriceInCents: number;
+  displayPriceInCents: number;
+  customerServiceFeeInCents: number;
   platformFeeInCents: number;
   serviceFeeInCents: number;
   subtotalInCents: number;
@@ -32,6 +35,48 @@ export interface CombinedEarningsBreakdown {
   totalProjectedProcessingFeesInCents: number;
 }
 
+/**
+ * Calculates the all-in display price in integer cents for an organizer gross ticket price.
+ * Formula: Display price = Math.round((Gross * 1.10 + 95 + 30) / (1 - 0.029))
+ */
+export function calculateDisplayPriceFromGross(grossInCents: number): number {
+  const safeGross = Math.max(0, Math.round(grossInCents));
+  if (safeGross === 0) return 0;
+  const platformFee = Math.round(safeGross * (PLATFORM_FEE_PERCENT / 100));
+  const subtotal = safeGross + platformFee + SERVICE_FEE_CENTS;
+  return Math.round((subtotal + STRIPE_FIXED_CENTS) / (1 - STRIPE_PERCENT));
+}
+
+/**
+ * Calculates the organizer gross ticket price in integer cents from a customer display price.
+ * Inverts: Display = (Gross * 1.10 + 95 + 30) / (1 - 0.029)
+ * Gross = Math.round((Display * (1 - 0.029) - 95 - 30) / 1.10)
+ */
+export function calculateGrossPriceFromDisplay(displayInCents: number): number {
+  const safeDisplay = Math.max(0, Math.round(displayInCents));
+  if (safeDisplay === 0) return 0;
+  const netBeforeFees = safeDisplay * (1 - STRIPE_PERCENT) - SERVICE_FEE_CENTS - STRIPE_FIXED_CENTS;
+  if (netBeforeFees <= 0) return 0;
+  let gross = Math.round(netBeforeFees / (1 + PLATFORM_FEE_PERCENT / 100));
+
+  // Fine-tune to nearest cent if integer rounding causes 1-cent drift
+  const candidateDisplay = calculateDisplayPriceFromGross(gross);
+  if (candidateDisplay !== safeDisplay) {
+    const dMinus = calculateDisplayPriceFromGross(Math.max(0, gross - 1));
+    const dPlus = calculateDisplayPriceFromGross(gross + 1);
+    const diffCurrent = Math.abs(candidateDisplay - safeDisplay);
+    const diffMinus = Math.abs(dMinus - safeDisplay);
+    const diffPlus = Math.abs(dPlus - safeDisplay);
+    if (diffMinus < diffCurrent && diffMinus <= diffPlus) {
+      gross = Math.max(0, gross - 1);
+    } else if (diffPlus < diffCurrent) {
+      gross = gross + 1;
+    }
+  }
+
+  return Math.max(0, gross);
+}
+
 export function calculateTierEarnings(
   ticketPriceInCents: number,
   capacity: number = 1
@@ -42,6 +87,9 @@ export function calculateTierEarnings(
   if (safePrice === 0) {
     return {
       ticketPriceInCents: 0,
+      grossPriceInCents: 0,
+      displayPriceInCents: 0,
+      customerServiceFeeInCents: 0,
       platformFeeInCents: 0,
       serviceFeeInCents: 0,
       subtotalInCents: 0,
@@ -71,9 +119,13 @@ export function calculateTierEarnings(
   // Organizer receives 100% of face value; buyer absorbs fees
   const organizerEarningsInCents = safePrice;
   const platformRevenueInCents = platformFeeInCents + serviceFeeInCents;
+  const customerServiceFeeInCents = platformFeeInCents + serviceFeeInCents + processingFeeInCents;
 
   return {
     ticketPriceInCents: safePrice,
+    grossPriceInCents: safePrice,
+    displayPriceInCents: buyerTotalInCents,
+    customerServiceFeeInCents,
     platformFeeInCents,
     serviceFeeInCents,
     subtotalInCents,
@@ -135,6 +187,7 @@ export interface CheckoutFeeBreakdown {
   serviceFeeInCents: number;
   preProcessingTotalInCents: number;
   processingFeeInCents: number;
+  customerServiceFeeInCents: number;
   buyerTotalInCents: number;
   organizerEarningsInCents: number;
   platformRevenueInCents: number;
@@ -175,6 +228,7 @@ export function calculateCheckoutFeeBreakdown(
       serviceFeeInCents: 0,
       preProcessingTotalInCents: 0,
       processingFeeInCents: 0,
+      customerServiceFeeInCents: 0,
       buyerTotalInCents: 0,
       organizerEarningsInCents: 0,
       platformRevenueInCents: 0,
@@ -193,6 +247,7 @@ export function calculateCheckoutFeeBreakdown(
   const processingFeeInCents = buyerTotalInCents - preProcessingTotalInCents;
   const organizerEarningsInCents = ticketSubtotalInCents;
   const platformRevenueInCents = platformFeeInCents + serviceFeeInCents;
+  const customerServiceFeeInCents = platformFeeInCents + serviceFeeInCents + processingFeeInCents;
 
   // Financial balance invariant
   if (
@@ -211,6 +266,7 @@ export function calculateCheckoutFeeBreakdown(
     serviceFeeInCents,
     preProcessingTotalInCents,
     processingFeeInCents,
+    customerServiceFeeInCents,
     buyerTotalInCents,
     organizerEarningsInCents,
     platformRevenueInCents,

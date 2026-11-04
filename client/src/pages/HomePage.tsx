@@ -102,8 +102,11 @@ export const HomePage: React.FC = () => {
                   }`}
                 >
                   <div className="aspect-[3/4] bg-stone-200 rounded-sm" />
-                  <div className="h-4 w-3/4 bg-stone-200 rounded" />
-                  <div className="h-3 w-1/2 bg-stone-200 rounded" />
+                  <div className="space-y-1.5 pt-0.5">
+                    <div className="h-4 w-5/6 bg-stone-200 rounded" />
+                    <div className="h-3 w-3/4 bg-stone-200 rounded" />
+                    <div className="h-3 w-1/2 bg-stone-200 rounded" />
+                  </div>
                 </div>
               ))}
             </div>

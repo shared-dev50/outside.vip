@@ -497,19 +497,32 @@ export async function createOrganizerEvent(req: Request, res: Response, next: Ne
                 })),
               },
               ticketTiers: {
-                create: input.ticketTiers.map((tier) => ({
-                  name: tier.name,
-                  description: tier.description,
-                  priceInCents: tier.priceInCents,
-                  currency: tier.currency,
-                  totalCapacity: tier.totalCapacity,
-                  minPerOrder: tier.minPerOrder,
-                  maxPerOrder: tier.maxPerOrder,
-                  salesStartAt: tier.salesStartAt ? new Date(tier.salesStartAt) : null,
-                  salesEndAt: tier.salesEndAt ? new Date(tier.salesEndAt) : null,
-                  status: tier.status,
-                  waitlistEnabled: tier.waitlistEnabled ?? false,
-                })),
+                create: input.ticketTiers.map((tier) => {
+                  const shiftMs = occ.startAt.getTime() - occurrences[0].startAt.getTime();
+                  return {
+                    name: tier.name,
+                    description: tier.description,
+                    priceInCents: tier.priceInCents,
+                    currency: tier.currency,
+                    totalCapacity: tier.totalCapacity,
+                    minPerOrder: tier.minPerOrder,
+                    maxPerOrder: tier.maxPerOrder,
+                    salesStartAt: tier.salesStartAt
+                      ? new Date(new Date(tier.salesStartAt).getTime() + shiftMs)
+                      : null,
+                    salesEndAt: tier.salesEndAt
+                      ? new Date(new Date(tier.salesEndAt).getTime() + shiftMs)
+                      : null,
+                    validityStartAt: tier.validityStartAt
+                      ? new Date(new Date(tier.validityStartAt).getTime() + shiftMs)
+                      : null,
+                    validityEndAt: tier.validityEndAt
+                      ? new Date(new Date(tier.validityEndAt).getTime() + shiftMs)
+                      : null,
+                    status: tier.status,
+                    waitlistEnabled: tier.waitlistEnabled ?? false,
+                  };
+                }),
               },
             },
             include: {
@@ -637,6 +650,8 @@ export async function createOrganizerEvent(req: Request, res: Response, next: Ne
               maxPerOrder: tier.maxPerOrder,
               salesStartAt: tier.salesStartAt ? new Date(tier.salesStartAt) : null,
               salesEndAt: tier.salesEndAt ? new Date(tier.salesEndAt) : null,
+              validityStartAt: tier.validityStartAt ? new Date(tier.validityStartAt) : null,
+              validityEndAt: tier.validityEndAt ? new Date(tier.validityEndAt) : null,
               status: tier.status,
               waitlistEnabled: tier.waitlistEnabled ?? false,
             })),
@@ -975,6 +990,8 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
                   maxPerOrder: tier.maxPerOrder,
                   salesStartAt: tier.salesStartAt ? new Date(tier.salesStartAt) : null,
                   salesEndAt: tier.salesEndAt ? new Date(tier.salesEndAt) : null,
+                  validityStartAt: tier.validityStartAt ? new Date(tier.validityStartAt) : null,
+                  validityEndAt: tier.validityEndAt ? new Date(tier.validityEndAt) : null,
                   status: tier.status,
                   waitlistEnabled: tier.waitlistEnabled ?? false,
                 })),
@@ -1094,6 +1111,8 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
                 maxPerOrder: tier.maxPerOrder,
                 salesStartAt: tier.salesStartAt ? new Date(tier.salesStartAt) : null,
                 salesEndAt: tier.salesEndAt ? new Date(tier.salesEndAt) : null,
+                validityStartAt: tier.validityStartAt ? new Date(tier.validityStartAt) : null,
+                validityEndAt: tier.validityEndAt ? new Date(tier.validityEndAt) : null,
                 status: tier.status,
                 ...(tier.waitlistEnabled !== undefined && { waitlistEnabled: tier.waitlistEnabled }),
               },
@@ -1112,6 +1131,8 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
                 maxPerOrder: tier.maxPerOrder,
                 salesStartAt: tier.salesStartAt ? new Date(tier.salesStartAt) : null,
                 salesEndAt: tier.salesEndAt ? new Date(tier.salesEndAt) : null,
+                validityStartAt: tier.validityStartAt ? new Date(tier.validityStartAt) : null,
+                validityEndAt: tier.validityEndAt ? new Date(tier.validityEndAt) : null,
                 status: tier.status,
                 waitlistEnabled: tier.waitlistEnabled ?? false,
               },
@@ -1651,11 +1672,16 @@ export async function checkInTicket(req: Request, res: Response, next: NextFunct
           slug: true,
           title: true,
           organizerId: true,
+          timezone: true,
+          startAt: true,
+          endAt: true,
         },
       },
       ticketTier: {
         select: {
           name: true,
+          validityStartAt: true,
+          validityEndAt: true,
         },
       },
       order: {
@@ -1886,6 +1912,109 @@ export async function checkInTicket(req: Request, res: Response, next: NextFunct
       return;
     }
 
+    // 7b. Check ticket validity window (Limit Ticket Validity)
+    const now = new Date();
+    const validityStart = ticket.ticketTier.validityStartAt;
+    const validityEnd = ticket.ticketTier.validityEndAt;
+
+    if (validityStart && now < validityStart) {
+      console.warn(
+        `[CheckIn] Rejected TICKET_NOT_YET_VALID: token=${maskedToken}, validityStart=${validityStart.toISOString()}, now=${now.toISOString()}`
+      );
+      await prisma.checkInLog.create({
+        data: {
+          ticketId: ticket.id,
+          eventId: ticket.eventId,
+          scannedToken: ticket.ticketToken,
+          scannedByUserId: scannerUserId,
+          result: 'TICKET_NOT_YET_VALID',
+          notes: `Ticket scanned before validity window begins (${validityStart.toISOString()})`,
+        },
+      });
+
+      const formattedStart = (() => {
+        try {
+          return new Intl.DateTimeFormat('en-US', {
+            timeZone: ticket.event.timezone || 'UTC',
+            dateStyle: 'medium',
+            timeStyle: 'short',
+          }).format(validityStart);
+        } catch {
+          return validityStart.toISOString();
+        }
+      })();
+
+      res.status(400).json({
+        success: false,
+        error: {
+          message: `Ticket is not yet valid for entry. Admission begins on ${formattedStart}.`,
+          statusCode: 400,
+          code: 'TICKET_NOT_YET_VALID',
+        },
+        data: {
+          result: 'TICKET_NOT_YET_VALID',
+          message: `Ticket is not yet valid for entry. Admission begins on ${formattedStart}.`,
+          ticket: {
+            id: ticket.id,
+            attendeeName: ticket.attendeeName,
+            tierName: ticket.ticketTier.name,
+            validityStartAt: validityStart,
+            validityEndAt: validityEnd,
+          },
+        },
+      });
+      return;
+    }
+
+    if (validityEnd && now > validityEnd) {
+      console.warn(
+        `[CheckIn] Rejected TICKET_EXPIRED: token=${maskedToken}, validityEnd=${validityEnd.toISOString()}, now=${now.toISOString()}`
+      );
+      await prisma.checkInLog.create({
+        data: {
+          ticketId: ticket.id,
+          eventId: ticket.eventId,
+          scannedToken: ticket.ticketToken,
+          scannedByUserId: scannerUserId,
+          result: 'TICKET_EXPIRED',
+          notes: `Ticket scanned after validity window expired (${validityEnd.toISOString()})`,
+        },
+      });
+
+      const formattedEnd = (() => {
+        try {
+          return new Intl.DateTimeFormat('en-US', {
+            timeZone: ticket.event.timezone || 'UTC',
+            dateStyle: 'medium',
+            timeStyle: 'short',
+          }).format(validityEnd);
+        } catch {
+          return validityEnd.toISOString();
+        }
+      })();
+
+      res.status(400).json({
+        success: false,
+        error: {
+          message: `Ticket validity expired on ${formattedEnd}. Entry is no longer permitted.`,
+          statusCode: 400,
+          code: 'TICKET_EXPIRED',
+        },
+        data: {
+          result: 'TICKET_EXPIRED',
+          message: `Ticket validity expired on ${formattedEnd}. Entry is no longer permitted.`,
+          ticket: {
+            id: ticket.id,
+            attendeeName: ticket.attendeeName,
+            tierName: ticket.ticketTier.name,
+            validityStartAt: validityStart,
+            validityEndAt: validityEnd,
+          },
+        },
+      });
+      return;
+    }
+
     // 8. Atomic Check-in with race condition protection
     const checkInTime = new Date();
     const updateResult = await prisma.ticket.updateMany({
@@ -1966,6 +2095,8 @@ export async function checkInTicket(req: Request, res: Response, next: NextFunct
           orderNumber: ticket.order.orderNumber,
           checkedInAt: checkInTime,
           eventTitle: ticket.event.title,
+          validityStartAt: ticket.ticketTier.validityStartAt,
+          validityEndAt: ticket.ticketTier.validityEndAt,
         },
         totalCheckedIn,
       },
