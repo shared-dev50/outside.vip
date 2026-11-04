@@ -6,6 +6,7 @@ import { Event, TicketTier, CheckoutSessionResult } from '../../types';
 import { getStripePromise } from '../../lib/stripe';
 import { api } from '../../lib/api';
 import { calculateCheckoutFeeBreakdown } from '../../lib/fees';
+import { validateAndNormalizePhone } from '../../lib/phone';
 
 export interface CheckoutDialogProps {
   isOpen: boolean;
@@ -146,6 +147,14 @@ const PaymentContent: React.FC<PaymentContentProps> = ({
       return;
     }
 
+    const phoneCheck = validateAndNormalizePhone(currentPhone);
+    if (!currentPhone || !phoneCheck.isValid) {
+      setErrorMessage(
+        phoneCheck.error || 'Please provide a valid phone number (e.g. +1 555-123-4567 or +254 712 345678).'
+      );
+      return;
+    }
+
     setPaymentStep('processing');
     setErrorMessage(null);
 
@@ -156,7 +165,7 @@ const PaymentContent: React.FC<PaymentContentProps> = ({
           billing_details: {
             name: currentName,
             email: currentEmail,
-            phone: currentPhone || undefined,
+            phone: phoneCheck.normalized || currentPhone,
           },
         },
       });
@@ -383,7 +392,7 @@ const PaymentContent: React.FC<PaymentContentProps> = ({
 
             <div className="space-y-1">
               <label htmlFor="dialog-attendee-phone" className="text-[11px] font-medium text-gray-700 block">
-                Phone Number <span className="text-gray-400 font-normal">(Optional — for mobile ticket delivery)</span>
+                Phone Number <span className="text-rose-500 font-bold">*</span>
               </label>
               <input
                 id="dialog-attendee-phone"
@@ -395,7 +404,8 @@ const PaymentContent: React.FC<PaymentContentProps> = ({
                   setPhone(val);
                   onUpdateAttendee?.({ name, email, phone: val });
                 }}
-                placeholder="e.g. (555) 000-0000"
+                placeholder="e.g. +1 (555) 000-0000 or +254 712 345678"
+                required
                 className="w-full px-3 py-2 rounded-lg bg-gray-50/60 border border-gray-200 text-gray-900 text-xs focus:bg-white focus:outline-none focus:border-gray-900 transition-colors disabled:opacity-60"
               />
             </div>

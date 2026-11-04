@@ -534,6 +534,7 @@ describe('Automatic Ticket Waitlist System', () => {
           items: [{ ticketTierId: soldOutTierId, quantity: 2 }],
           customerName: 'Impostor',
           customerEmail: 'impostor@outside.vip',
+          customerPhone: '+15551234567',
           offerToken: customer3Token,
         });
 
@@ -807,6 +808,7 @@ describe('Automatic Ticket Waitlist System', () => {
           items: [{ ticketTierId: testTierId, quantity: 2 }],
           customerName: 'Active Buyer',
           customerEmail: 'activebuyer@outside.vip',
+          customerPhone: '+15551234567',
           offerToken: customerToken,
         });
 
@@ -896,6 +898,7 @@ describe('Automatic Ticket Waitlist System', () => {
           items: [{ ticketTierId: tier.id, quantity: 1 }],
           customerName: 'Abandoner',
           customerEmail: 'abandon@outside.vip',
+          customerPhone: '+15551234567',
           offerToken: token,
         });
 

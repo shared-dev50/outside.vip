@@ -8,7 +8,11 @@ export async function handleCreateCheckoutSession(
   next: NextFunction
 ): Promise<void> {
   try {
-    const input = createCheckoutSessionSchema.parse(req.body);
+    const headerToken = req.headers['x-event-access-token'] as string | undefined;
+    const input = createCheckoutSessionSchema.parse({
+      ...req.body,
+      eventAccessToken: req.body.eventAccessToken || headerToken,
+    });
     const userId = req.user?.userId;
 
     const result = await createCheckoutSession(input, userId);

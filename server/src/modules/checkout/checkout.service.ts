@@ -124,7 +124,16 @@ export async function createCheckoutSession(
 ): Promise<CheckoutResult> {
   await releaseExpiredReservations();
 
-  const { eventId, items, customerEmail, customerName, customerPhone, idempotencyKey: clientIdempotency, offerToken } = input;
+  const {
+    eventId,
+    items,
+    customerEmail,
+    customerName,
+    customerPhone,
+    idempotencyKey: clientIdempotency,
+    offerToken,
+    marketingConsent,
+  } = input;
 
   const event = await prisma.event.findUnique({
     where: { id: eventId },
@@ -147,7 +156,7 @@ export async function createCheckoutSession(
   }
 
   if (event.isPasswordProtected) {
-    if (!verifyEventAccessToken(input.eventAccessToken, event.id)) {
+    if (!verifyEventAccessToken(input.eventAccessToken, event.id, event.passwordHash)) {
       throw new ForbiddenError(
         'This event is password protected. Valid access token required to checkout.'
       );
@@ -387,6 +396,8 @@ export async function createCheckoutSession(
             customerEmail,
             customerName,
             customerPhone: customerPhone || null,
+            marketingConsent: Boolean(marketingConsent),
+            marketingConsentAt: marketingConsent ? new Date() : null,
             totalInCents: feeBreakdown.buyerTotalInCents,
             currency: currency.toUpperCase(),
             platformFeeInCents: feeBreakdown.buyerTotalInCents - feeBreakdown.organizerEarningsInCents,

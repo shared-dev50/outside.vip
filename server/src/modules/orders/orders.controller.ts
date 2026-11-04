@@ -155,6 +155,8 @@ export async function getOrderByOrderNumber(
           customerName: order.customerName,
           customerEmail: order.customerEmail,
           customerPhone: order.customerPhone,
+          marketingConsent: order.marketingConsent,
+          marketingConsentAt: order.marketingConsentAt,
           totalInCents: order.totalInCents,
           currency: order.currency,
           platformFeeInCents: order.platformFeeInCents,

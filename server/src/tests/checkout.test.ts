@@ -137,6 +137,7 @@ describe('Outside.vip Checkout, Atomic Reservations & Payments API', () => {
           items: [{ ticketTierId: activeTierId, quantity: 1 }],
           customerEmail: 'buyer@outside.vip',
           customerName: 'Test Buyer',
+          customerPhone: '+15551234567',
         });
 
       expect(res.status).toBe(404);
@@ -157,6 +158,7 @@ describe('Outside.vip Checkout, Atomic Reservations & Payments API', () => {
           items: [{ ticketTierId: otherTier.id, quantity: 1 }],
           customerEmail: 'buyer@outside.vip',
           customerName: 'Test Buyer',
+          customerPhone: '+15551234567',
         });
 
       expect(res.status).toBe(400);
@@ -171,6 +173,7 @@ describe('Outside.vip Checkout, Atomic Reservations & Payments API', () => {
           items: [{ ticketTierId: limitedTierId, quantity: 3 }],
           customerEmail: 'greedy@outside.vip',
           customerName: 'Greedy Buyer',
+          customerPhone: '+15551234567',
         });
 
       expect(res.status).toBe(400);
@@ -253,6 +256,7 @@ describe('Outside.vip Checkout, Atomic Reservations & Payments API', () => {
           items: [{ ticketTierId: activeTierId, quantity: 1 }],
           customerEmail: 'single_buyer@outside.vip',
           customerName: 'Single Buyer',
+          customerPhone: '+15551234567',
         });
 
       expect(resSingle.status).toBe(201);
@@ -283,6 +287,7 @@ describe('Outside.vip Checkout, Atomic Reservations & Payments API', () => {
           items: [{ ticketTierId: activeTierId, quantity: 2 }],
           customerEmail: 'multi_buyer@outside.vip',
           customerName: 'Multi Buyer',
+          customerPhone: '+15551234567',
         });
 
       expect(resMulti.status).toBe(201);
@@ -316,6 +321,7 @@ describe('Outside.vip Checkout, Atomic Reservations & Payments API', () => {
           items: [{ ticketTierId: activeTierId, quantity: 1 }],
           customerEmail: 'dup_buyer@outside.vip',
           customerName: 'Dup Buyer',
+          customerPhone: '+15551234567',
           idempotencyKey,
         });
 
@@ -337,6 +343,7 @@ describe('Outside.vip Checkout, Atomic Reservations & Payments API', () => {
           items: [{ ticketTierId: activeTierId, quantity: 1 }],
           customerEmail: 'dup_buyer@outside.vip',
           customerName: 'Dup Buyer',
+          customerPhone: '+15551234567',
           idempotencyKey,
         });
 
@@ -366,6 +373,7 @@ describe('Outside.vip Checkout, Atomic Reservations & Payments API', () => {
           items: [{ ticketTierId: activeTierId, quantity: 2 }],
           customerEmail: 'rollback_test@outside.vip',
           customerName: 'Rollback Buyer',
+          customerPhone: '+15551234567',
         });
 
       expect(res.status).toBe(400);

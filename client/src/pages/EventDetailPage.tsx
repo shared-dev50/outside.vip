@@ -1,12 +1,13 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../lib/api';
 import { TicketTier, CheckoutSessionResult, WaitlistOfferInfo } from '../types';
 import { CheckoutDialog } from '../components/events/CheckoutDialog';
 import { JoinWaitlistDialog } from '../components/events/JoinWaitlistDialog';
 import { calculateCheckoutFeeBreakdown } from '../lib/fees';
 import { getYouTubeEmbedUrl } from '../lib/youtube';
+import { validateAndNormalizePhone } from '../lib/phone';
 import { 
   Calendar, 
   MapPin, 
@@ -44,7 +45,10 @@ export const EventDetailPage: React.FC = () => {
   const [selectedQuantities, setSelectedQuantities] = useState<Record<string, number>>({});
   const [attendeeName, setAttendeeName] = useState('');
   const [attendeeEmail, setAttendeeEmail] = useState('');
+  const queryClient = useQueryClient();
   const [attendeePhone, setAttendeePhone] = useState('');
+  const [phoneError, setPhoneError] = useState<string | null>(null);
+  const [marketingConsent, setMarketingConsent] = useState(false);
   const [isReserving, setIsReserving] = useState(false);
   const [copiedLink, setCopiedLink] = useState(false);
   const [ticketsError, setTicketsError] = useState<string | null>(null);
@@ -78,6 +82,16 @@ export const EventDetailPage: React.FC = () => {
   });
 
   const event = data?.event;
+
+  // Clear stale token if event is password protected and access is denied
+  useEffect(() => {
+    if (event?.isPasswordProtected && !event?.hasAccess && eventAccessToken) {
+      if (typeof window !== 'undefined' && slug) {
+        sessionStorage.removeItem(`outside_event_token_${slug}`);
+      }
+      setEventAccessToken(null);
+    }
+  }, [event?.isPasswordProtected, event?.hasAccess, eventAccessToken, slug]);
 
   useEffect(() => {
     if (!offerTokenParam) return;
@@ -222,11 +236,14 @@ export const EventDetailPage: React.FC = () => {
     try {
       const res = await api.events.verifyPassword(slug!, passwordInput.trim());
       if (res.eventAccessToken) {
-        if (typeof window !== 'undefined') {
+        if (typeof window !== 'undefined' && slug) {
           sessionStorage.setItem(`outside_event_token_${slug}`, res.eventAccessToken);
         }
         setEventAccessToken(res.eventAccessToken);
-        refetch();
+        const unlocked = await api.events.bySlug(slug!, res.eventAccessToken);
+        queryClient.setQueryData(['event', slug, res.eventAccessToken], unlocked);
+        queryClient.invalidateQueries({ queryKey: ['event', slug] });
+        setPasswordInput('');
       }
     } catch (err: any) {
       setPasswordError(err.message || 'Incorrect password. Access denied.');
@@ -268,6 +285,18 @@ export const EventDetailPage: React.FC = () => {
       setEmailError(null);
     }
 
+    const trimmedPhone = attendeePhone.trim();
+    const phoneCheck = validateAndNormalizePhone(trimmedPhone);
+    if (!trimmedPhone) {
+      setPhoneError('Please enter your phone number.');
+      hasError = true;
+    } else if (!phoneCheck.isValid) {
+      setPhoneError(phoneCheck.error || 'Please enter a valid phone number (e.g. +1 555-123-4567 or +254 712 345678).');
+      hasError = true;
+    } else {
+      setPhoneError(null);
+    }
+
     if (hasError || !event) {
       return;
     }
@@ -276,6 +305,8 @@ export const EventDetailPage: React.FC = () => {
       return;
     }
 
+    const normalizedPhone = phoneCheck.normalized || trimmedPhone;
+
     // Build snapshot key to check if current selection matches active paymentSession
     const currentSnapshotKey = JSON.stringify({
       items: Object.entries(selectedQuantities)
@@ -283,7 +314,8 @@ export const EventDetailPage: React.FC = () => {
         .sort(([a], [b]) => a.localeCompare(b)),
       name: trimmedName,
       email: trimmedEmail.toLowerCase(),
-      phone: attendeePhone.trim(),
+      phone: normalizedPhone,
+      marketingConsent,
     });
 
     const now = Date.now();
@@ -305,14 +337,20 @@ export const EventDetailPage: React.FC = () => {
         .map(([ticketTierId, quantity]) => ({ ticketTierId, quantity }));
 
       const isOfferActive = Boolean(offerInfo && (offerSecondsRemaining ?? 0) > 0);
+      const activeEventToken =
+        eventAccessToken ||
+        (typeof window !== 'undefined' && slug
+          ? sessionStorage.getItem(`outside_event_token_${slug}`)
+          : null);
 
       const res = await api.checkout.createSession({
         eventId: event.id,
         items,
         customerEmail: trimmedEmail,
         customerName: trimmedName,
-        customerPhone: attendeePhone.trim() || undefined,
-        eventAccessToken: eventAccessToken || undefined,
+        customerPhone: normalizedPhone,
+        marketingConsent,
+        eventAccessToken: activeEventToken || undefined,
         offerToken: isOfferActive ? offerInfo!.token : undefined,
       });
 
@@ -967,7 +1005,7 @@ export const EventDetailPage: React.FC = () => {
 
                 <div>
                   <label htmlFor="attendee-email" className="font-semibold text-gray-900 block text-xs mb-1">
-                    Email address
+                    Email address <span className="text-rose-500">*</span>
                   </label>
                   <input
                     id="attendee-email"
@@ -988,6 +1026,48 @@ export const EventDetailPage: React.FC = () => {
                   {emailError && (
                     <p className="text-[11px] text-rose-600 font-medium mt-1">{emailError}</p>
                   )}
+                </div>
+
+                <div>
+                  <label htmlFor="attendee-phone" className="font-semibold text-gray-900 block text-xs mb-1">
+                    Phone number <span className="text-rose-500">*</span>
+                  </label>
+                  <input
+                    id="attendee-phone"
+                    type="tel"
+                    placeholder="e.g. +1 (555) 000-0000"
+                    value={attendeePhone}
+                    onChange={(e) => {
+                      setAttendeePhone(e.target.value);
+                      if (phoneError) setPhoneError(null);
+                      if (checkoutError) setCheckoutError(null);
+                    }}
+                    className={`w-full px-3 py-2 rounded-md bg-white border text-gray-900 placeholder-gray-400 text-xs focus:outline-none transition-colors ${
+                      phoneError
+                        ? 'border-rose-400 focus:border-rose-500 bg-rose-50/20'
+                        : 'border-gray-300 focus:border-gray-900'
+                    }`}
+                  />
+                  {phoneError ? (
+                    <p className="text-[11px] text-rose-600 font-medium mt-1">{phoneError}</p>
+                  ) : (
+                    <p className="text-[10px] text-gray-400 mt-1">Accepts US and international numbers with country code.</p>
+                  )}
+                </div>
+
+                <div className="pt-1">
+                  <label className="flex items-start gap-2.5 cursor-pointer select-none text-xs text-gray-600">
+                    <input
+                      id="marketing-consent-checkbox"
+                      type="checkbox"
+                      checked={marketingConsent}
+                      onChange={(e) => setMarketingConsent(e.target.checked)}
+                      className="mt-0.5 rounded border-gray-300 text-gray-900 focus:ring-gray-900 h-3.5 w-3.5"
+                    />
+                    <span className="text-[11px] leading-relaxed text-gray-600">
+                      Keep me updated with news, announcements, and future events from this organizer (optional).
+                    </span>
+                  </label>
                 </div>
               </div>
 

@@ -384,6 +384,9 @@ model Order {
   customerName     String
   customerPhone    String?
   
+  marketingConsent    Boolean       @default(false)
+  marketingConsentAt  DateTime?
+  
   totalInCents     Int
   currency         String            @default("USD")
   

@@ -523,6 +523,7 @@ describe('Event Presentation & Page Configuration Features', () => {
             items: [{ ticketTierId: tierId, quantity: 1 }],
             customerEmail: 'guest@outside.vip',
             customerName: 'VIP Guest',
+            customerPhone: '+15551234567',
           });
 
         expect(failedCheckout.status).toBe(403);
@@ -536,6 +537,7 @@ describe('Event Presentation & Page Configuration Features', () => {
             items: [{ ticketTierId: tierId, quantity: 1 }],
             customerEmail: 'guest@outside.vip',
             customerName: 'VIP Guest',
+            customerPhone: '+15551234567',
             eventAccessToken: token,
           });
 

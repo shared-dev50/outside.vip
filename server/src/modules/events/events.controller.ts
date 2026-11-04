@@ -261,7 +261,7 @@ export async function getEventBySlug(req: Request, res: Response, next: NextFunc
         ? req.headers.authorization.substring(7)
         : undefined);
 
-    const hasTokenAccess = accessToken ? verifyEventAccessToken(accessToken, event.id) : false;
+    const hasTokenAccess = accessToken ? verifyEventAccessToken(accessToken, event.id, event.passwordHash) : false;
     const isOwner = req.user && (req.user.userId === event.organizerId || req.user.role === 'ADMIN');
     const hasAccess = !event.isPasswordProtected || hasTokenAccess || Boolean(isOwner);
 
@@ -391,7 +391,7 @@ export async function verifyEventPassword(req: Request, res: Response, next: Nex
     }
 
     clearPasswordRateLimit(rateLimitKey);
-    const eventAccessToken = signEventAccessToken(event.id);
+    const eventAccessToken = signEventAccessToken(event.id, event.passwordHash);
 
     res.json({
       success: true,

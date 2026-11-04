@@ -247,6 +247,7 @@ describe('Outside.vip Client Library', () => {
       items: [{ ticketTierId: 'tier-1', quantity: 2 }],
       customerEmail: 'test@outside.vip',
       customerName: 'Test Buyer',
+      customerPhone: '+15551234567',
     });
 
     expect(fetchSpy).toHaveBeenCalledWith(
@@ -332,7 +333,7 @@ describe('Outside.vip Client Library', () => {
       expect(key1).not.toBe(key3); // Changed selection triggers a new session
     });
 
-    it('supports optional customerPhone in api.checkout.createSession payload', async () => {
+    it('supports required customerPhone and optional marketingConsent in api.checkout.createSession payload', async () => {
       const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementationOnce(() =>
         Promise.resolve({
           ok: true,
@@ -358,12 +359,19 @@ describe('Outside.vip Client Library', () => {
         customerEmail: 'buyer@outside.vip',
         customerName: 'Buyer Name',
         customerPhone: '+254712345678',
+        marketingConsent: true,
       });
 
       expect(fetchSpy).toHaveBeenCalledWith(
         '/api/checkout/create-session',
         expect.objectContaining({
           body: expect.stringContaining('"customerPhone":"+254712345678"'),
+        })
+      );
+      expect(fetchSpy).toHaveBeenCalledWith(
+        '/api/checkout/create-session',
+        expect.objectContaining({
+          body: expect.stringContaining('"marketingConsent":true'),
         })
       );
       expect(res.orderNumber).toBe('OUT-2026-11111');

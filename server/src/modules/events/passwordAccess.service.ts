@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { env } from '../../config/env.js';
@@ -17,6 +18,7 @@ const LOCKOUT_DURATION_MS = 15 * 60 * 1000;
 export interface EventAccessTokenPayload {
   eventId: string;
   scope: 'event_access';
+  pwdSig?: string;
   iat?: number;
   exp?: number;
 }
@@ -70,26 +72,57 @@ export async function verifyEventPasswordMatch(
   return bcrypt.compare(plaintext, storedHash);
 }
 
-export function signEventAccessToken(eventId: string): string {
+/**
+ * Creates a deterministic fingerprint of the event's password hash.
+ * If the organizer changes or clears the password, this fingerprint will change,
+ * automatically invalidating previously issued event access tokens.
+ */
+export function createPasswordFingerprint(passwordHash?: string | null): string {
+  if (!passwordHash) return 'none';
+  return crypto.createHash('sha256').update(passwordHash).digest('hex').substring(0, 16);
+}
+
+/**
+ * Signs a short-lived event access token bound to the specific event ID and current password hash.
+ */
+export function signEventAccessToken(eventId: string, passwordHash?: string | null): string {
   return jwt.sign(
     {
       eventId,
       scope: 'event_access',
+      pwdSig: createPasswordFingerprint(passwordHash),
     } satisfies EventAccessTokenPayload,
     env.JWT_SECRET,
-    { expiresIn: '24h' }
+    { expiresIn: '12h' }
   );
 }
 
+/**
+ * Verifies an event access token.
+ * Validates scope, eventId, token expiration, and matches the password fingerprint
+ * so password changes or resets immediately invalidate previously granted access.
+ */
 export function verifyEventAccessToken(
   token?: string | null,
-  eventId?: string
+  eventId?: string,
+  currentPasswordHash?: string | null
 ): boolean {
   if (!token || !eventId) return false;
 
   try {
     const decoded = jwt.verify(token, env.JWT_SECRET) as EventAccessTokenPayload;
-    return decoded.eventId === eventId && decoded.scope === 'event_access';
+    if (decoded.eventId !== eventId || decoded.scope !== 'event_access') {
+      return false;
+    }
+
+    if (currentPasswordHash) {
+      const expectedSig = createPasswordFingerprint(currentPasswordHash);
+      if (decoded.pwdSig && decoded.pwdSig !== expectedSig) {
+        return false;
+      }
+    }
+
+    return true;
   } catch {
     return false;
   }

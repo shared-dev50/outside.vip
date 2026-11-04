@@ -422,6 +422,8 @@ export interface Order {
   customerEmail: string;
   customerName: string;
   customerPhone?: string | null;
+  marketingConsent?: boolean;
+  marketingConsentAt?: string | null;
   totalInCents: number;
   currency: string;
   platformFeeInCents?: number;
@@ -441,7 +443,8 @@ export interface CheckoutSessionInput {
   }>;
   customerEmail: string;
   customerName: string;
-  customerPhone?: string;
+  customerPhone: string;
+  marketingConsent?: boolean;
   idempotencyKey?: string;
   eventAccessToken?: string;
   offerToken?: string;
