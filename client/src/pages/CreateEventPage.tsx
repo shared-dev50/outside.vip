@@ -49,6 +49,7 @@ import { UploadProgressCard, UploadProgressInfo } from '../components/events/Upl
 import { LocationAutocompleteInput } from '../components/events/LocationAutocompleteInput';
 import { validateImageFile } from '../lib/imageCrop';
 import { TIMEZONE_GROUPS, formatTimezoneDisplay, DEFAULT_US_TIMEZONE } from '../lib/timezone';
+import { NumericInput } from '../components/common/NumericInput';
 
 export type WizardStep = 1 | 2 | 3 | 4;
 
@@ -57,10 +58,10 @@ interface FormTicketTier {
   tempId: string;
   name: string;
   description: string;
-  price: number; // in USD (0 for free)
-  totalCapacity: number;
-  minPerOrder: number;
-  maxPerOrder: number;
+  price: number | ''; // in USD (0 for free, '' when empty during editing)
+  totalCapacity: number | '';
+  minPerOrder: number | '';
+  maxPerOrder: number | '';
   salesStartAt: string;
   salesEndAt: string;
   status: TicketTierStatus;
@@ -193,10 +194,10 @@ export const CreateEventPage: React.FC = () => {
 
   const [isRecurring, setIsRecurring] = useState(false);
   const [recurrenceFrequency, setRecurrenceFrequency] = useState<RecurrenceFrequency>('WEEKLY');
-  const [recurrenceInterval, setRecurrenceInterval] = useState(1);
+  const [recurrenceInterval, setRecurrenceInterval] = useState<number | ''>(1);
   const [recurrenceWeekdays, setRecurrenceWeekdays] = useState<number[]>([5]); // Default Friday (5)
   const [recurrenceEndType, setRecurrenceEndType] = useState<'count' | 'until'>('count');
-  const [recurrenceCount, setRecurrenceCount] = useState(4);
+  const [recurrenceCount, setRecurrenceCount] = useState<number | ''>(4);
   const [recurrenceEndDate, setRecurrenceEndDate] = useState('2026-12-31T23:59');
   const [applyToFuture, setApplyToFuture] = useState(false);
 
@@ -768,7 +769,7 @@ export const CreateEventPage: React.FC = () => {
     const durationMs = Math.max(0, endDate.getTime() - startDate.getTime());
 
     const occurrences: Array<{ index: number; startAt: Date; endAt: Date }> = [];
-    const maxCount = recurrenceEndType === 'count' ? Math.min(52, Math.max(1, recurrenceCount || 1)) : 52;
+    const maxCount = recurrenceEndType === 'count' ? Math.min(52, Math.max(1, Number(recurrenceCount) || 1)) : 52;
     const untilDate = recurrenceEndType === 'until' && recurrenceEndDate ? new Date(recurrenceEndDate) : null;
 
     let current = new Date(startDate.getTime());
@@ -783,7 +784,7 @@ export const CreateEventPage: React.FC = () => {
           endAt: new Date(current.getTime() + durationMs),
         });
         count++;
-        current.setDate(current.getDate() + Math.max(1, recurrenceInterval));
+        current.setDate(current.getDate() + Math.max(1, Number(recurrenceInterval) || 1));
       }
     } else if (recurrenceFrequency === 'WEEKLY') {
       const targetWeekdays = recurrenceWeekdays.length > 0 ? recurrenceWeekdays : [startDate.getDay()];
@@ -811,7 +812,7 @@ export const CreateEventPage: React.FC = () => {
           endAt: new Date(current.getTime() + durationMs),
         });
         count++;
-        current.setMonth(current.getMonth() + Math.max(1, recurrenceInterval));
+        current.setMonth(current.getMonth() + Math.max(1, Number(recurrenceInterval) || 1));
       }
     }
 
@@ -860,7 +861,7 @@ export const CreateEventPage: React.FC = () => {
         return false;
       }
       if (isRecurring && !isEditing) {
-        if (recurrenceInterval < 1) {
+        if (recurrenceInterval === '' || Number(recurrenceInterval) < 1) {
           showNotification('error', 'Recurrence interval must be at least 1.');
           return false;
         }
@@ -868,7 +869,7 @@ export const CreateEventPage: React.FC = () => {
           showNotification('error', 'Please select at least one weekday for weekly recurrence.');
           return false;
         }
-        if (recurrenceEndType === 'count' && (recurrenceCount < 1 || recurrenceCount > 52)) {
+        if (recurrenceEndType === 'count' && (recurrenceCount === '' || Number(recurrenceCount) < 1 || Number(recurrenceCount) > 52)) {
           showNotification('error', 'Recurrence count must be between 1 and 52 occurrences.');
           return false;
         }
@@ -890,8 +891,24 @@ export const CreateEventPage: React.FC = () => {
           showNotification('error', 'All ticket tiers must have a valid tier name.');
           return false;
         }
-        if (tier.totalCapacity < 1) {
+        if (tier.totalCapacity === '' || Number(tier.totalCapacity) < 1) {
           showNotification('error', `Capacity for "${tier.name}" must be at least 1.`);
+          return false;
+        }
+        if (tier.price === '' || isNaN(Number(tier.price)) || Number(tier.price) < 0) {
+          showNotification('error', `Please provide a valid price for "${tier.name}" (enter 0 for free admission).`);
+          return false;
+        }
+        if (tier.minPerOrder !== '' && Number(tier.minPerOrder) < 1) {
+          showNotification('error', `Min per order for "${tier.name}" must be at least 1.`);
+          return false;
+        }
+        if (tier.maxPerOrder !== '' && Number(tier.maxPerOrder) < 1) {
+          showNotification('error', `Max per order for "${tier.name}" must be at least 1.`);
+          return false;
+        }
+        if (tier.minPerOrder !== '' && tier.maxPerOrder !== '' && Number(tier.maxPerOrder) < Number(tier.minPerOrder)) {
+          showNotification('error', `Max per order cannot be less than min per order for "${tier.name}".`);
           return false;
         }
       }
@@ -2077,23 +2094,25 @@ export const CreateEventPage: React.FC = () => {
                                 Repeat Every
                               </label>
                               <div className="flex items-center gap-2">
-                                <input
-                                  type="number"
-                                  min={1}
-                                  max={30}
+                                <NumericInput
                                   value={recurrenceInterval}
-                                  onChange={(e) => {
-                                    setRecurrenceInterval(Math.max(1, parseInt(e.target.value) || 1));
+                                  onChange={(val) => {
+                                    setRecurrenceInterval(val);
                                     setHasUnsavedChanges(true);
                                   }}
+                                  min={1}
+                                  max={30}
+                                  step={1}
+                                  allowDecimals={false}
+                                  placeholder="1"
                                   className="w-24 px-3 py-2 rounded-lg bg-white border border-stone-300 text-stone-900 text-sm font-mono focus:outline-none focus:border-stone-900"
                                 />
                                 <span className="text-xs font-mono text-stone-600">
                                   {recurrenceFrequency === 'DAILY'
-                                    ? recurrenceInterval > 1 ? 'days' : 'day'
+                                    ? (Number(recurrenceInterval) || 1) > 1 ? 'days' : 'day'
                                     : recurrenceFrequency === 'WEEKLY'
-                                    ? recurrenceInterval > 1 ? 'weeks' : 'week'
-                                    : recurrenceInterval > 1 ? 'months' : 'month'}
+                                    ? (Number(recurrenceInterval) || 1) > 1 ? 'weeks' : 'week'
+                                    : (Number(recurrenceInterval) || 1) > 1 ? 'months' : 'month'}
                                 </span>
                               </div>
                             </div>
@@ -2166,15 +2185,17 @@ export const CreateEventPage: React.FC = () => {
                                 Number of Occurrences (Max 52)
                               </label>
                               <div className="flex items-center gap-2">
-                                <input
-                                  type="number"
-                                  min={2}
-                                  max={52}
+                                <NumericInput
                                   value={recurrenceCount}
-                                  onChange={(e) => {
-                                    setRecurrenceCount(Math.min(52, Math.max(1, parseInt(e.target.value) || 1)));
+                                  onChange={(val) => {
+                                    setRecurrenceCount(val);
                                     setHasUnsavedChanges(true);
                                   }}
+                                  min={1}
+                                  max={52}
+                                  step={1}
+                                  allowDecimals={false}
+                                  placeholder="10"
                                   className="w-24 px-3 py-2 rounded-lg bg-white border border-stone-300 text-stone-900 text-sm font-mono focus:outline-none focus:border-stone-900"
                                 />
                                 <span className="text-xs font-mono text-stone-600">scheduled events</span>
@@ -2398,12 +2419,15 @@ export const CreateEventPage: React.FC = () => {
                               <label className="block text-[11px] font-mono uppercase text-stone-700 font-bold mb-1">
                                 Price ($ USD) <span className="text-rose-600">*</span>
                               </label>
-                              <input
-                                type="number"
+                              <NumericInput
+                                value={tier.price}
+                                onChange={(val) => updateTier(tier.tempId, 'price', val)}
                                 min={0}
                                 step={1}
-                                value={tier.price}
-                                onChange={(e) => updateTier(tier.tempId, 'price', Math.max(0, parseFloat(e.target.value) || 0))}
+                                allowDecimals={true}
+                                decimalPlaces={2}
+                                prefix="$"
+                                placeholder="75"
                                 className="w-full px-3 py-2 rounded-lg bg-white border border-stone-300 text-stone-900 text-xs font-mono focus:outline-none focus:border-stone-900"
                               />
                             </div>
@@ -2411,11 +2435,13 @@ export const CreateEventPage: React.FC = () => {
                               <label className="block text-[11px] font-mono uppercase text-stone-700 font-bold mb-1">
                                 Capacity <span className="text-rose-600">*</span>
                               </label>
-                              <input
-                                type="number"
-                                min={1}
+                              <NumericInput
                                 value={tier.totalCapacity}
-                                onChange={(e) => updateTier(tier.tempId, 'totalCapacity', Math.max(1, parseInt(e.target.value) || 1))}
+                                onChange={(val) => updateTier(tier.tempId, 'totalCapacity', val)}
+                                min={1}
+                                step={10}
+                                allowDecimals={false}
+                                placeholder="100"
                                 className="w-full px-3 py-2 rounded-lg bg-white border border-stone-300 text-stone-900 text-xs font-mono focus:outline-none focus:border-stone-900"
                               />
                             </div>
@@ -2423,11 +2449,13 @@ export const CreateEventPage: React.FC = () => {
                               <label className="block text-[11px] font-mono uppercase text-stone-700 font-bold mb-1">
                                 Min / Order
                               </label>
-                              <input
-                                type="number"
-                                min={1}
+                              <NumericInput
                                 value={tier.minPerOrder}
-                                onChange={(e) => updateTier(tier.tempId, 'minPerOrder', Math.max(1, parseInt(e.target.value) || 1))}
+                                onChange={(val) => updateTier(tier.tempId, 'minPerOrder', val)}
+                                min={1}
+                                step={1}
+                                allowDecimals={false}
+                                placeholder="1"
                                 className="w-full px-3 py-2 rounded-lg bg-white border border-stone-300 text-stone-900 text-xs font-mono focus:outline-none focus:border-stone-900"
                               />
                             </div>
@@ -2435,11 +2463,13 @@ export const CreateEventPage: React.FC = () => {
                               <label className="block text-[11px] font-mono uppercase text-stone-700 font-bold mb-1">
                                 Max / Order
                               </label>
-                              <input
-                                type="number"
-                                min={1}
+                              <NumericInput
                                 value={tier.maxPerOrder}
-                                onChange={(e) => updateTier(tier.tempId, 'maxPerOrder', Math.max(1, parseInt(e.target.value) || 1))}
+                                onChange={(val) => updateTier(tier.tempId, 'maxPerOrder', val)}
+                                min={1}
+                                step={1}
+                                allowDecimals={false}
+                                placeholder="6"
                                 className="w-full px-3 py-2 rounded-lg bg-white border border-stone-300 text-stone-900 text-xs font-mono focus:outline-none focus:border-stone-900"
                               />
                             </div>

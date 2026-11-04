@@ -30,6 +30,7 @@ import {
   OrganizerTransferItem,
   FinancialLedgerEntryItem,
 } from '../types';
+import { NumericInput } from '../components/common/NumericInput';
 
 /**
  * Strips raw secrets, account IDs, and technical exception traces from any client-displayed message.
@@ -1362,21 +1363,18 @@ export const FinanceOrganizationPage: React.FC = () => {
                 <label className="block text-xs font-mono uppercase text-stone-700 font-bold">
                   Withdrawal Amount (USD)
                 </label>
-                <div className="relative">
-                  <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-stone-400 font-mono font-bold text-sm">
-                    $
-                  </span>
-                  <input
-                    type="number"
-                    step="0.01"
-                    min="1.00"
-                    required
-                    placeholder="0.00"
-                    value={withdrawAmountDollars}
-                    onChange={(e) => setWithdrawAmountDollars(e.target.value)}
-                    className="w-full pl-8 pr-4 py-3 rounded-xl border border-stone-300 font-mono text-base font-bold text-stone-900 focus:outline-hidden focus:border-stone-900 focus:ring-1 focus:ring-stone-900"
-                  />
-                </div>
+                <NumericInput
+                  value={withdrawAmountDollars}
+                  onChange={(_val, raw) => setWithdrawAmountDollars(raw)}
+                  allowDecimals={true}
+                  decimalPlaces={2}
+                  min={1.00}
+                  step={5}
+                  prefix="$"
+                  placeholder="0.00"
+                  required
+                  className="w-full pl-8 pr-4 py-3 rounded-xl border border-stone-300 font-mono text-base font-bold text-stone-900 focus:outline-hidden focus:border-stone-900 focus:ring-1 focus:ring-stone-900"
+                />
 
                   <div className="flex items-center gap-2 pt-1">
                   {[25, 50, 100].map((amt) => {
