@@ -1,11 +1,18 @@
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, vi } from 'vitest';
 import request from 'supertest';
 import { nanoid } from 'nanoid';
 import { app } from '../app.js';
 import { prisma } from '../db/prisma.js';
 import { EventStatus, OrderStatus, TicketStatus, Role } from '@prisma/client';
 import { fulfillPaidOrder } from '../modules/webhooks/webhook.service.js';
-import { generateTicketsPdf } from '../modules/orders/ticketPdf.service.js';
+import {
+  generateTicketsPdf,
+  fetchImageBuffer,
+  toPdfOptimizedImageUrl,
+  isSafeRemoteImageUrl,
+  isPdfCompatibleImageBuffer,
+  ensurePdfCompatibleImageBuffer,
+} from '../modules/orders/ticketPdf.service.js';
 
 describe('Outside.vip Ticket PDF Generation & QR Credential Validation', () => {
   let organizerToken: string;
@@ -398,6 +405,180 @@ describe('Outside.vip Ticket PDF Generation & QR Credential Validation', () => {
       expect(res.status).toBe(400);
       expect(res.body.success).toBe(false);
       expect(res.body.data.result).toBe('WRONG_EVENT');
+    });
+  });
+
+  describe('6. Cover Image Handling (Cloudinary, Seeded, Missing, and Failed Fetch)', () => {
+    // 1x1 WebP base64 image (standard Cloudinary-uploaded crop output)
+    const sampleWebpBase64 = 'UklGRiQAAABXRUJQVlA4IBgAAAAwAQCdASoBAAEAAQAcJaQAA3AA/v3AgAA=';
+    const sampleWebpBuffer = Buffer.from(sampleWebpBase64, 'base64');
+
+    // 1x1 PNG base64 image
+    const samplePngBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+    const samplePngBuffer = Buffer.from(samplePngBase64, 'base64');
+
+    describe('SSRF & URL Security Validation', () => {
+      it('rejects loopback, localhost, and metadata service IP addresses', () => {
+        expect(isSafeRemoteImageUrl('http://localhost:4000/cover.jpg')).toBe(false);
+        expect(isSafeRemoteImageUrl('http://127.0.0.1:8080/internal.png')).toBe(false);
+        expect(isSafeRemoteImageUrl('http://169.254.169.254/latest/meta-data')).toBe(false);
+        expect(isSafeRemoteImageUrl('http://10.0.0.1/private.jpg')).toBe(false);
+        expect(isSafeRemoteImageUrl('http://192.168.1.100/router.png')).toBe(false);
+        expect(isSafeRemoteImageUrl('http://172.16.5.1/internal.jpg')).toBe(false);
+        expect(isSafeRemoteImageUrl('file:///etc/passwd')).toBe(false);
+        expect(isSafeRemoteImageUrl('javascript:alert(1)')).toBe(false);
+        expect(isSafeRemoteImageUrl('')).toBe(false);
+        expect(isSafeRemoteImageUrl(null)).toBe(false);
+      });
+
+      it('permits secure public HTTPS URLs', () => {
+        expect(isSafeRemoteImageUrl('https://res.cloudinary.com/outside-vip/image/upload/v1/event.webp')).toBe(true);
+        expect(isSafeRemoteImageUrl('https://images.unsplash.com/photo-1470225620780-dba8ba36b745')).toBe(true);
+      });
+    });
+
+    describe('Cloudinary URL Format Transformation', () => {
+      it('transforms Cloudinary .webp URL to request JPEG delivery (f_jpg,q_auto)', () => {
+        const raw = 'https://res.cloudinary.com/outside-vip/image/upload/v1729000000/outside-vip/event-covers/sample.webp';
+        const transformed = toPdfOptimizedImageUrl(raw);
+        expect(transformed).toBe(
+          'https://res.cloudinary.com/outside-vip/image/upload/f_jpg,q_auto/v1729000000/outside-vip/event-covers/sample.jpg'
+        );
+      });
+
+      it('replaces f_auto with f_jpg in existing Cloudinary transformation paths', () => {
+        const raw = 'https://res.cloudinary.com/outside-vip/image/upload/c_fill,g_auto,w_600,h_400,q_auto,f_auto/v1/cover.webp';
+        const transformed = toPdfOptimizedImageUrl(raw);
+        expect(transformed).toBe(
+          'https://res.cloudinary.com/outside-vip/image/upload/c_fill,g_auto,w_600,h_400,q_auto,f_jpg/v1/cover.jpg'
+        );
+      });
+
+      it('leaves non-Cloudinary URLs unmodified', () => {
+        const unsplash = 'https://images.unsplash.com/photo-1470225620780-dba8ba36b745?auto=format&fit=crop&w=1600&q=85';
+        expect(toPdfOptimizedImageUrl(unsplash)).toBe(unsplash);
+      });
+    });
+
+    describe('Image Buffer Format Detection & Transcoding', () => {
+      it('detects JPEG and PNG as PDF-compatible formats', () => {
+        expect(isPdfCompatibleImageBuffer(samplePngBuffer)).toBe(true);
+        const dummyJpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]);
+        expect(isPdfCompatibleImageBuffer(dummyJpeg)).toBe(true);
+      });
+
+      it('identifies WebP as non-compatible with raw PDFKit and transcodes to JPEG', async () => {
+        expect(isPdfCompatibleImageBuffer(sampleWebpBuffer)).toBe(false);
+        const transcoded = await ensurePdfCompatibleImageBuffer(sampleWebpBuffer);
+        expect(transcoded).toBeTruthy();
+        expect(isPdfCompatibleImageBuffer(transcoded!)).toBe(true);
+      });
+    });
+
+    describe('PDF Generation Scenarios', () => {
+      let baseOrderData: any;
+
+      beforeAll(async () => {
+        baseOrderData = await prisma.order.findUnique({
+          where: { id: testOrder.id },
+          include: {
+            event: {
+              include: {
+                organizer: {
+                  include: {
+                    organizer: true,
+                  },
+                },
+              },
+            },
+            tickets: {
+              include: {
+                ticketTier: true,
+              },
+            },
+          },
+        });
+      });
+
+      it('renders ticket PDF with a seeded/local event cover image', async () => {
+        const seededOrder = {
+          ...baseOrderData,
+          event: {
+            ...baseOrderData.event,
+            coverImageUrl: 'https://images.unsplash.com/photo-1470225620780-dba8ba36b745?auto=format&fit=crop&w=1600&q=85',
+          },
+        };
+
+        const pdfBuffer = await generateTicketsPdf(seededOrder as any);
+        expect(pdfBuffer).toBeInstanceOf(Buffer);
+        expect(pdfBuffer.length).toBeGreaterThan(1000);
+        expect(pdfBuffer.slice(0, 5).toString('ascii')).toBe('%PDF-');
+      });
+
+      it('renders ticket PDF with a Cloudinary-hosted event cover image (WebP transformed/transcoded to JPEG)', async () => {
+        const originalFetch = globalThis.fetch;
+        const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementationOnce(async (url: any) => {
+          if (typeof url === 'string' && url.includes('cloudinary.com')) {
+            return {
+              ok: true,
+              headers: new Headers({ 'content-type': 'image/webp' }),
+              arrayBuffer: async () =>
+                sampleWebpBuffer.buffer.slice(
+                  sampleWebpBuffer.byteOffset,
+                  sampleWebpBuffer.byteOffset + sampleWebpBuffer.byteLength
+                ),
+            } as any;
+          }
+          return originalFetch(url);
+        });
+
+        const cloudinaryOrder = {
+          ...baseOrderData,
+          event: {
+            ...baseOrderData.event,
+            coverImageUrl: 'https://res.cloudinary.com/outside-vip/image/upload/v1729000000/outside-vip/event-covers/sample.webp',
+          },
+        };
+
+        const pdfBuffer = await generateTicketsPdf(cloudinaryOrder as any);
+        expect(pdfBuffer).toBeInstanceOf(Buffer);
+        expect(pdfBuffer.length).toBeGreaterThan(1000);
+        expect(pdfBuffer.slice(0, 5).toString('ascii')).toBe('%PDF-');
+        fetchSpy.mockRestore();
+      });
+
+      it('renders ticket PDF gracefully when an event has no cover image (null/empty)', async () => {
+        const noCoverOrder = {
+          ...baseOrderData,
+          event: {
+            ...baseOrderData.event,
+            coverImageUrl: null,
+          },
+        };
+
+        const pdfBuffer = await generateTicketsPdf(noCoverOrder as any);
+        expect(pdfBuffer).toBeInstanceOf(Buffer);
+        expect(pdfBuffer.length).toBeGreaterThan(1000);
+        expect(pdfBuffer.slice(0, 5).toString('ascii')).toBe('%PDF-');
+      });
+
+      it('handles failed or inaccessible remote image fetch gracefully without breaking the PDF', async () => {
+        const failedBuffer = await fetchImageBuffer('https://example.com/non-existent-ticket-cover-404.jpg', 1500);
+        expect(failedBuffer).toBeNull();
+
+        const failedCoverOrder = {
+          ...baseOrderData,
+          event: {
+            ...baseOrderData.event,
+            coverImageUrl: 'https://example.com/non-existent-ticket-cover-404.jpg',
+          },
+        };
+
+        const pdfBuffer = await generateTicketsPdf(failedCoverOrder as any);
+        expect(pdfBuffer).toBeInstanceOf(Buffer);
+        expect(pdfBuffer.length).toBeGreaterThan(1000);
+        expect(pdfBuffer.slice(0, 5).toString('ascii')).toBe('%PDF-');
+      });
     });
   });
 });

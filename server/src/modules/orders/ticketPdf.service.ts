@@ -1,5 +1,6 @@
 import PDFDocument from 'pdfkit';
 import QRCode from 'qrcode';
+import sharp from 'sharp';
 
 
 interface TicketPdfEvent {
@@ -103,16 +104,155 @@ function formatOrderDate(date: Date | string): string {
   }
 }
 
-async function fetchImageBuffer(url?: string | null, timeoutMs = 3500): Promise<Buffer | null> {
-  if (!url || !url.startsWith('http')) return null;
+/**
+ * Validates that an image URL is an external HTTP/HTTPS URL and not a private/internal network target (SSRF prevention).
+ */
+export function isSafeRemoteImageUrl(rawUrl?: string | null): boolean {
+  if (!rawUrl || typeof rawUrl !== 'string') return false;
+  const trimmed = rawUrl.trim();
+  if (!trimmed.startsWith('http://') && !trimmed.startsWith('https://')) return false;
+
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+
+    const hostname = parsed.hostname.toLowerCase();
+
+    // Prevent localhost and loopback
+    if (
+      hostname === 'localhost' ||
+      hostname.endsWith('.localhost') ||
+      hostname === '127.0.0.1' ||
+      hostname === '0.0.0.0' ||
+      hostname === '::1' ||
+      hostname === '[::1]'
+    ) {
+      return false;
+    }
+
+    // Prevent cloud instance metadata services
+    if (hostname === '169.254.169.254' || hostname === 'metadata.google.internal') {
+      return false;
+    }
+
+    // Prevent private IPv4 ranges (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8, 169.254.0.0/16)
+    const ipv4Regex = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
+    const ipMatch = hostname.match(ipv4Regex);
+    if (ipMatch) {
+      const [, o1, o2] = ipMatch.map(Number);
+      if (o1 === 10) return false;
+      if (o1 === 172 && o2 >= 16 && o2 <= 31) return false;
+      if (o1 === 192 && o2 === 168) return false;
+      if (o1 === 127) return false;
+      if (o1 === 169 && o2 === 254) return false;
+      if (o1 === 0) return false;
+    }
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Normalizes Cloudinary image URLs to request JPEG delivery (f_jpg,q_auto) so PDFKit can render them natively.
+ */
+export function toPdfOptimizedImageUrl(rawUrl?: string | null): string | null {
+  if (!rawUrl || typeof rawUrl !== 'string') return null;
+  const trimmed = rawUrl.trim();
+  if (!trimmed.startsWith('http://') && !trimmed.startsWith('https://')) return null;
+
+  if (trimmed.includes('res.cloudinary.com') && trimmed.includes('/image/upload/')) {
+    let transformed = trimmed.replace(/\.(webp|avif|gif|svg|png|jpeg|jpg)($|\?)/i, '.jpg$2');
+    if (!transformed.includes('.jpg')) {
+      const [base, query] = transformed.split('?');
+      transformed = `${base}.jpg${query ? `?${query}` : ''}`;
+    }
+
+    if (transformed.includes('/upload/')) {
+      if (transformed.includes('f_auto')) {
+        transformed = transformed.replace(/f_auto/g, 'f_jpg');
+      } else if (!transformed.includes('f_jpg') && !transformed.includes('f_png')) {
+        transformed = transformed.replace('/upload/', '/upload/f_jpg,q_auto/');
+      }
+    }
+    return transformed;
+  }
+
+  return trimmed;
+}
+
+/**
+ * Inspects buffer magic bytes and returns true if already compatible with PDFKit (JPEG or PNG).
+ */
+export function isPdfCompatibleImageBuffer(buf: Buffer): boolean {
+  if (!buf || buf.length < 4) return false;
+  // JPEG magic: FF D8 FF
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return true;
+  // PNG magic: 89 50 4E 47
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return true;
+  return false;
+}
+
+/**
+ * Ensures an image buffer is in a format PDFKit can render (JPEG or PNG).
+ * If the buffer is already JPEG or PNG, returns it as-is.
+ * If WebP, AVIF, TIFF, or other image format, transcodes to JPEG using sharp.
+ */
+export async function ensurePdfCompatibleImageBuffer(buf: Buffer): Promise<Buffer | null> {
+  if (isPdfCompatibleImageBuffer(buf)) {
+    return buf;
+  }
+
+  try {
+    const transcoded = await sharp(buf)
+      .jpeg({ quality: 90, progressive: false })
+      .toBuffer();
+
+    if (isPdfCompatibleImageBuffer(transcoded)) {
+      return transcoded;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchImageBuffer(url?: string | null, timeoutMs = 4500): Promise<Buffer | null> {
+  if (!url || typeof url !== 'string') return null;
+  if (!isSafeRemoteImageUrl(url)) return null;
+
+  const targetUrl = toPdfOptimizedImageUrl(url) || url;
+
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
-    const res = await fetch(url, { signal: controller.signal });
+
+    const res = await fetch(targetUrl, {
+      signal: controller.signal,
+      redirect: 'follow',
+      headers: {
+        Accept: 'image/jpeg, image/png, image/webp, image/*;q=0.8, */*;q=0.5',
+        'User-Agent': 'OutsideVip-TicketPdfRenderer/1.0',
+      },
+    });
+
     clearTimeout(timeout);
     if (!res.ok) return null;
+
+    const cl = res.headers.get('content-length');
+    if (cl && parseInt(cl, 10) > 12 * 1024 * 1024) {
+      return null;
+    }
+
     const arrayBuffer = await res.arrayBuffer();
-    return Buffer.from(arrayBuffer);
+    const rawBuffer = Buffer.from(arrayBuffer);
+
+    if (rawBuffer.length === 0 || rawBuffer.length > 12 * 1024 * 1024) {
+      return null;
+    }
+
+    return await ensurePdfCompatibleImageBuffer(rawBuffer);
   } catch {
     return null;
   }
@@ -195,6 +335,8 @@ export async function generateTicketsPdf(
             doc.roundedRect(leftMargin, currentY, contentWidth, bannerHeight, 8).fill('#111827');
             doc.fillColor('#FAF8F5').fontSize(20).font('Helvetica-Bold')
                .text(order.event.title, leftMargin + 20, currentY + 70, { width: contentWidth - 40, align: 'center' });
+            doc.fillColor('#9CA3AF').fontSize(9).font('Helvetica')
+               .text(`${(order.event.category || 'EVENT').toUpperCase()} · OUTSIDE.VIP`, leftMargin + 20, currentY + 105, { width: contentWidth - 40, align: 'center' });
           }
           doc.restore();
         } else {
