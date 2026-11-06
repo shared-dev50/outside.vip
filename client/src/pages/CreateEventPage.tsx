@@ -184,6 +184,7 @@ export const CreateEventPage: React.FC = () => {
     percent: 0,
   });
   const galleryAbortControllerRef = useRef<AbortController | null>(null);
+  const isSubmittingRef = useRef<boolean>(false);
 
   const isAnyImageUploading = isUploadingImage || isUploadingGallery;
 
@@ -1142,57 +1143,67 @@ export const CreateEventPage: React.FC = () => {
 
   const saveMutation = useMutation({
     mutationFn: async ({ publish }: { publish: boolean }) => {
-      if (isUploadingImage || isUploadingGallery) {
-        throw new Error('Please wait for the image uploads to complete before saving.');
+      if (isSubmittingRef.current) {
+        throw new Error('Save or publication already in progress. Please wait.');
       }
+      isSubmittingRef.current = true;
 
-      if (!coverImageUrl || !coverImageUrl.trim()) {
-        throw new Error('A cover artwork image is required for the event.');
+      try {
+        if (isUploadingImage || isUploadingGallery) {
+          throw new Error('Please wait for the image uploads to complete before saving.');
+        }
+
+        if (!coverImageUrl || !coverImageUrl.trim()) {
+          throw new Error('A cover artwork image is required for the event.');
+        }
+
+        if (coverImageUrl.startsWith('data:image/') && coverImageUrl !== existingData?.event?.coverImageUrl) {
+          throw new Error('Base64 image data cannot be newly uploaded. Please use the image upload option.');
+        }
+
+        const startMs = new Date(startAt).getTime();
+        const endMs = new Date(endAt).getTime();
+        if (endMs <= startMs) {
+          throw new Error('Event end time must be after the start time.');
+        }
+
+        if (publish) {
+          if (!title.trim() || title.trim().length < 2) {
+            throw new Error('Event title must be at least 2 characters long to publish.');
+          }
+          if (!venueName.trim()) {
+            throw new Error('Venue name is required before publishing.');
+          }
+          if (!city.trim()) {
+            throw new Error('City is required before publishing.');
+          }
+          if (ticketTiers.length === 0) {
+            throw new Error('At least one ticket tier is required to publish.');
+          }
+        }
+
+        const payload = buildPayload(publish ? 'PUBLISHED' : undefined);
+
+        let savedEventId = id;
+        if (isEditing && id) {
+          const res = await api.organizer.updateEvent(id, payload);
+          savedEventId = res.event.id;
+          if (publish && res.event.status !== 'PUBLISHED') {
+            await api.organizer.publishEvent(savedEventId, applyToFuture);
+          }
+        } else {
+          const res = await api.organizer.createEvent(payload);
+          savedEventId = res.event.id;
+          if (publish && res.event.status !== 'PUBLISHED') {
+            await api.organizer.publishEvent(savedEventId, isRecurring);
+          }
+        }
+
+        return { eventId: savedEventId, published: publish };
+      } catch (err) {
+        isSubmittingRef.current = false;
+        throw err;
       }
-
-      if (coverImageUrl.startsWith('data:image/') && coverImageUrl !== existingData?.event?.coverImageUrl) {
-        throw new Error('Base64 image data cannot be newly uploaded. Please use the image upload option.');
-      }
-
-      const startMs = new Date(startAt).getTime();
-      const endMs = new Date(endAt).getTime();
-      if (endMs <= startMs) {
-        throw new Error('Event end time must be after the start time.');
-      }
-
-      if (publish) {
-        if (!title.trim() || title.trim().length < 2) {
-          throw new Error('Event title must be at least 2 characters long to publish.');
-        }
-        if (!venueName.trim()) {
-          throw new Error('Venue name is required before publishing.');
-        }
-        if (!city.trim()) {
-          throw new Error('City is required before publishing.');
-        }
-        if (ticketTiers.length === 0) {
-          throw new Error('At least one ticket tier is required to publish.');
-        }
-      }
-
-      const payload = buildPayload(publish ? 'PUBLISHED' : undefined);
-
-      let savedEventId = id;
-      if (isEditing && id) {
-        const res = await api.organizer.updateEvent(id, payload);
-        savedEventId = res.event.id;
-        if (publish && res.event.status !== 'PUBLISHED') {
-          await api.organizer.publishEvent(savedEventId, applyToFuture);
-        }
-      } else {
-        const res = await api.organizer.createEvent(payload);
-        savedEventId = res.event.id;
-        if (publish && res.event.status !== 'PUBLISHED') {
-          await api.organizer.publishEvent(savedEventId, isRecurring);
-        }
-      }
-
-      return { eventId: savedEventId, published: publish };
     },
     onSuccess: ({ eventId, published }) => {
       setHasUnsavedChanges(false);
@@ -1213,12 +1224,17 @@ export const CreateEventPage: React.FC = () => {
       );
 
       if (!isEditing && eventId) {
+        // Keep isSubmittingRef.current = true during navigation to avoid any post-success re-triggering
         navigate(`/organizer/events/${eventId}/edit`, { replace: true });
-      } else if (published) {
-        setCurrentStatus('PUBLISHED');
+      } else {
+        isSubmittingRef.current = false;
+        if (published) {
+          setCurrentStatus('PUBLISHED');
+        }
       }
     },
     onError: (err: any) => {
+      isSubmittingRef.current = false;
       showNotification('error', err?.message || 'Failed to save event. Check fields and try again.');
     },
   });
@@ -1403,7 +1419,7 @@ export const CreateEventPage: React.FC = () => {
             <button
               type="button"
               onClick={() => saveMutation.mutate({ publish: false })}
-              disabled={saveMutation.isPending || isAnyImageUploading}
+              disabled={saveMutation.isPending || isAnyImageUploading || isSubmittingRef.current}
               className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-white hover:bg-stone-100 text-stone-900 border border-stone-300 text-xs font-mono font-semibold transition-colors disabled:opacity-50 shadow-2xs"
             >
               <Save className="w-3.5 h-3.5 text-stone-500" />
@@ -1423,7 +1439,7 @@ export const CreateEventPage: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => saveMutation.mutate({ publish: false })}
-                  disabled={saveMutation.isPending || isAnyImageUploading}
+                  disabled={saveMutation.isPending || isAnyImageUploading || isSubmittingRef.current}
                   className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-stone-900 hover:bg-black text-white font-semibold text-xs font-mono uppercase tracking-wider transition-all duration-200 shadow-2xs disabled:opacity-50"
                 >
                   Update Live
@@ -1433,7 +1449,7 @@ export const CreateEventPage: React.FC = () => {
               <button
                 type="button"
                 onClick={() => saveMutation.mutate({ publish: true })}
-                disabled={saveMutation.isPending || isAnyImageUploading}
+                disabled={saveMutation.isPending || isAnyImageUploading || isSubmittingRef.current}
                 className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-stone-900 hover:bg-black text-white font-semibold text-xs font-mono uppercase tracking-wider transition-all duration-200 shadow-2xs disabled:opacity-50"
               >
                 <Globe className="w-3.5 h-3.5" />
@@ -3561,7 +3577,7 @@ export const CreateEventPage: React.FC = () => {
                     <button
                       type="button"
                       onClick={() => saveMutation.mutate({ publish: false })}
-                      disabled={saveMutation.isPending || isAnyImageUploading}
+                      disabled={saveMutation.isPending || isAnyImageUploading || isSubmittingRef.current}
                       className="px-4 py-2.5 rounded-lg border border-stone-300 bg-white hover:bg-stone-100 text-stone-900 font-mono text-xs font-semibold transition-colors shadow-2xs disabled:opacity-50"
                     >
                       {saveMutation.isPending ? 'Saving...' : 'Save Draft'}
@@ -3570,7 +3586,7 @@ export const CreateEventPage: React.FC = () => {
                     <button
                       type="button"
                       onClick={() => saveMutation.mutate({ publish: true })}
-                      disabled={saveMutation.isPending || isAnyImageUploading}
+                      disabled={saveMutation.isPending || isAnyImageUploading || isSubmittingRef.current}
                       className="inline-flex items-center gap-2 px-6 py-2.5 rounded-lg bg-stone-900 hover:bg-black text-white font-mono text-xs font-semibold uppercase tracking-wider transition-colors shadow-2xs disabled:opacity-50"
                     >
                       <Globe className="w-4 h-4" />

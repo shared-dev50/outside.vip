@@ -45,14 +45,52 @@ export async function listEvents(req: Request, res: Response, next: NextFunction
       where.isFeatured = true;
     }
 
-    const now = new Date();
-    if (timeFilter === 'upcoming') {
+    // Support simulated reference time in non-production environments for automated time testing
+    const now =
+      process.env.NODE_ENV !== 'production' && req.headers['x-simulated-now']
+        ? new Date(req.headers['x-simulated-now'] as string)
+        : new Date();
+
+    if (timeFilter === 'today') {
+      // Find events whose duration overlaps today according to their configured IANA timezone.
+      // Note: startAt and endAt are stored as TIMESTAMP WITHOUT TIME ZONE in UTC.
+      // (startAt AT TIME ZONE 'UTC') produces TIMESTAMPTZ, then (AT TIME ZONE tz) converts to the local timestamp.
+      const todayMatching = await prisma.$queryRaw<{ id: string }[]>`
+        WITH valid_tz_events AS (
+          SELECT
+            id,
+            CASE WHEN timezone IN (SELECT name FROM pg_timezone_names) THEN timezone ELSE 'UTC' END AS tz,
+            ("startAt" AT TIME ZONE 'UTC') AS start_utc,
+            ("endAt" AT TIME ZONE 'UTC') AS end_utc
+          FROM "Event"
+          WHERE status = 'PUBLISHED'
+            AND "showOnExplore" = true
+        )
+        SELECT id
+        FROM valid_tz_events
+        WHERE
+          (start_utc AT TIME ZONE tz) < (date_trunc('day', ${now}::timestamptz AT TIME ZONE tz) + interval '1 day')
+          AND (
+            (end_utc AT TIME ZONE tz) > date_trunc('day', ${now}::timestamptz AT TIME ZONE tz)
+            OR
+            (start_utc = end_utc AND (start_utc AT TIME ZONE tz) >= date_trunc('day', ${now}::timestamptz AT TIME ZONE tz))
+          )
+      `;
+      where.id = { in: todayMatching.map((e) => e.id) };
+    } else if (timeFilter === 'upcoming') {
       where.endAt = { gte: now };
     } else if (timeFilter === 'this_weekend') {
-      // Find upcoming Friday 18:00 to Sunday 23:59
       const today = new Date();
-      const dayOfWeek = today.getDay(); // 0 is Sunday, 5 is Friday
-      const daysUntilFriday = (5 - dayOfWeek + 7) % 7;
+      const dayOfWeek = today.getDay(); // 0 is Sunday, 5 is Friday, 6 is Saturday
+      let daysUntilFriday: number;
+      if (dayOfWeek === 0) {
+        daysUntilFriday = -2; // Sunday: current weekend started Friday 2 days ago
+      } else if (dayOfWeek === 6) {
+        daysUntilFriday = -1; // Saturday: current weekend started yesterday
+      } else {
+        daysUntilFriday = 5 - dayOfWeek; // Mon-Fri: Friday of this week
+      }
+
       const friday = new Date(today);
       friday.setDate(today.getDate() + daysUntilFriday);
       friday.setHours(12, 0, 0, 0);
@@ -61,8 +99,9 @@ export async function listEvents(req: Request, res: Response, next: NextFunction
       sunday.setDate(friday.getDate() + 2);
       sunday.setHours(23, 59, 59, 999);
 
-      where.startAt = { gte: now, lte: sunday };
-      where.endAt = { gte: friday };
+      // Event belongs to this weekend if it overlaps [friday, sunday] and hasn't already ended
+      where.startAt = { lte: sunday };
+      where.endAt = { gte: now < friday ? friday : now };
     } else if (timeFilter === 'this_month') {
       const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
       where.startAt = { gte: now, lte: endOfMonth };

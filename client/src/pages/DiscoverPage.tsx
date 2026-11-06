@@ -35,15 +35,16 @@ export const DiscoverPage: React.FC = () => {
   const initialCity = searchParams.get('city') || '';
   const initialTimeFilter = searchParams.get('time') || 'upcoming';
   const initialSortBy = searchParams.get('sort') || 'date_asc';
+  const initialPage = Math.max(1, parseInt(searchParams.get('page') || '1', 10) || 1);
 
   const [searchTerm, setSearchTerm] = useState(initialSearch);
   const [selectedCategory, setSelectedCategory] = useState<EventCategory | undefined>(initialCategory);
   const [selectedCity, setSelectedCity] = useState<string>(initialCity);
   const [timeFilter, setTimeFilter] = useState<string>(initialTimeFilter);
   const [sortBy, setSortBy] = useState<string>(initialSortBy);
-  const [currentPage, setCurrentPage] = useState<number>(0);
+  const [currentPage, setCurrentPage] = useState<number>(initialPage);
 
-  const CARDS_PER_PAGE = 8;
+  const CARDS_PER_PAGE = 12;
 
   useEffect(() => {
     const params = new URLSearchParams();
@@ -52,12 +53,12 @@ export const DiscoverPage: React.FC = () => {
     if (selectedCity) params.set('city', selectedCity);
     if (timeFilter && timeFilter !== 'upcoming') params.set('time', timeFilter);
     if (sortBy && sortBy !== 'date_asc') params.set('sort', sortBy);
+    if (currentPage > 1) params.set('page', currentPage.toString());
     setSearchParams(params, { replace: true });
-    setCurrentPage(0);
-  }, [searchTerm, selectedCategory, selectedCity, timeFilter, sortBy, setSearchParams]);
+  }, [searchTerm, selectedCategory, selectedCity, timeFilter, sortBy, currentPage, setSearchParams]);
 
   const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ['events-discover', searchTerm, selectedCategory, selectedCity, timeFilter, sortBy],
+    queryKey: ['events-discover', searchTerm, selectedCategory, selectedCity, timeFilter, sortBy, currentPage],
     queryFn: () =>
       api.events.list({
         search: searchTerm.trim() || undefined,
@@ -65,6 +66,8 @@ export const DiscoverPage: React.FC = () => {
         city: selectedCity || undefined,
         timeFilter,
         sortBy,
+        page: currentPage,
+        limit: CARDS_PER_PAGE,
       }),
   });
 
@@ -73,13 +76,28 @@ export const DiscoverPage: React.FC = () => {
     queryFn: () => api.events.cities(),
   });
 
+  const handleSearchChange = (term: string) => {
+    setSearchTerm(term);
+    setCurrentPage(1);
+  };
+
+  const handleCityChange = (city: string) => {
+    setSelectedCity(city);
+    setCurrentPage(1);
+  };
+
+  const handleSortChange = (sort: string) => {
+    setSortBy(sort);
+    setCurrentPage(1);
+  };
+
   const clearFilters = () => {
     setSearchTerm('');
     setSelectedCategory(undefined);
     setSelectedCity('');
     setTimeFilter('upcoming');
     setSortBy('date_asc');
-    setCurrentPage(0);
+    setCurrentPage(1);
   };
 
   const hasActiveFilters = Boolean(
@@ -100,12 +118,10 @@ export const DiscoverPage: React.FC = () => {
     return 'BROWSING EVENTS IN';
   };
 
-  const allEvents = data?.events || [];
-  const totalPages = Math.ceil(Math.max(1, allEvents.length) / CARDS_PER_PAGE);
-  const pagedEvents = allEvents.slice(
-    currentPage * CARDS_PER_PAGE,
-    (currentPage + 1) * CARDS_PER_PAGE
-  );
+  const events = data?.events || [];
+  const pagination = data?.pagination;
+  const totalPages = pagination?.totalPages || 1;
+  const totalEvents = pagination?.total ?? events.length;
 
   const getActiveTabId = () => {
     if (selectedCategory) {
@@ -122,6 +138,7 @@ export const DiscoverPage: React.FC = () => {
   const activeTabId = getActiveTabId();
 
   const handleTabClick = (tab: FilterTab) => {
+    setCurrentPage(1);
     if (tab.type === 'all') {
       setSelectedCategory(undefined);
       setTimeFilter('all');
@@ -146,7 +163,7 @@ export const DiscoverPage: React.FC = () => {
             <div className="relative inline-block">
               <select
                 value={selectedCity}
-                onChange={(e) => setSelectedCity(e.target.value)}
+                onChange={(e) => handleCityChange(e.target.value)}
                 className="appearance-none font-sans text-sm sm:text-base font-semibold text-stone-900 bg-white border border-stone-300 rounded-lg pl-4 pr-10 py-2 sm:py-2.5 shadow-2xs hover:border-stone-900 focus:outline-none focus:border-stone-900 transition-colors cursor-pointer"
                 aria-label="Filter events by city"
               >
@@ -168,12 +185,12 @@ export const DiscoverPage: React.FC = () => {
                 type="text"
                 placeholder="Search events, venues..."
                 value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
+                onChange={(e) => handleSearchChange(e.target.value)}
                 className="w-full pl-9 pr-8 py-2 rounded-lg bg-white border border-stone-300 text-stone-900 placeholder-stone-400 text-xs font-mono focus:outline-none focus:border-stone-900 transition-colors shadow-2xs"
               />
               {searchTerm && (
                 <button
-                  onClick={() => setSearchTerm('')}
+                  onClick={() => handleSearchChange('')}
                   className="absolute right-2.5 top-1/2 -translate-y-1/2 text-stone-400 hover:text-stone-700"
                   aria-label="Clear search input"
                 >
@@ -184,7 +201,7 @@ export const DiscoverPage: React.FC = () => {
 
             <select
               value={sortBy}
-              onChange={(e) => setSortBy(e.target.value)}
+              onChange={(e) => handleSortChange(e.target.value)}
               className="px-3 py-2 rounded-lg bg-white border border-stone-300 text-stone-800 text-xs font-mono focus:outline-none focus:border-stone-900 cursor-pointer shadow-2xs shrink-0"
               aria-label="Sort events"
             >
@@ -223,7 +240,7 @@ export const DiscoverPage: React.FC = () => {
         {hasActiveFilters && (
           <div className="flex items-center justify-between text-xs font-mono text-stone-600 pt-1">
             <span>
-              Showing filtered results{data ? ` (${allEvents.length} experience${allEvents.length === 1 ? '' : 's'})` : ''}
+              Showing filtered results{data ? ` (${totalEvents} experience${totalEvents === 1 ? '' : 's'})` : ''}
             </span>
             <button
               onClick={clearFilters}
@@ -264,7 +281,7 @@ export const DiscoverPage: React.FC = () => {
 
         {!isLoading && !error && (
           <div>
-            {allEvents.length === 0 ? (
+            {events.length === 0 ? (
               <div className="p-12 rounded-lg bg-white border border-stone-200 text-center space-y-3 my-8 max-w-md mx-auto shadow-xs">
                 <div className="w-10 h-10 rounded-full bg-stone-100 flex items-center justify-center mx-auto text-stone-500 mb-2">
                   <SlidersHorizontal className="w-5 h-5" />
@@ -283,45 +300,76 @@ export const DiscoverPage: React.FC = () => {
             ) : (
               <div className="space-y-8">
                 <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-5 sm:gap-6">
-                  {pagedEvents.map((event) => (
+                  {events.map((event) => (
                     <EventCard key={event.id} event={event} aspectRatio="16/10" />
                   ))}
                 </div>
 
-                <div className="flex items-center justify-between pt-6 border-t border-stone-200/90">
-                  <div className="flex items-center gap-2">
-                    {Array.from({ length: totalPages }).map((_, idx) => (
-                      <button
-                        key={idx}
-                        onClick={() => setCurrentPage(idx)}
-                        className={`rounded-full transition-all ${
-                          currentPage === idx
-                            ? 'w-2.5 h-2.5 bg-stone-900'
-                            : 'w-2 h-2 bg-stone-300 hover:bg-stone-500'
-                        }`}
-                        aria-label={`Go to page ${idx + 1}`}
-                      />
-                    ))}
+                <div className="flex flex-col sm:flex-row items-center justify-between gap-4 pt-6 border-t border-stone-200/90">
+                  <div className="flex items-center gap-2 text-xs font-mono text-stone-500">
+                    <span>
+                      Page <span className="font-bold text-stone-900">{currentPage}</span> of{' '}
+                      <span className="font-bold text-stone-900">{totalPages}</span>
+                    </span>
+                    <span className="text-stone-300">•</span>
+                    <span>
+                      {totalEvents} {totalEvents === 1 ? 'event' : 'events'} total
+                    </span>
                   </div>
 
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={() => setCurrentPage((p) => Math.max(0, p - 1))}
-                      disabled={currentPage === 0}
-                      className="w-9 h-9 rounded-full border border-stone-300 flex items-center justify-center text-stone-700 hover:border-stone-900 hover:text-black disabled:opacity-30 disabled:pointer-events-none transition-colors shadow-2xs"
-                      aria-label="Previous page"
-                    >
-                      <ChevronLeft className="w-4 h-4" />
-                    </button>
-                    <button
-                      onClick={() => setCurrentPage((p) => Math.min(totalPages - 1, p + 1))}
-                      disabled={currentPage >= totalPages - 1}
-                      className="w-9 h-9 rounded-full border border-stone-300 flex items-center justify-center text-stone-700 hover:border-stone-900 hover:text-black disabled:opacity-30 disabled:pointer-events-none transition-colors shadow-2xs"
-                      aria-label="Next page"
-                    >
-                      <ChevronRight className="w-4 h-4" />
-                    </button>
-                  </div>
+                  {totalPages > 1 && (
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => {
+                          const nextP = Math.max(1, currentPage - 1);
+                          setCurrentPage(nextP);
+                          window.scrollTo({ top: 0, behavior: 'smooth' });
+                        }}
+                        disabled={currentPage <= 1 || isLoading}
+                        className="w-9 h-9 rounded-full border border-stone-300 flex items-center justify-center text-stone-700 hover:border-stone-900 hover:text-black disabled:opacity-30 disabled:pointer-events-none transition-colors shadow-2xs"
+                        aria-label="Previous page"
+                      >
+                        <ChevronLeft className="w-4 h-4" />
+                      </button>
+
+                      <div className="flex items-center gap-1.5 px-1">
+                        {Array.from({ length: totalPages }).map((_, idx) => {
+                          const pageNum = idx + 1;
+                          return (
+                            <button
+                              key={pageNum}
+                              onClick={() => {
+                                setCurrentPage(pageNum);
+                                window.scrollTo({ top: 0, behavior: 'smooth' });
+                              }}
+                              disabled={isLoading}
+                              className={`w-7 h-7 rounded-full text-xs font-mono font-semibold transition-all flex items-center justify-center ${
+                                currentPage === pageNum
+                                  ? 'bg-stone-900 text-white shadow-xs'
+                                  : 'text-stone-600 hover:bg-stone-200/80 hover:text-stone-900'
+                              }`}
+                              aria-label={`Go to page ${pageNum}`}
+                            >
+                              {pageNum}
+                            </button>
+                          );
+                        })}
+                      </div>
+
+                      <button
+                        onClick={() => {
+                          const nextP = Math.min(totalPages, currentPage + 1);
+                          setCurrentPage(nextP);
+                          window.scrollTo({ top: 0, behavior: 'smooth' });
+                        }}
+                        disabled={currentPage >= totalPages || isLoading}
+                        className="w-9 h-9 rounded-full border border-stone-300 flex items-center justify-center text-stone-700 hover:border-stone-900 hover:text-black disabled:opacity-30 disabled:pointer-events-none transition-colors shadow-2xs"
+                        aria-label="Next page"
+                      >
+                        <ChevronRight className="w-4 h-4" />
+                      </button>
+                    </div>
+                  )}
                 </div>
               </div>
             )}

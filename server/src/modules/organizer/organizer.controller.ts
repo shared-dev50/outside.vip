@@ -390,6 +390,34 @@ export async function createOrganizerEvent(req: Request, res: Response, next: Ne
       placeId: input.placeId,
     });
 
+    // Duplicate prevention: If the exact same organizer submitted an event with identical title and start time within the last 15 seconds, return existing event
+    if (!input.recurrence) {
+      const recentDuplicate = await prisma.event.findFirst({
+        where: {
+          organizerId,
+          title: input.title,
+          startAt: new Date(input.startAt),
+          createdAt: {
+            gte: new Date(Date.now() - 15000),
+          },
+        },
+        include: {
+          ticketTiers: true,
+          galleryImages: { orderBy: { displayOrder: 'asc' } },
+          features: { orderBy: { displayOrder: 'asc' } },
+          payoutDetails: true,
+        },
+      });
+
+      if (recentDuplicate) {
+        res.status(200).json({
+          success: true,
+          data: { event: recentDuplicate },
+        });
+        return;
+      }
+    }
+
     if (input.recurrence) {
       const occurrences = calculateOccurrences({
         baseStartAt: input.startAt,
