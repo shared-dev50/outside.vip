@@ -18,6 +18,7 @@ import {
   RotateCcw,
   Send,
   Receipt,
+  Globe,
 } from 'lucide-react';
 import { api } from '../lib/api';
 import {
@@ -29,8 +30,50 @@ import {
   PayoutDetailsInput,
   OrganizerTransferItem,
   FinancialLedgerEntryItem,
+  StripeConnectCountry,
 } from '../types';
 import { NumericInput } from '../components/common/NumericInput';
+
+const FALLBACK_STRIPE_COUNTRIES: StripeConnectCountry[] = [
+  { code: 'US', name: 'United States' },
+  { code: 'CA', name: 'Canada' },
+  { code: 'GB', name: 'United Kingdom' },
+  { code: 'AU', name: 'Australia' },
+  { code: 'AT', name: 'Austria' },
+  { code: 'BE', name: 'Belgium' },
+  { code: 'BG', name: 'Bulgaria' },
+  { code: 'HR', name: 'Croatia' },
+  { code: 'CY', name: 'Cyprus' },
+  { code: 'CZ', name: 'Czech Republic' },
+  { code: 'DK', name: 'Denmark' },
+  { code: 'EE', name: 'Estonia' },
+  { code: 'FI', name: 'Finland' },
+  { code: 'FR', name: 'France' },
+  { code: 'DE', name: 'Germany' },
+  { code: 'GR', name: 'Greece' },
+  { code: 'HK', name: 'Hong Kong' },
+  { code: 'HU', name: 'Hungary' },
+  { code: 'IE', name: 'Ireland' },
+  { code: 'IT', name: 'Italy' },
+  { code: 'JP', name: 'Japan' },
+  { code: 'LV', name: 'Latvia' },
+  { code: 'LI', name: 'Liechtenstein' },
+  { code: 'LT', name: 'Lithuania' },
+  { code: 'LU', name: 'Luxembourg' },
+  { code: 'MT', name: 'Malta' },
+  { code: 'NL', name: 'Netherlands' },
+  { code: 'NZ', name: 'New Zealand' },
+  { code: 'NO', name: 'Norway' },
+  { code: 'PL', name: 'Poland' },
+  { code: 'PT', name: 'Portugal' },
+  { code: 'RO', name: 'Romania' },
+  { code: 'SG', name: 'Singapore' },
+  { code: 'SK', name: 'Slovakia' },
+  { code: 'SI', name: 'Slovenia' },
+  { code: 'ES', name: 'Spain' },
+  { code: 'SE', name: 'Sweden' },
+  { code: 'CH', name: 'Switzerland' },
+];
 
 /**
  * Strips raw secrets, account IDs, and technical exception traces from any client-displayed message.
@@ -102,6 +145,8 @@ export const FinanceOrganizationPage: React.FC = () => {
   const [disputes, setDisputes] = useState<StripeDisputeItem[]>([]);
   const [ledgerEntries, setLedgerEntries] = useState<FinancialLedgerEntryItem[]>([]);
   const [payoutDetails, setPayoutDetails] = useState<OrganizerPayoutDetails | null>(null);
+  const [selectedCountry, setSelectedCountry] = useState<string>('US');
+  const [supportedCountries, setSupportedCountries] = useState<StripeConnectCountry[]>(FALLBACK_STRIPE_COUNTRIES);
 
   const [activeTab, setActiveTab] = useState<'finance' | 'organization'>('finance');
   const [historyTab, setHistoryTab] = useState<'transfers' | 'payouts' | 'ledger'>('transfers');
@@ -137,6 +182,19 @@ export const FinanceOrganizationPage: React.FC = () => {
   });
   const [isSavingOrg, setIsSavingOrg] = useState<boolean>(false);
 
+  useEffect(() => {
+    api.finance
+      .getSupportedCountries()
+      .then((res) => {
+        if (res?.countries && res.countries.length > 0) {
+          setSupportedCountries(res.countries);
+        }
+      })
+      .catch((err) => {
+        console.warn('Could not load supported Stripe countries from API, using fallback list:', err);
+      });
+  }, []);
+
   const loadDashboardData = useCallback(async (isRefresh = false) => {
     if (isRefresh) {
       setIsRefreshing(true);
@@ -148,6 +206,12 @@ export const FinanceOrganizationPage: React.FC = () => {
     try {
       const statusRes = await api.finance.getStatus();
       setAccountStatus(statusRes);
+      if (statusRes.supportedCountries && statusRes.supportedCountries.length > 0) {
+        setSupportedCountries(statusRes.supportedCountries);
+      }
+      if (statusRes.country) {
+        setSelectedCountry(statusRes.country);
+      }
 
       const [balRes, transfersRes, payoutsRes, disputesRes, ledgerRes] = await Promise.all([
         api.finance.getBalance().catch(() => null),
@@ -183,7 +247,7 @@ export const FinanceOrganizationPage: React.FC = () => {
           });
         }
       } catch {
-        }
+      }
     } catch (err: any) {
       console.error('Failed to load finance data:', err);
       if (err?.code === 'STRIPE_CONFIGURATION_UNAVAILABLE') {
@@ -224,13 +288,17 @@ export const FinanceOrganizationPage: React.FC = () => {
     loadDashboardData();
   }, [loadDashboardData, searchParams, setSearchParams]);
 
-  const handleStartOrContinueOnboarding = async (options?: { reconnect?: boolean }) => {
+  const handleStartOrContinueOnboarding = async (options?: { reconnect?: boolean; country?: string }) => {
     setActionLoading('onboarding');
     setError(null);
     try {
       const isReconnect =
         options?.reconnect || accountStatus?.connectionStatus === 'invalid_or_inaccessible';
-      const res = await api.finance.createOnboardingLink({ reconnect: isReconnect });
+      const countryToUse = options?.country || selectedCountry;
+      const res = await api.finance.createOnboardingLink({
+        reconnect: isReconnect,
+        country: countryToUse,
+      });
       if (res?.url) {
         window.location.href = res.url;
       } else {
@@ -243,6 +311,8 @@ export const FinanceOrganizationPage: React.FC = () => {
         friendlyMsg = 'Stripe Connect is currently being configured for this platform. Please check back shortly.';
       } else if (err?.code === 'STRIPE_SERVICE_UNAVAILABLE') {
         friendlyMsg = 'Stripe services are temporarily unreachable. Please try again in a few moments.';
+      } else if (err?.code === 'STRIPE_COUNTRY_UNSUPPORTED') {
+        friendlyMsg = err.message || 'The selected country is not supported for Stripe Connect on our US platform.';
       } else if (err?.message) {
         friendlyMsg = sanitizeClientErrorMessage(err.message);
       }
@@ -475,9 +545,17 @@ export const FinanceOrganizationPage: React.FC = () => {
                     <ShieldCheck className="w-5 h-5" />
                   </div>
                   <div>
-                    <h2 className="font-display font-black text-lg text-stone-900 uppercase tracking-tight">
-                      Stripe Express Account Status
-                    </h2>
+                    <div className="flex items-center gap-2">
+                      <h2 className="font-display font-black text-lg text-stone-900 uppercase tracking-tight">
+                        Stripe Express Account Status
+                      </h2>
+                      {accountStatus?.connected && (
+                        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-stone-100 text-stone-700 border border-stone-200 text-[11px] font-mono font-bold">
+                          <Globe className="w-3 h-3 text-stone-500" />
+                          <span>{accountStatus.country || selectedCountry}</span>
+                        </span>
+                      )}
+                    </div>
                     <p className="text-xs text-stone-600 font-sans mt-0.5">
                       Your identity and payout banking destination hosted securely by Stripe Connect.
                     </p>
@@ -574,6 +652,58 @@ export const FinanceOrganizationPage: React.FC = () => {
                       Your connected Stripe Express account is no longer accessible. Reconnect your account to resume payouts and withdrawals.
                     </span>
                   </div>
+                </div>
+              )}
+
+              {(!accountStatus?.connected || accountStatus?.connectionStatus === 'invalid_or_inaccessible') && (
+                <div className="p-4 sm:p-5 bg-stone-50/80 border border-stone-200/90 rounded-xl space-y-3">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                    <div className="space-y-1">
+                      <label htmlFor="stripe-country-select" className="flex items-center gap-2 font-mono text-xs font-bold text-stone-900 uppercase tracking-wider">
+                        <Globe className="w-4 h-4 text-stone-600" />
+                        <span>Payout & Bank Account Country</span>
+                      </label>
+                      <p className="text-xs text-stone-600 font-sans max-w-xl">
+                        Select the country where your bank account or legal entity is based. Supported for Stripe Express cross-border payouts from our US platform.
+                      </p>
+                    </div>
+                    <div className="sm:w-72 shrink-0">
+                      <select
+                        id="stripe-country-select"
+                        value={selectedCountry}
+                        onChange={(e) => setSelectedCountry(e.target.value.toUpperCase())}
+                        disabled={actionLoading === 'onboarding'}
+                        className="w-full px-3 py-2 bg-white border border-stone-300 rounded-xl text-xs font-mono font-medium text-stone-900 focus:outline-none focus:ring-2 focus:ring-stone-900 focus:border-transparent transition-all shadow-2xs cursor-pointer disabled:bg-stone-100 disabled:cursor-not-allowed"
+                      >
+                        {supportedCountries.map((c) => (
+                          <option key={c.code} value={c.code}>
+                            {c.name} ({c.code})
+                          </option>
+                        ))}
+                      </select>
+                      <p className="text-[11px] text-stone-500 font-sans mt-1">
+                        ISO 3166-1 alpha-2: <span className="font-mono font-bold text-stone-700">{selectedCountry}</span>
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {accountStatus?.connected && (
+                <div className="px-4 py-3 bg-stone-50/70 border border-stone-200/80 rounded-xl flex items-center justify-between text-xs">
+                  <div className="flex items-center gap-2 text-stone-700 font-sans">
+                    <Globe className="w-4 h-4 text-stone-500 shrink-0" />
+                    <span>
+                      Registered Country:{' '}
+                      <strong className="font-mono text-stone-900">
+                        {supportedCountries.find((c) => c.code === (accountStatus.country || selectedCountry))?.name || accountStatus.country || selectedCountry}
+                      </strong>{' '}
+                      (<span className="font-mono font-bold">{accountStatus.country || selectedCountry}</span>)
+                    </span>
+                  </div>
+                  <span className="text-[11px] font-mono text-stone-500 hidden sm:inline">
+                    Configured with Stripe Express
+                  </span>
                 </div>
               )}
 

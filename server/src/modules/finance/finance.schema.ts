@@ -4,6 +4,12 @@ export const onboardingLinkSchema = z.object({
   returnUrl: z.string().url().optional(),
   refreshUrl: z.string().url().optional(),
   reconnect: z.boolean().optional(),
+  country: z
+    .string()
+    .trim()
+    .toUpperCase()
+    .length(2, 'Country must be a 2-letter ISO 3166-1 alpha-2 code.')
+    .optional(),
 });
 
 export const loginLinkSchema = z.object({

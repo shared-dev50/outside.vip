@@ -14,6 +14,7 @@ import {
   handleGetDisputes,
   handleUpdatePayoutSchedule,
   handleReconcile,
+  handleGetSupportedCountries,
 } from './finance.controller.js';
 
 export const financeRouter = Router();
@@ -22,6 +23,7 @@ export const financeRouter = Router();
 financeRouter.use(requireAuth);
 financeRouter.use(requireRole(Role.ORGANIZER, Role.ADMIN));
 
+financeRouter.get('/countries', handleGetSupportedCountries);
 financeRouter.get('/account', handleGetAccountStatus);
 financeRouter.post('/onboarding-link', handleCreateOnboardingLink);
 financeRouter.post('/login-link', handleCreateLoginLink);
