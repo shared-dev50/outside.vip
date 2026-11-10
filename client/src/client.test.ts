@@ -1,3 +1,5 @@
+import fs from 'fs';
+import path from 'path';
 import { describe, it, expect, vi } from 'vitest';
 import { api, resolveApiBaseUrl, buildApiUrl } from './lib/api';
 
@@ -438,6 +440,114 @@ describe('Outside.vip Client Library', () => {
       );
     });
   });
+
+  describe('Vercel production routing and SPA rewrite configuration', () => {
+    // Tests verify Vercel deployment rewrites prevent 404s on Stripe return & deep links
+    it('client/vercel.json and root vercel.json exist and are syntactically valid JSON', () => {
+      const clientConfigPath = path.resolve(__dirname, '../vercel.json');
+      const rootConfigPath = path.resolve(__dirname, '../../vercel.json');
+
+      expect(fs.existsSync(clientConfigPath)).toBe(true);
+      expect(fs.existsSync(rootConfigPath)).toBe(true);
+
+      const clientConfig = JSON.parse(fs.readFileSync(clientConfigPath, 'utf8'));
+      const rootConfig = JSON.parse(fs.readFileSync(rootConfigPath, 'utf8'));
+
+      expect(clientConfig.rewrites).toBeDefined();
+      expect(Array.isArray(clientConfig.rewrites)).toBe(true);
+      expect(rootConfig.rewrites).toBeDefined();
+      expect(Array.isArray(rootConfig.rewrites)).toBe(true);
+    });
+
+    it('contains API proxy rule followed by SPA catch-all fallback to index.html', () => {
+      const clientConfigPath = path.resolve(__dirname, '../vercel.json');
+      const clientConfig = JSON.parse(fs.readFileSync(clientConfigPath, 'utf8'));
+
+      const rewrites = clientConfig.rewrites as Array<{ source: string; destination: string }>;
+      expect(rewrites.length).toBeGreaterThanOrEqual(2);
+
+      // Rule 1: API requests route to Render backend
+      const apiRewrite = rewrites.find((r) => r.source === '/api/:path*');
+      expect(apiRewrite).toBeDefined();
+      expect(apiRewrite!.destination).toBe('https://outside-vip.onrender.com/api/:path*');
+
+      // Rule 2: SPA catch-all routes to /index.html
+      const spaCatchAll = rewrites.find((r) => r.source === '/(.*)');
+      expect(spaCatchAll).toBeDefined();
+      expect(spaCatchAll!.destination).toBe('/index.html');
+
+      // Crucial: API rule MUST precede the SPA catch-all rule
+      const apiIndex = rewrites.indexOf(apiRewrite!);
+      const spaIndex = rewrites.indexOf(spaCatchAll!);
+      expect(apiIndex).toBeLessThan(spaIndex);
+    });
+
+    it('matches Stripe onboarding return and refresh flows to /index.html', () => {
+      const clientConfigPath = path.resolve(__dirname, '../vercel.json');
+      const clientConfig = JSON.parse(fs.readFileSync(clientConfigPath, 'utf8'));
+      const rewrites = clientConfig.rewrites as Array<{ source: string; destination: string }>;
+
+      // Helper function simulating Vercel rewrite matching
+      function resolveRewrite(requestPath: string): { destination: string; type: 'api' | 'spa' } {
+        for (const rule of rewrites) {
+          if (rule.source === '/api/:path*' && requestPath.startsWith('/api')) {
+            return { destination: rule.destination, type: 'api' };
+          }
+          if (rule.source === '/(.*)') {
+            return { destination: rule.destination, type: 'spa' };
+          }
+        }
+        return { destination: requestPath, type: 'spa' };
+      }
+
+      // Deep route: /organizer/finance
+      expect(resolveRewrite('/organizer/finance')).toEqual({
+        destination: '/index.html',
+        type: 'spa',
+      });
+
+      // Stripe Return URL: /organizer/finance?stripe_return=true
+      expect(resolveRewrite('/organizer/finance?stripe_return=true')).toEqual({
+        destination: '/index.html',
+        type: 'spa',
+      });
+
+      // Stripe Refresh URL: /organizer/finance?stripe_refresh=true
+      expect(resolveRewrite('/organizer/finance?stripe_refresh=true')).toEqual({
+        destination: '/index.html',
+        type: 'spa',
+      });
+
+      // Other React Router SPA routes
+      expect(resolveRewrite('/events')).toEqual({
+        destination: '/index.html',
+        type: 'spa',
+      });
+      expect(resolveRewrite('/events/outside-music-fest-2026')).toEqual({
+        destination: '/index.html',
+        type: 'spa',
+      });
+      expect(resolveRewrite('/scanner')).toEqual({
+        destination: '/index.html',
+        type: 'spa',
+      });
+      expect(resolveRewrite('/orders/OUT-2026-99999')).toEqual({
+        destination: '/index.html',
+        type: 'spa',
+      });
+
+      // API requests proxy to Render
+      expect(resolveRewrite('/api/organizer/finance/account')).toEqual({
+        destination: 'https://outside-vip.onrender.com/api/:path*',
+        type: 'api',
+      });
+      expect(resolveRewrite('/api/events')).toEqual({
+        destination: 'https://outside-vip.onrender.com/api/:path*',
+        type: 'api',
+      });
+    });
+  });
 });
+
 
 
