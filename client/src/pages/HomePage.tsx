@@ -202,7 +202,9 @@ export const HomePage: React.FC = () => {
             to="/events"
             className="group inline-flex items-center gap-2 px-6 py-3 rounded-full border border-stone-300/80 bg-white/70 hover:bg-white text-stone-900 text-xs font-mono uppercase tracking-[0.18em] font-bold shadow-xs hover:shadow-md hover:border-stone-900 transition-all duration-300"
           >
-            <span>Explore all events ({allEvents.length})</span>
+            <span>
+              View all events {data?.pagination?.total ? `(${data.pagination.total})` : ''}
+            </span>
             <ArrowRight className="w-3.5 h-3.5 group-hover:translate-x-1 transition-transform" />
           </Link>
         </section>

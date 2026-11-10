@@ -8,6 +8,12 @@ import {
   classifyStripeError,
   logStripeDiagnostic,
 } from './stripeError.js';
+import {
+  STRIPE_EXPRESS_SUPPORTED_COUNTRIES,
+  DEFAULT_STRIPE_CONNECT_COUNTRY,
+  isStripeExpressCountrySupported,
+  StripeConnectCountry,
+} from './stripeCountries.js';
 
 export interface HumanReadableRequirement {
   code: string;
@@ -64,6 +70,7 @@ export interface ConnectedAccountStatusResponse {
   externalAccounts: SanitizedExternalAccount[];
   defaultCurrency: string;
   country: string | null;
+  supportedCountries?: StripeConnectCountry[];
 }
 
 export interface BalanceCurrencyItem {
@@ -117,7 +124,8 @@ function buildDisconnectedStatus(
     | 'configuration_unavailable'
     | 'service_unavailable',
   sellTicketsMessage: string,
-  transferBalanceMessage: string
+  transferBalanceMessage: string,
+  persistedCountry?: string | null
 ): ConnectedAccountStatusResponse {
   return {
     connected: false,
@@ -147,7 +155,8 @@ function buildDisconnectedStatus(
     payoutSchedule: null,
     externalAccounts: [],
     defaultCurrency: 'USD',
-    country: null,
+    country: persistedCountry || null,
+    supportedCountries: STRIPE_EXPRESS_SUPPORTED_COUNTRIES,
   };
 }
 
@@ -205,6 +214,7 @@ export async function getConnectedAccountStatus(
       email: true,
       name: true,
       stripeAccountId: true,
+      stripeAccountCountry: true,
     },
   });
 
@@ -216,7 +226,8 @@ export async function getConnectedAccountStatus(
     return buildDisconnectedStatus(
       'configuration_unavailable',
       'Stripe payments are currently being configured for this platform. Please check back shortly.',
-      'Payout services are temporarily unavailable while platform configuration is being completed.'
+      'Payout services are temporarily unavailable while platform configuration is being completed.',
+      user.stripeAccountCountry
     );
   }
 
@@ -224,12 +235,22 @@ export async function getConnectedAccountStatus(
     return buildDisconnectedStatus(
       'not_connected',
       'Complete Stripe onboarding to start receiving ticket payments.',
-      'Payouts will be enabled once Stripe verifies your identity and banking credentials.'
+      'Payouts will be enabled once Stripe verifies your identity and banking credentials.',
+      user.stripeAccountCountry
     );
   }
 
   try {
     const account = await stripe.accounts.retrieve(user.stripeAccountId);
+
+    if (!user.stripeAccountCountry && account.country) {
+      prisma.user
+        .update({
+          where: { id: user.id },
+          data: { stripeAccountCountry: account.country },
+        })
+        .catch(() => {});
+    }
 
     const currentlyDueRaw = account.requirements?.currently_due || [];
     const eventuallyDueRaw = account.requirements?.eventually_due || [];
@@ -357,7 +378,8 @@ export async function getConnectedAccountStatus(
       payoutSchedule,
       externalAccounts,
       defaultCurrency: account.default_currency ? account.default_currency.toUpperCase() : 'USD',
-      country: account.country || null,
+      country: account.country || user.stripeAccountCountry || null,
+      supportedCountries: STRIPE_EXPRESS_SUPPORTED_COUNTRIES,
     };
   } catch (error: any) {
     logStripeDiagnostic('getConnectedAccountStatus', error, {
@@ -372,7 +394,8 @@ export async function getConnectedAccountStatus(
       return buildDisconnectedStatus(
         'invalid_or_inaccessible',
         'The previously connected Stripe account is no longer valid or accessible. Please reconnect your Stripe account to resume ticket sales.',
-        'Payouts are paused until a valid Stripe account is reconnected.'
+        'Payouts are paused until a valid Stripe account is reconnected.',
+        user.stripeAccountCountry
       );
     }
 
@@ -380,7 +403,8 @@ export async function getConnectedAccountStatus(
       return buildDisconnectedStatus(
         'configuration_unavailable',
         'Stripe payments are currently being configured for this platform. Please check back shortly.',
-        'Payout services are temporarily unavailable while platform configuration is being completed.'
+        'Payout services are temporarily unavailable while platform configuration is being completed.',
+        user.stripeAccountCountry
       );
     }
 
@@ -396,12 +420,14 @@ export async function getConnectedAccountStatus(
  * Creates or continues Stripe onboarding via an Account Link.
  * When `reconnect: true` is explicitly provided, replaces an invalid or stale account ID.
  * Does NOT silently create new accounts on background read errors.
+ * Supports country selection with strict server-side allowlist validation.
  */
 export async function createOnboardingLink(
   userId: string,
   returnUrl?: string,
   refreshUrl?: string,
-  reconnect?: boolean
+  reconnect?: boolean,
+  country?: string
 ): Promise<{ url: string; stripeAccountId: string }> {
   const user = await prisma.user.findUnique({
     where: { id: userId },
@@ -410,6 +436,7 @@ export async function createOnboardingLink(
       email: true,
       name: true,
       stripeAccountId: true,
+      stripeAccountCountry: true,
     },
   });
 
@@ -424,13 +451,40 @@ export async function createOnboardingLink(
     );
   }
 
+  // Validate country parameter against allowlist if provided
+  if (country !== undefined) {
+    const normalizedCountry = country.trim().toUpperCase();
+    if (!isStripeExpressCountrySupported(normalizedCountry)) {
+      throw new BadRequestError(
+        `Country '${country}' is not supported for Stripe Connect Express onboarding on this platform. Please select an eligible country.`,
+        'UNSUPPORTED_COUNTRY'
+      );
+    }
+  }
+
   let accountId = user.stripeAccountId;
 
   // Create a new Express connected account if one does not exist or if explicitly requested to reconnect
   if (!accountId || reconnect === true) {
+    // Determine authoritative country for the new account:
+    // 1. Explicitly supplied country parameter
+    // 2. Previously persisted country (for reconnections)
+    // 3. Fallback to default platform country (US)
+    const targetCountry = country
+      ? country.trim().toUpperCase()
+      : (reconnect === true && user.stripeAccountCountry) || DEFAULT_STRIPE_CONNECT_COUNTRY;
+
+    if (!isStripeExpressCountrySupported(targetCountry)) {
+      throw new BadRequestError(
+        `Country '${targetCountry}' is not supported for Stripe Connect Express onboarding on this platform. Please select an eligible country.`,
+        'UNSUPPORTED_COUNTRY'
+      );
+    }
+
     try {
       const account = await stripe.accounts.create({
         type: 'express',
+        country: targetCountry,
         email: user.email,
         capabilities: {
           card_payments: { requested: true },
@@ -447,10 +501,29 @@ export async function createOnboardingLink(
 
       await prisma.user.update({
         where: { id: user.id },
-        data: { stripeAccountId: accountId },
+        data: {
+          stripeAccountId: accountId,
+          stripeAccountCountry: targetCountry,
+        },
       });
     } catch (error: any) {
-      logStripeDiagnostic('createOnboardingLink.accounts.create', error, { userId });
+      logStripeDiagnostic('createOnboardingLink.accounts.create', error, {
+        userId,
+        country: targetCountry,
+      });
+
+      if (
+        error?.code === 'country_unsupported' ||
+        error?.param === 'country' ||
+        error?.raw?.code === 'country_unsupported' ||
+        /country.*unsupported|country is not supported/i.test(error?.message || '')
+      ) {
+        throw new BadRequestError(
+          `Stripe does not currently support Express accounts in ${targetCountry}. Please select another country.`,
+          'STRIPE_COUNTRY_UNSUPPORTED'
+        );
+      }
+
       const classified = classifyStripeError(error);
       if (classified.category === 'configuration_unavailable') {
         throw new ServiceUnavailableError(classified.safeMessage, classified.code);
@@ -459,9 +532,25 @@ export async function createOnboardingLink(
         throw new ServiceUnavailableError(classified.safeMessage, classified.code);
       }
       throw new BadRequestError(
-        'Could not create Stripe connected account. Please try again later.',
-        classified.code
+        classified.safeMessage || 'Could not create Stripe connected account. Please try again later.',
+        classified.code || 'STRIPE_ACCOUNT_CREATION_FAILED'
       );
+    }
+  } else {
+    // Existing connected account: retain original country without recreating
+    // If stripeAccountCountry was not previously stored, retrieve and cache from Stripe
+    if (!user.stripeAccountCountry) {
+      try {
+        const existingAccount = await stripe.accounts.retrieve(accountId);
+        if (existingAccount?.country) {
+          await prisma.user.update({
+            where: { id: user.id },
+            data: { stripeAccountCountry: existingAccount.country },
+          });
+        }
+      } catch {
+        // Proceed with onboarding link generation even if retrieval fails
+      }
     }
   }
 

@@ -171,6 +171,7 @@ model User {
   role         Role              @default(ATTENDEE)
   avatarUrl    String?
   stripeAccountId String?        @unique
+  stripeAccountCountry String?
   createdAt    DateTime          @default(now())
   updatedAt    DateTime          @updatedAt
 

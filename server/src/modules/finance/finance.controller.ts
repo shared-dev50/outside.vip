@@ -22,6 +22,23 @@ import {
   adminWithdrawFundsSchema,
 } from './finance.schema.js';
 import { prisma } from '../../db/prisma.js';
+import {
+  STRIPE_EXPRESS_SUPPORTED_COUNTRIES,
+  DEFAULT_STRIPE_CONNECT_COUNTRY,
+} from './stripeCountries.js';
+
+export async function handleGetSupportedCountries(
+  _req: Request,
+  res: Response
+): Promise<void> {
+  res.json({
+    success: true,
+    data: {
+      countries: STRIPE_EXPRESS_SUPPORTED_COUNTRIES,
+      defaultCountry: DEFAULT_STRIPE_CONNECT_COUNTRY,
+    },
+  });
+}
 
 export async function handleGetAccountStatus(
   req: Request,
@@ -47,8 +64,8 @@ export async function handleCreateOnboardingLink(
 ): Promise<void> {
   try {
     const userId = req.user!.userId;
-    const { returnUrl, refreshUrl, reconnect } = onboardingLinkSchema.parse(req.body || {});
-    const result = await createOnboardingLink(userId, returnUrl, refreshUrl, reconnect);
+    const { returnUrl, refreshUrl, reconnect, country } = onboardingLinkSchema.parse(req.body || {});
+    const result = await createOnboardingLink(userId, returnUrl, refreshUrl, reconnect, country);
     res.json({
       success: true,
       data: result,

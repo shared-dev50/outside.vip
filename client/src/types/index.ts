@@ -260,6 +260,11 @@ export interface SanitizedExternalAccount {
   status: string;
 }
 
+export interface StripeConnectCountry {
+  code: string;
+  name: string;
+}
+
 export interface StripeConnectedAccountStatus {
   connected: boolean;
   stripeAccountId: string | null;
@@ -294,6 +299,7 @@ export interface StripeConnectedAccountStatus {
   externalAccounts: SanitizedExternalAccount[];
   defaultCurrency: string;
   country: string | null;
+  supportedCountries?: StripeConnectCountry[];
 }
 
 export interface StripeBalanceCurrencyItem {

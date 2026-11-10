@@ -23,6 +23,7 @@ import {
   FinancialLedgerEntryItem,
   WithdrawalRequestPayload,
   WithdrawalResponse,
+  StripeConnectCountry,
 } from '../types';
 
 export function resolveApiBaseUrl(rawUrl?: string): string {
@@ -584,7 +585,16 @@ export const api = {
   finance: {
     getStatus: () =>
       request<StripeConnectedAccountStatus>('/organizer/finance/account'),
-    createOnboardingLink: (payload?: { returnUrl?: string; refreshUrl?: string; reconnect?: boolean }) =>
+    getSupportedCountries: () =>
+      request<{ countries: StripeConnectCountry[]; defaultCountry: string }>(
+        '/organizer/finance/countries'
+      ),
+    createOnboardingLink: (payload?: {
+      returnUrl?: string;
+      refreshUrl?: string;
+      reconnect?: boolean;
+      country?: string;
+    }) =>
       request<{ url: string; stripeAccountId: string }>('/organizer/finance/onboarding-link', {
         method: 'POST',
         body: JSON.stringify(payload || {}),

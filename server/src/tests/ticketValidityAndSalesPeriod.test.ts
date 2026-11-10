@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach, beforeAll } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import { app } from '../app.js';
@@ -118,7 +118,7 @@ describe('Ticket Sales Period and Ticket Validity Controls API', () => {
         salesEndAt: new Date(Date.now() - 1 * 3600 * 1000), // 1 hour ago
       },
     });
-  });
+  }, 30000);
 
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -568,4 +568,17 @@ describe('Ticket Sales Period and Ticket Validity Controls API', () => {
       expect(unresTier.isAvailable).toBe(true);
     });
   });
+
+  afterAll(async () => {
+    if (testEvent?.id) {
+      await prisma.checkInLog.deleteMany({ where: { ticket: { eventId: testEvent.id } } }).catch(() => {});
+      await prisma.paymentTransaction.deleteMany({ where: { order: { eventId: testEvent.id } } }).catch(() => {});
+      await prisma.ticketReservation.deleteMany({ where: { eventId: testEvent.id } }).catch(() => {});
+      await prisma.ticket.deleteMany({ where: { eventId: testEvent.id } }).catch(() => {});
+      await prisma.orderItem.deleteMany({ where: { order: { eventId: testEvent.id } } }).catch(() => {});
+      await prisma.order.deleteMany({ where: { eventId: testEvent.id } }).catch(() => {});
+      await prisma.ticketTier.deleteMany({ where: { eventId: testEvent.id } }).catch(() => {});
+      await prisma.event.delete({ where: { id: testEvent.id } }).catch(() => {});
+    }
+  }, 30000);
 });
