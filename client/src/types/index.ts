@@ -75,6 +75,7 @@ export interface User {
   email: string;
   name: string;
   role: Role;
+  status?: 'ACTIVE' | 'SUSPENDED' | 'DISABLED';
   emailVerified?: boolean;
   emailVerifiedAt?: string | null;
   avatarUrl?: string | null;

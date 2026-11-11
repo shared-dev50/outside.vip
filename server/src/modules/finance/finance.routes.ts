@@ -1,5 +1,10 @@
 import { Router } from 'express';
-import { requireAuth, requireVerifiedEmail, requireAdmin } from '../../middleware/auth.js';
+import {
+  requireAuth,
+  requireVerifiedEmail,
+  requireAdmin,
+  requireFreshUserVerification,
+} from '../../middleware/auth.js';
 import {
   handleGetAccountStatus,
   handleCreateOnboardingLink,
@@ -24,14 +29,14 @@ financeRouter.use(requireVerifiedEmail);
 
 financeRouter.get('/countries', handleGetSupportedCountries);
 financeRouter.get('/account', handleGetAccountStatus);
-financeRouter.post('/onboarding-link', handleCreateOnboardingLink);
-financeRouter.post('/login-link', handleCreateLoginLink);
+financeRouter.post('/onboarding-link', requireFreshUserVerification, handleCreateOnboardingLink);
+financeRouter.post('/login-link', requireFreshUserVerification, handleCreateLoginLink);
 financeRouter.get('/balance', handleGetBalance);
-financeRouter.post('/withdraw', handleExecuteWithdrawal);
+financeRouter.post('/withdraw', requireFreshUserVerification, handleExecuteWithdrawal);
 financeRouter.post('/admin/withdraw', requireAdmin, handleAdminWithdrawal);
 financeRouter.get('/transfers', handleGetTransfers);
 financeRouter.get('/ledger', handleGetLedger);
 financeRouter.get('/payouts', handleGetPayouts);
 financeRouter.get('/disputes', handleGetDisputes);
-financeRouter.patch('/payout-schedule', handleUpdatePayoutSchedule);
+financeRouter.patch('/payout-schedule', requireFreshUserVerification, handleUpdatePayoutSchedule);
 financeRouter.get('/reconcile', handleReconcile);

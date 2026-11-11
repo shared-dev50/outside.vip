@@ -1,8 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
-import jwt from 'jsonwebtoken';
-import { Role } from '@prisma/client';
+import { Role, AccountStatus } from '@prisma/client';
 import { prisma } from '../../db/prisma.js';
 import { env, normalizeEmail, isEmailInAdminAllowlist } from '../../config/env.js';
 import {
@@ -11,6 +10,8 @@ import {
   verifyEmailSchema,
   resendVerificationSchema,
   updateProfileSchema,
+  changePasswordSchema,
+  updateUserStatusSchema,
 } from './auth.schema.js';
 import {
   BadRequestError,
@@ -20,9 +21,23 @@ import {
   TooManyRequestsError,
   NotFoundError,
 } from '../../utils/errors.js';
-import { AuthUserPayload } from '../../middleware/auth.js';
 import { sendVerificationOtpEmail } from '../../lib/email.service.js';
 import { recordAdminAuditLog } from '../../lib/auditLogger.js';
+import {
+  createSession,
+  rotateSession,
+  revokeSession,
+  revokeAllUserSessions,
+  listUserSessions,
+  setSessionCookie,
+  clearSessionCookie,
+  invalidateUserAuthCache,
+  getUserAuthCacheVersion,
+  populateUserAuthCacheAtomically,
+  checkRedisRateLimit,
+  resolveRotatedSessionUserId,
+} from '../../lib/session.service.js';
+import { generateStatelessCsrfToken } from '../../middleware/csrf.js';
 
 export const OTP_EXPIRY_MS = 10 * 60 * 1000; // 10 minutes
 export const RESEND_COOLDOWN_MS = 60 * 1000; // 60 seconds
@@ -30,6 +45,7 @@ export const MAX_CODE_ATTEMPTS = 5;
 export const RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
 export const MAX_VERIFY_REQUESTS_PER_WINDOW = 8;
 export const MAX_RESEND_REQUESTS_PER_WINDOW = 5;
+export const MAX_LOGIN_ATTEMPTS_PER_WINDOW = 20;
 
 const verifyAttemptTimestamps = new Map<string, number[]>();
 const resendRequestTimestamps = new Map<string, number[]>();
@@ -80,11 +96,31 @@ const USER_PUBLIC_SELECT = {
   email: true,
   name: true,
   role: true,
+  status: true,
   emailVerified: true,
   emailVerifiedAt: true,
   avatarUrl: true,
   organizer: true,
 } as const;
+
+async function syncUserToAuthCache(user: {
+  id: string;
+  role: Role;
+  emailVerified: boolean;
+  status?: AccountStatus;
+}): Promise<void> {
+  await invalidateUserAuthCache(user.id);
+  const ver = await getUserAuthCacheVersion(user.id);
+  await populateUserAuthCacheAtomically(
+    {
+      userId: user.id,
+      role: user.role,
+      emailVerified: user.emailVerified,
+      accountStatus: user.status ?? AccountStatus.ACTIVE,
+    },
+    ver
+  );
+}
 
 async function issueVerificationCodeForUser(user: {
   id: string;
@@ -127,6 +163,19 @@ async function issueVerificationCodeForUser(user: {
   return { code, expiresAt };
 }
 
+export async function getCsrfToken(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const csrfToken = req.session ? req.session.csrfToken : generateStatelessCsrfToken();
+    res.setHeader('X-CSRF-Token', csrfToken);
+    res.json({
+      success: true,
+      data: { csrfToken },
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
 export async function register(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     // Reject any attempt to self-assign ADMIN during registration
@@ -158,14 +207,14 @@ export async function register(req: Request, res: Response, next: NextFunction):
 
     const passwordHash = await bcrypt.hash(input.password, 10);
 
-    // Every registered user starts with default ATTENDEE functionality and unverified email.
-    // Frontend role values are never trusted to grant elevated roles on registration.
+    // Every registered user starts with default ATTENDEE functionality, ACTIVE status, and unverified email.
     const user = await prisma.user.create({
       data: {
         email: normalizedEmail,
         passwordHash,
         name: input.name,
         role: Role.ATTENDEE,
+        status: AccountStatus.ACTIVE,
         emailVerified: false,
         emailVerifiedAt: null,
         ...(input.organizerDisplayName && {
@@ -190,22 +239,28 @@ export async function register(req: Request, res: Response, next: NextFunction):
       name: user.name,
     });
 
-    const tokenPayload: AuthUserPayload = {
-      userId: user.id,
-      email: user.email,
-      role: user.role,
-      emailVerified: user.emailVerified,
-    };
+    // Populate 30s Redis user authorization cache
+    await syncUserToAuthCache(user);
 
-    const token = jwt.sign(tokenPayload, env.JWT_SECRET, {
-      expiresIn: env.JWT_EXPIRES_IN as any,
+    // Rotate any pre-existing session and issue a fresh Redis session
+    const issuedSession = await rotateSession({
+      oldSessionId: req.session?.sessionId ?? null,
+      userId: user.id,
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'] || null,
     });
+
+    setSessionCookie(res, issuedSession.rawCookieValue);
+    res.setHeader('X-CSRF-Token', issuedSession.csrfToken);
+
+    const activeNodeEnv = process.env.NODE_ENV || env.NODE_ENV;
 
     res.status(201).json({
       success: true,
       data: {
         user,
-        token,
+        csrfToken: issuedSession.csrfToken,
+        ...(activeNodeEnv !== 'production' ? { token: issuedSession.rawCookieValue } : {}),
         verificationRequired: true,
       },
     });
@@ -223,6 +278,7 @@ export async function verifyEmail(req: Request, res: Response, next: NextFunctio
       email: string;
       name: string;
       role: Role;
+      status: AccountStatus;
       emailVerified: boolean;
       emailVerifiedAt: Date | null;
     } | null = null;
@@ -236,11 +292,27 @@ export async function verifyEmail(req: Request, res: Response, next: NextFunctio
         where: { email: normalizeEmail(input.email) },
       });
     } else {
-      throw new UnauthorizedError('Authentication or email address is required to verify email.');
+      const rotatedUserId = await resolveRotatedSessionUserId(req);
+      if (rotatedUserId) {
+        targetUser = await prisma.user.findUnique({
+          where: { id: rotatedUserId },
+        });
+      } else {
+        throw new UnauthorizedError('Authentication or email address is required to verify email.');
+      }
     }
 
     if (!targetUser) {
       throw new NotFoundError('User account not found.');
+    }
+
+    if (targetUser.status !== AccountStatus.ACTIVE) {
+      await invalidateUserAuthCache(targetUser.id);
+      await revokeAllUserSessions(targetUser.id);
+      throw new ForbiddenError(
+        `Your account has been ${targetUser.status.toLowerCase()}.`,
+        `ACCOUNT_${targetUser.status}`
+      );
     }
 
     const rateKey = `verify:${targetUser.id}`;
@@ -261,7 +333,6 @@ export async function verifyEmail(req: Request, res: Response, next: NextFunctio
     const submittedHash = hashVerificationCode(targetUser.id, input.code);
     const now = new Date();
 
-    // Check if this exact code was already used previously
     const previouslyUsedCode = await prisma.emailVerificationCode.findFirst({
       where: {
         userId: targetUser.id,
@@ -367,22 +438,29 @@ export async function verifyEmail(req: Request, res: Response, next: NextFunctio
       });
     }
 
-    const tokenPayload: AuthUserPayload = {
-      userId: updatedUser.id,
-      email: updatedUser.email,
-      role: updatedUser.role,
-      emailVerified: updatedUser.emailVerified,
-    };
+    // Immediately invalidate and update the 30-second Redis User Authorization Cache
+    await syncUserToAuthCache(updatedUser);
 
-    const token = jwt.sign(tokenPayload, env.JWT_SECRET, {
-      expiresIn: env.JWT_EXPIRES_IN as any,
+    // Rotate session ID on email verification / privilege elevation
+    const rotatedSession = await rotateSession({
+      oldSessionId: req.session?.sessionId ?? null,
+      userId: updatedUser.id,
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'] || null,
+      preserveLifetime: true,
     });
+
+    setSessionCookie(res, rotatedSession.rawCookieValue);
+    res.setHeader('X-CSRF-Token', rotatedSession.csrfToken);
+
+    const activeNodeEnv = process.env.NODE_ENV || env.NODE_ENV;
 
     res.json({
       success: true,
       data: {
         user: updatedUser,
-        token,
+        csrfToken: rotatedSession.csrfToken,
+        ...(activeNodeEnv !== 'production' ? { token: rotatedSession.rawCookieValue } : {}),
       },
     });
   } catch (error) {
@@ -425,7 +503,6 @@ export async function resendVerification(
       throw new BadRequestError('Email address is already verified.', 'EMAIL_ALREADY_VERIFIED');
     }
 
-    // Check cooldown against the most recently created verification code first
     const latestCode = await prisma.emailVerificationCode.findFirst({
       where: { userId: targetUser.id },
       orderBy: { createdAt: 'desc' },
@@ -550,6 +627,19 @@ export async function login(req: Request, res: Response, next: NextFunction): Pr
       );
     }
 
+    // Redis-backed login rate limit
+    const loginRateAllowed = await checkRedisRateLimit(
+      `login:${normalizedEmail}:${req.ip || 'unknown'}`,
+      MAX_LOGIN_ATTEMPTS_PER_WINDOW,
+      RATE_LIMIT_WINDOW_MS
+    );
+    if (!loginRateAllowed) {
+      throw new TooManyRequestsError(
+        'Too many sign-in attempts. Please wait before trying again.',
+        'LOGIN_RATE_LIMIT'
+      );
+    }
+
     let user = await prisma.user.findUnique({
       where: { email: normalizedEmail },
       include: {
@@ -564,6 +654,16 @@ export async function login(req: Request, res: Response, next: NextFunction): Pr
     const isValidPassword = await bcrypt.compare(input.password, user.passwordHash);
     if (!isValidPassword) {
       throw new UnauthorizedError('Invalid email or password.');
+    }
+
+    if (user.status !== AccountStatus.ACTIVE) {
+      await invalidateUserAuthCache(user.id);
+      await revokeAllUserSessions(user.id);
+      clearSessionCookie(res);
+      throw new ForbiddenError(
+        `Your account has been ${user.status.toLowerCase()}.`,
+        `ACCOUNT_${user.status}`
+      );
     }
 
     // Only verified email addresses matching ADMIN_EMAILS can be provisioned as ADMIN
@@ -589,16 +689,19 @@ export async function login(req: Request, res: Response, next: NextFunction): Pr
       });
     }
 
-    const tokenPayload: AuthUserPayload = {
-      userId: user.id,
-      email: user.email,
-      role: user.role,
-      emailVerified: user.emailVerified,
-    };
+    // Immediately sync the 30-second Redis User Authorization Cache
+    await syncUserToAuthCache(user);
 
-    const token = jwt.sign(tokenPayload, env.JWT_SECRET, {
-      expiresIn: env.JWT_EXPIRES_IN as any,
+    // Rotate any existing session ID on login and create a new Redis session
+    const issuedSession = await rotateSession({
+      oldSessionId: req.session?.sessionId ?? null,
+      userId: user.id,
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'] || null,
     });
+
+    setSessionCookie(res, issuedSession.rawCookieValue);
+    res.setHeader('X-CSRF-Token', issuedSession.csrfToken);
 
     res.json({
       success: true,
@@ -608,12 +711,255 @@ export async function login(req: Request, res: Response, next: NextFunction): Pr
           email: user.email,
           name: user.name,
           role: user.role,
+          status: user.status,
           emailVerified: user.emailVerified,
           emailVerifiedAt: user.emailVerifiedAt,
           avatarUrl: user.avatarUrl,
           organizer: user.organizer,
         },
-        token,
+        csrfToken: issuedSession.csrfToken,
+        ...(activeNodeEnv !== 'production' ? { token: issuedSession.rawCookieValue } : {}),
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function logout(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    if (req.session) {
+      await revokeSession(req.session.sessionId, req.session.userId);
+    }
+    clearSessionCookie(res);
+
+    res.json({
+      success: true,
+      data: {
+        message: 'Signed out and invalidated session.',
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function logoutAll(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    if (!req.user) {
+      throw new UnauthorizedError('Not authenticated');
+    }
+
+    const revokedCount = await revokeAllUserSessions(req.user.userId);
+    clearSessionCookie(res);
+
+    res.json({
+      success: true,
+      data: {
+        revokedCount,
+        message: 'All active sessions have been revoked.',
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function listSessions(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    if (!req.user) {
+      throw new UnauthorizedError('Not authenticated');
+    }
+
+    const sessions = await listUserSessions(req.user.userId);
+    res.json({
+      success: true,
+      data: {
+        currentSessionId: req.session?.sessionId ?? null,
+        sessions,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function revokeSessionById(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    if (!req.user) {
+      throw new UnauthorizedError('Not authenticated');
+    }
+
+    const targetSessionId = req.params.sessionId;
+    if (!targetSessionId) {
+      throw new BadRequestError('Session ID is required.');
+    }
+
+    const userSessions = await listUserSessions(req.user.userId);
+    const ownsSession = userSessions.some((s) => s.sessionId === targetSessionId);
+    if (!ownsSession) {
+      throw new NotFoundError('Session not found for this account.');
+    }
+
+    await revokeSession(targetSessionId, req.user.userId);
+
+    if (req.session?.sessionId === targetSessionId) {
+      clearSessionCookie(res);
+    }
+
+    res.json({
+      success: true,
+      data: {
+        revokedSessionId: targetSessionId,
+        message: 'Session revoked.',
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function changePassword(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    if (!req.user) {
+      throw new UnauthorizedError('Not authenticated');
+    }
+
+    const input = changePasswordSchema.parse(req.body);
+
+    const dbUser = await prisma.user.findUnique({
+      where: { id: req.user.userId },
+    });
+
+    if (!dbUser) {
+      throw new UnauthorizedError('User account not found');
+    }
+
+    const isCurrentValid = await bcrypt.compare(input.currentPassword, dbUser.passwordHash);
+    if (!isCurrentValid) {
+      throw new UnauthorizedError('Current password is incorrect.', 'INVALID_CURRENT_PASSWORD');
+    }
+
+    const newPasswordHash = await bcrypt.hash(input.newPassword, 10);
+    await prisma.user.update({
+      where: { id: dbUser.id },
+      data: { passwordHash: newPasswordHash },
+    });
+
+    // Requirement 5 & 6: Immediately invalidate Redis user cache and revoke all existing sessions
+    await invalidateUserAuthCache(dbUser.id);
+    await revokeAllUserSessions(dbUser.id);
+
+    // Issue a fresh rotated session for the active client
+    const newSession = await createSession({
+      userId: dbUser.id,
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'] || null,
+    });
+    await syncUserToAuthCache(dbUser);
+
+    setSessionCookie(res, newSession.rawCookieValue);
+    res.setHeader('X-CSRF-Token', newSession.csrfToken);
+
+    await recordAdminAuditLog({
+      actorUserId: dbUser.id,
+      actorEmail: dbUser.email,
+      action: 'PASSWORD_CHANGED_SESSIONS_REVOKED',
+      targetType: 'User',
+      targetId: dbUser.id,
+      ipAddress: req.ip,
+    });
+
+    const activeNodeEnv = process.env.NODE_ENV || env.NODE_ENV;
+
+    res.json({
+      success: true,
+      data: {
+        message: 'Password updated and all previous sessions have been revoked.',
+        csrfToken: newSession.csrfToken,
+        ...(activeNodeEnv !== 'production' ? { token: newSession.rawCookieValue } : {}),
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function updateUserStatus(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    if (!req.user) {
+      throw new UnauthorizedError('Not authenticated');
+    }
+
+    const targetUserId = req.params.id;
+    if (!targetUserId) {
+      throw new BadRequestError('Target user ID is required.');
+    }
+
+    if (targetUserId === req.user.userId) {
+      throw new BadRequestError('Administrators cannot suspend or disable their own account.');
+    }
+
+    const input = updateUserStatusSchema.parse(req.body);
+    const targetUser = await prisma.user.findUnique({
+      where: { id: targetUserId },
+    });
+
+    if (!targetUser) {
+      throw new NotFoundError('Target user account not found.');
+    }
+
+    const updatedUser = await prisma.user.update({
+      where: { id: targetUserId },
+      data: {
+        status: input.status as AccountStatus,
+      },
+      select: USER_PUBLIC_SELECT,
+    });
+
+    // Requirement 5 & 6: Immediately invalidate the Redis user authorization cache
+    await invalidateUserAuthCache(targetUserId);
+
+    // If account is suspended or disabled, immediately revoke all active sessions
+    let revokedSessions = 0;
+    if (updatedUser.status !== AccountStatus.ACTIVE) {
+      revokedSessions = await revokeAllUserSessions(targetUserId);
+    } else {
+      await syncUserToAuthCache(updatedUser);
+    }
+
+    await recordAdminAuditLog({
+      actorUserId: req.user.userId,
+      actorEmail: req.user.email || 'admin',
+      action: 'USER_ACCOUNT_STATUS_CHANGED',
+      targetType: 'User',
+      targetId: targetUserId,
+      metadata: {
+        previousStatus: targetUser.status,
+        newStatus: updatedUser.status,
+        reason: input.reason ?? null,
+        revokedSessions,
+      },
+      ipAddress: req.ip,
+    });
+
+    res.json({
+      success: true,
+      data: {
+        user: updatedUser,
+        revokedSessions,
       },
     });
   } catch (error) {
@@ -637,8 +983,23 @@ export async function getCurrentUser(
     });
 
     if (!user) {
+      await invalidateUserAuthCache(req.user.userId);
+      await revokeAllUserSessions(req.user.userId);
+      clearSessionCookie(res);
       throw new UnauthorizedError('User account not found');
     }
+
+    if (user.status !== AccountStatus.ACTIVE) {
+      await invalidateUserAuthCache(user.id);
+      await revokeAllUserSessions(user.id);
+      clearSessionCookie(res);
+      throw new ForbiddenError(
+        `Your account has been ${user.status.toLowerCase()}.`,
+        `ACCOUNT_${user.status}`
+      );
+    }
+
+    let activeCsrfToken = req.session?.csrfToken;
 
     if (user.emailVerified && isEmailInAdminAllowlist(user.email) && user.role !== Role.ADMIN) {
       const previousRole = user.role;
@@ -660,11 +1021,34 @@ export async function getCurrentUser(
         },
         ipAddress: req.ip,
       });
+
+      // Immediately invalidate cache and rotate session ID on privilege elevation
+      await syncUserToAuthCache(user);
+      if (req.session) {
+        const rotated = await rotateSession({
+          oldSessionId: req.session.sessionId,
+          userId: user.id,
+          ipAddress: req.ip,
+          userAgent: req.headers['user-agent'] || null,
+          preserveLifetime: true,
+        });
+        setSessionCookie(res, rotated.rawCookieValue);
+        activeCsrfToken = rotated.csrfToken;
+      }
+    } else {
+      await syncUserToAuthCache(user);
+    }
+
+    if (activeCsrfToken) {
+      res.setHeader('X-CSRF-Token', activeCsrfToken);
     }
 
     res.json({
       success: true,
-      data: { user },
+      data: {
+        user,
+        ...(activeCsrfToken ? { csrfToken: activeCsrfToken } : {}),
+      },
     });
   } catch (error) {
     next(error);
@@ -684,6 +1068,7 @@ export async function updateProfile(
     if (
       req.body &&
       (req.body.role !== undefined ||
+        req.body.status !== undefined ||
         req.body.emailVerified !== undefined ||
         req.body.emailVerifiedAt !== undefined)
     ) {
@@ -695,11 +1080,12 @@ export async function updateProfile(
         targetId: req.user.userId,
         metadata: {
           attemptedRole: req.body.role,
+          attemptedStatus: req.body.status,
           attemptedEmailVerified: req.body.emailVerified,
         },
         ipAddress: req.ip,
       });
-      throw new ForbiddenError('Users cannot modify role or email verification status.');
+      throw new ForbiddenError('Users cannot modify role, status, or email verification status.');
     }
 
     const input = updateProfileSchema.parse(req.body);

@@ -1,5 +1,9 @@
 import { Router } from 'express';
-import { requireAuth, requireVerifiedEmail } from '../../middleware/auth.js';
+import {
+  requireAuth,
+  requireVerifiedEmail,
+  requireFreshUserVerification,
+} from '../../middleware/auth.js';
 import {
   getDashboardStats,
   listOrganizerEvents,
@@ -47,7 +51,7 @@ organizerRouter.post('/upload', uploadCoverMiddleware.single('image'), handleDir
 organizerRouter.get('/dashboard', getDashboardStats);
 organizerRouter.post('/earnings-preview', getOrganizerEarningsPreview);
 organizerRouter.get('/payout-details', getOrganizerPayoutDetails);
-organizerRouter.put('/payout-details', updateOrganizerPayoutDetails);
+organizerRouter.put('/payout-details', requireFreshUserVerification, updateOrganizerPayoutDetails);
 organizerRouter.get('/events', listOrganizerEvents);
 organizerRouter.post('/events', createOrganizerEvent);
 organizerRouter.get('/events/:id', getOrganizerEventById);

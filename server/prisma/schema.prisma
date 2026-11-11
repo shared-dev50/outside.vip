@@ -17,6 +17,12 @@ enum Role {
   ADMIN
 }
 
+enum AccountStatus {
+  ACTIVE
+  SUSPENDED
+  DISABLED
+}
+
 enum EventCategory {
   MUSIC
   NIGHTLIFE
@@ -169,6 +175,7 @@ model User {
   passwordHash String
   name         String
   role         Role              @default(ATTENDEE)
+  status       AccountStatus     @default(ACTIVE)
   emailVerified Boolean          @default(false)
   emailVerifiedAt DateTime?
   avatarUrl    String?

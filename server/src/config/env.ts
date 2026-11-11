@@ -11,6 +11,22 @@ const envSchema = z.object({
   DATABASE_URL: z.string().min(1, 'DATABASE_URL is required'),
   JWT_SECRET: z.string().min(16, 'JWT_SECRET must be at least 16 characters'),
   JWT_EXPIRES_IN: z.string().default('7d'),
+  REDIS_URL: z.string().default(''),
+  REDIS_TLS_REJECT_UNAUTHORIZED: z.string().default('true'),
+  SESSION_SECRET: z.string().default(''),
+  SESSION_IDLE_TIMEOUT_MS: z
+    .string()
+    .default('1800000')
+    .transform((val) => parseInt(val, 10)),
+  SESSION_ABSOLUTE_TIMEOUT_MS: z
+    .string()
+    .default('604800000')
+    .transform((val) => parseInt(val, 10)),
+  USER_AUTH_CACHE_TTL_MS: z
+    .string()
+    .default('30000')
+    .transform((val) => parseInt(val, 10)),
+  ALLOW_VERCEL_PREVIEW_ORIGINS: z.string().default('false'),
   CLIENT_URL: z.string().default('http://localhost:5173'),
   ALLOWED_ORIGINS: z.string().default(''),
   STRIPE_SECRET_KEY: z.string().default('sk_test_placeholder'),

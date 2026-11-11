@@ -5,6 +5,8 @@ import morgan from 'morgan';
 import { env } from './config/env.js';
 import { corsOptions } from './config/cors.js';
 import { authenticateUser } from './middleware/auth.js';
+import { securityHeaders } from './middleware/securityHeaders.js';
+import { csrfProtection } from './middleware/csrf.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { healthRouter } from './modules/health/health.routes.js';
 import { authRouter } from './modules/auth/auth.routes.js';
@@ -17,8 +19,11 @@ import { waitlistRouter } from './modules/waitlist/waitlist.routes.js';
 import { placesRouter } from './modules/places/places.routes.js';
 
 export const app = express();
+app.set('trust proxy', 1);
+app.disable('x-powered-by');
 
 // Security and utility middleware - enable CORS and preflight handling before all routes
+app.use(securityHeaders);
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
 
@@ -37,6 +42,7 @@ app.use(
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 app.use(authenticateUser);
+app.use(csrfProtection);
 
 app.use('/api/health', healthRouter);
 app.use('/api/auth', authRouter);

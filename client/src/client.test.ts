@@ -1,7 +1,13 @@
 import fs from 'fs';
 import path from 'path';
 import { describe, it, expect, vi } from 'vitest';
-import { api, resolveApiBaseUrl, buildApiUrl } from './lib/api';
+import {
+  api,
+  resolveApiBaseUrl,
+  buildApiUrl,
+  getActiveCsrfToken,
+  setActiveCsrfToken,
+} from './lib/api';
 
 describe('Outside.vip Client Library', () => {
   it('should define public API service routes', () => {
@@ -13,11 +19,49 @@ describe('Outside.vip Client Library', () => {
     expect(api.auth).toBeDefined();
     expect(typeof api.auth.login).toBe('function');
     expect(typeof api.auth.register).toBe('function');
+    expect(typeof api.auth.logout).toBe('function');
+    expect(typeof api.auth.logoutAll).toBe('function');
+    expect(typeof api.auth.changePassword).toBe('function');
+    expect(typeof api.auth.csrf).toBe('function');
     expect(typeof api.auth.me).toBe('function');
     expect(typeof api.auth.verifyEmail).toBe('function');
     expect(typeof api.auth.resendVerification).toBe('function');
     expect(typeof api.organizer.getWorkspace).toBe('function');
     expect(typeof api.organizer.upsertWorkspace).toBe('function');
+  });
+
+  it('sends credentials: include and attaches X-CSRF-Token on state-changing requests without storing tokens in localStorage', async () => {
+    setActiveCsrfToken('csrf_test_token_256bit');
+    expect(getActiveCsrfToken()).toBe('csrf_test_token_256bit');
+
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementationOnce(() =>
+      Promise.resolve({
+        ok: true,
+        headers: { get: () => 'csrf_rotated_token_256bit' },
+        json: () =>
+          Promise.resolve({
+            success: true,
+            data: { message: 'Logged out' },
+          }),
+      } as any)
+    );
+
+    await api.auth.logout();
+
+    expect(fetchSpy).toHaveBeenCalledWith(
+      '/api/auth/logout',
+      expect.objectContaining({
+        method: 'POST',
+        credentials: 'include',
+        headers: expect.objectContaining({
+          'X-CSRF-Token': 'csrf_test_token_256bit',
+        }),
+      })
+    );
+    // Logout clears the in-memory CSRF token
+    expect(getActiveCsrfToken()).toBeNull();
+
+    fetchSpy.mockRestore();
   });
 
   it('api.events.list builds correct query string with filters and sorting', async () => {

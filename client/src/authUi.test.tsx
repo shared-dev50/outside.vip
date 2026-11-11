@@ -181,6 +181,17 @@ describe('Production Authentication UI & Removal of Demo Sign-In', () => {
     }
 
     expect(typeof AuthPage).toBe('function');
+
+    // Verify neither AuthContext.tsx nor lib/api.ts stores credentials/tokens in localStorage or sessionStorage
+    const authContextSrc = fs.readFileSync(path.resolve(__dirname, 'context/AuthContext.tsx'), 'utf8');
+    const apiSrc = fs.readFileSync(path.resolve(__dirname, 'lib/api.ts'), 'utf8');
+    expect(authContextSrc).not.toContain('localStorage');
+    expect(authContextSrc).not.toContain('sessionStorage');
+    expect(authContextSrc).not.toContain('outside_token');
+    expect(apiSrc).not.toContain('localStorage');
+    expect(apiSrc).not.toContain('sessionStorage');
+    expect(apiSrc).not.toContain('outside_token');
+    expect(apiSrc).not.toContain('Authorization');
   });
 });
 

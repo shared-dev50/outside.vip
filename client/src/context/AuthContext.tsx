@@ -1,10 +1,9 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { User } from '../types';
-import { api } from '../lib/api';
+import { api, setActiveCsrfToken } from '../lib/api';
 
 interface AuthContextType {
   user: User | null;
-  token: string | null;
   isLoading: boolean;
   login: (email: string, password: string) => Promise<void>;
   register: (data: {
@@ -17,63 +16,63 @@ interface AuthContextType {
   verifyEmail: (code: string) => Promise<User>;
   resendVerification: () => Promise<{ message: string; cooldownSeconds: number }>;
   refreshUser: () => Promise<User | null>;
-  logout: () => void;
+  logout: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
-  const [token, setToken] = useState<string | null>(localStorage.getItem('outside_token'));
   const [isLoading, setIsLoading] = useState<boolean>(true);
 
   const refreshUser = async (): Promise<User | null> => {
-    const storedToken = localStorage.getItem('outside_token');
-    if (!storedToken) {
-      setUser(null);
-      return null;
-    }
     try {
-      const { user: fetchedUser } = await api.auth.me();
+      const { user: fetchedUser, csrfToken } = await api.auth.me();
+      if (csrfToken) {
+        setActiveCsrfToken(csrfToken);
+      }
       setUser(fetchedUser);
       return fetchedUser;
-    } catch (err) {
-      console.warn('Session expired or invalid, logging out', err);
-      localStorage.removeItem('outside_token');
-      setToken(null);
+    } catch {
+      setActiveCsrfToken(null);
       setUser(null);
       return null;
     }
   };
 
   useEffect(() => {
-    async function loadUser() {
-      const storedToken = localStorage.getItem('outside_token');
-      if (!storedToken) {
-        setIsLoading(false);
-        return;
-      }
+    let isMounted = true;
 
+    async function loadUserSession() {
       try {
-        const { user: fetchedUser } = await api.auth.me();
+        const { user: fetchedUser, csrfToken } = await api.auth.me();
+        if (!isMounted) return;
+        if (csrfToken) {
+          setActiveCsrfToken(csrfToken);
+        }
         setUser(fetchedUser);
-      } catch (err) {
-        console.warn('Session expired or invalid, logging out', err);
-        localStorage.removeItem('outside_token');
-        setToken(null);
+      } catch {
+        if (!isMounted) return;
+        setActiveCsrfToken(null);
         setUser(null);
       } finally {
-        setIsLoading(false);
+        if (isMounted) {
+          setIsLoading(false);
+        }
       }
     }
 
-    loadUser();
+    loadUserSession();
+    return () => {
+      isMounted = false;
+    };
   }, []);
 
   const login = async (email: string, password: string) => {
     const data = await api.auth.login({ email, password });
-    localStorage.setItem('outside_token', data.token);
-    setToken(data.token);
+    if (data.csrfToken) {
+      setActiveCsrfToken(data.csrfToken);
+    }
     setUser(data.user);
   };
 
@@ -85,15 +84,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     organizerDisplayName?: string;
   }) => {
     const data = await api.auth.register(input);
-    localStorage.setItem('outside_token', data.token);
-    setToken(data.token);
+    if (data.csrfToken) {
+      setActiveCsrfToken(data.csrfToken);
+    }
     setUser(data.user);
   };
 
   const verifyEmail = async (code: string): Promise<User> => {
     const data = await api.auth.verifyEmail({ code });
-    localStorage.setItem('outside_token', data.token);
-    setToken(data.token);
+    if (data.csrfToken) {
+      setActiveCsrfToken(data.csrfToken);
+    }
     setUser(data.user);
     return data.user;
   };
@@ -106,17 +107,21 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     };
   };
 
-  const logout = () => {
-    localStorage.removeItem('outside_token');
-    setToken(null);
-    setUser(null);
+  const logout = async () => {
+    try {
+      await api.auth.logout();
+    } catch {
+      // Ensure client state clears even if network is offline
+    } finally {
+      setActiveCsrfToken(null);
+      setUser(null);
+    }
   };
 
   return (
     <AuthContext.Provider
       value={{
         user,
-        token,
         isLoading,
         login,
         register,

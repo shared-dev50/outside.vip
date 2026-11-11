@@ -86,27 +86,50 @@ export class ApiError extends Error {
   }
 }
 
+let activeCsrfToken: string | null = null;
+
+export function getActiveCsrfToken(): string | null {
+  return activeCsrfToken;
+}
+
+export function setActiveCsrfToken(token: string | null): void {
+  activeCsrfToken = token;
+}
+
+const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+
 async function request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
-  const token =
-    typeof window !== 'undefined' && typeof window.localStorage !== 'undefined'
-      ? window.localStorage.getItem('outside_token')
-      : null;
-  const headers: HeadersInit = {
+  const method = (options.method || 'GET').toUpperCase();
+  const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-    ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    ...options.headers,
+    ...(MUTATING_METHODS.has(method) && activeCsrfToken
+      ? { 'X-CSRF-Token': activeCsrfToken }
+      : {}),
+    ...((options.headers as Record<string, string>) || {}),
   };
 
   const response = await fetch(buildApiUrl(endpoint), {
     ...options,
+    credentials: 'include',
     headers,
   });
+
+  if (typeof response.headers?.get === 'function') {
+    const headerCsrf = response.headers.get('x-csrf-token');
+    if (headerCsrf) {
+      activeCsrfToken = headerCsrf;
+    }
+  }
 
   const json: ApiResponse<T> = await response.json().catch(() => ({
     success: false,
     data: null as any,
     error: { message: 'Unexpected network response', statusCode: response.status },
   }));
+
+  if (json?.data && typeof (json.data as any).csrfToken === 'string') {
+    activeCsrfToken = (json.data as any).csrfToken;
+  }
 
   if (!response.ok || !json.success) {
     const message =
@@ -134,7 +157,8 @@ function xhrPost<T>(
   formData: FormData,
   headers: Record<string, string> = {},
   onProgress?: (progress: UploadProgressPayload) => void,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  withCredentials = false
 ): Promise<T> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
@@ -142,6 +166,9 @@ function xhrPost<T>(
     }
 
     const xhr = new XMLHttpRequest();
+    if (withCredentials) {
+      xhr.withCredentials = true;
+    }
 
     const onAbort = () => {
       xhr.abort();
@@ -347,7 +374,7 @@ export const api = {
         method: 'POST',
         body: JSON.stringify(payload),
       }),
-    uploadCoverImage: async (
+      uploadCoverImage: async (
       file: File,
       onProgress?: (progress: UploadProgressPayload) => void,
       signal?: AbortSignal
@@ -359,11 +386,6 @@ export const api = {
       width?: number;
       height?: number;
     }> => {
-      const token =
-        typeof window !== 'undefined' && typeof window.localStorage !== 'undefined'
-          ? window.localStorage.getItem('outside_token')
-          : null;
-
       // Direct upload to Cloudinary
       try {
         const signData = await request<{
@@ -443,8 +465,8 @@ export const api = {
         serverFormData.append('image', file);
 
         const headers: Record<string, string> = {};
-        if (token) {
-          headers['Authorization'] = `Bearer ${token}`;
+        if (activeCsrfToken) {
+          headers['X-CSRF-Token'] = activeCsrfToken;
         }
 
         if (typeof XMLHttpRequest !== 'undefined') {
@@ -453,7 +475,8 @@ export const api = {
             serverFormData,
             headers,
             onProgress,
-            signal
+            signal,
+            true
           );
 
           if (!serverJson?.success) {
@@ -468,6 +491,7 @@ export const api = {
 
         const serverRes = await fetch(buildApiUrl('/organizer/upload'), {
           method: 'POST',
+          credentials: 'include',
           headers,
           body: serverFormData,
           signal,
@@ -501,19 +525,39 @@ export const api = {
     ) => api.organizer.uploadCoverImage(file, onProgress, signal),
   },
   auth: {
-    me: () => request<{ user: User }>('/auth/me'),
+    csrf: () => request<{ csrfToken: string }>('/auth/csrf'),
+    me: () => request<{ user: User; csrfToken?: string }>('/auth/me'),
     login: (credentials: { email: string; password: string }) =>
-      request<{ user: User; token: string }>('/auth/login', {
+      request<{ user: User; csrfToken?: string }>('/auth/login', {
         method: 'POST',
         body: JSON.stringify(credentials),
       }),
     register: (data: { email: string; password: string; name: string; role?: string; organizerDisplayName?: string }) =>
-      request<{ user: User; token: string; verificationRequired?: boolean }>('/auth/register', {
+      request<{ user: User; csrfToken?: string; verificationRequired?: boolean }>('/auth/register', {
         method: 'POST',
         body: JSON.stringify(data),
       }),
+    logout: async () => {
+      const res = await request<{ message: string }>('/auth/logout', {
+        method: 'POST',
+      });
+      activeCsrfToken = null;
+      return res;
+    },
+    logoutAll: async () => {
+      const res = await request<{ revokedCount: number; message: string }>('/auth/logout-all', {
+        method: 'POST',
+      });
+      activeCsrfToken = null;
+      return res;
+    },
+    changePassword: (payload: { currentPassword: string; newPassword: string }) =>
+      request<{ message: string; csrfToken?: string }>('/auth/change-password', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }),
     verifyEmail: (payload: { code: string; email?: string }) =>
-      request<{ user: User; token: string }>('/auth/verify-email', {
+      request<{ user: User; csrfToken?: string }>('/auth/verify-email', {
         method: 'POST',
         body: JSON.stringify(payload),
       }),
@@ -551,21 +595,14 @@ export const api = {
       if (ticketId) params.set('ticketId', ticketId);
       const qs = params.toString() ? `?${params.toString()}` : '';
 
-      const authToken =
-        typeof window !== 'undefined' && typeof window.localStorage !== 'undefined'
-          ? window.localStorage.getItem('outside_token')
-          : null;
-
       const headers: HeadersInit = {};
-      if (authToken) {
-        headers['Authorization'] = `Bearer ${authToken}`;
-      }
       if (token) {
         headers['x-order-token'] = token;
       }
 
       const res = await fetch(buildApiUrl(`/orders/${orderNumber}/tickets/pdf${qs}`), {
         method: 'GET',
+        credentials: 'include',
         headers,
       });
 
