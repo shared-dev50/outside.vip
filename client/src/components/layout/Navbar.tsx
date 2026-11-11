@@ -20,6 +20,8 @@ export const Navbar: React.FC = () => {
   const isHome = location.pathname === '/';
   const isDiscover = location.pathname.startsWith('/events');
   const isOrganizer = location.pathname.startsWith('/organizer');
+  const isTeams = location.pathname.startsWith('/teams');
+
 
 
   useEffect(() => {
@@ -46,7 +48,7 @@ export const Navbar: React.FC = () => {
         <div className="flex items-center gap-8">
           <Link to="/" className="flex items-center gap-1.5 group focus:outline-none focus-visible:ring-2 focus-visible:ring-stone-900 rounded">
             <span className="font-display font-black text-lg tracking-tight text-stone-900 group-hover:opacity-85 transition-opacity">
-              Outside<span className="text-stone-400 font-normal">.Vip</span>
+              Out-side<span className="text-stone-400 font-normal">.Vip</span>
             </span>
           </Link>
 
@@ -68,6 +70,15 @@ export const Navbar: React.FC = () => {
                 }`}
             >
               Discover
+            </Link>
+            <Link
+              to="/teams"
+              className={`transition-colors py-1 ${isTeams
+                ? 'text-stone-900 font-bold border-b-2 border-stone-900'
+                : 'text-stone-500 hover:text-stone-900 font-medium'
+                }`}
+            >
+              Teams
             </Link>
           </nav>
         </div>

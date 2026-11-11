@@ -5,6 +5,7 @@ import { Footer } from './components/layout/Footer';
 import { HomePage } from './pages/HomePage';
 import { DiscoverPage } from './pages/DiscoverPage';
 import { EventDetailPage } from './pages/EventDetailPage';
+import { TeamsPage } from './pages/TeamsPage';
 import { OrganizerDashboardPage } from './pages/OrganizerDashboardPage';
 import { CreateEventPage } from './pages/CreateEventPage';
 import { EventPreviewPage } from './pages/EventPreviewPage';
@@ -18,7 +19,8 @@ export const App: React.FC = () => {
   const isEditorial =
     isHome ||
     location.pathname.startsWith('/events') ||
-    location.pathname.startsWith('/organizer');
+    location.pathname.startsWith('/organizer') ||
+    location.pathname.startsWith('/teams');
 
   return (
     <div
@@ -32,6 +34,7 @@ export const App: React.FC = () => {
           <Route path="/" element={<HomePage />} />
           <Route path="/events" element={<DiscoverPage />} />
           <Route path="/events/:slug" element={<EventDetailPage />} />
+          <Route path="/teams" element={<TeamsPage />} />
           <Route path="/organizer" element={<OrganizerDashboardPage />} />
           <Route path="/organizer/events/new" element={<CreateEventPage />} />
           <Route path="/organizer/events/:id/edit" element={<CreateEventPage />} />
