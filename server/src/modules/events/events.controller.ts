@@ -303,7 +303,6 @@ export async function getEventBySlug(req: Request, res: Response, next: NextFunc
       throw new NotFoundError(`Event with slug '${slug}' was not found`);
     }
 
-    // Determine access permissions
     const accessToken =
       (req.headers['x-event-access-token'] as string) ||
       (req.headers.authorization?.startsWith('Bearer ')

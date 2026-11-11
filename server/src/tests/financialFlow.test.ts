@@ -40,6 +40,10 @@ describe('Posh-Inspired Organizer Finance & Transfer Workflow', () => {
     expect(organizerReg.status).toBe(201);
     organizerToken = organizerReg.body.data.token;
     organizerUserId = organizerReg.body.data.user.id;
+    await prisma.user.update({
+      where: { id: organizerUserId },
+      data: { emailVerified: true, emailVerifiedAt: new Date() },
+    });
 
     // Authenticate seeded admin user
     const adminLogin = await request(app).post('/api/auth/login').send({
@@ -61,6 +65,10 @@ describe('Posh-Inspired Organizer Finance & Transfer Workflow', () => {
     expect(secondReg.status).toBe(201);
     secondOrganizerToken = secondReg.body.data.token;
     secondOrganizerUserId = secondReg.body.data.user.id;
+    await prisma.user.update({
+      where: { id: secondOrganizerUserId },
+      data: { emailVerified: true, emailVerifiedAt: new Date() },
+    });
 
     // Create a test event with a paid ticket tier for the main organizer
     const event = await prisma.event.create({

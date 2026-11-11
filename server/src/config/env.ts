@@ -11,6 +11,22 @@ const envSchema = z.object({
   DATABASE_URL: z.string().min(1, 'DATABASE_URL is required'),
   JWT_SECRET: z.string().min(16, 'JWT_SECRET must be at least 16 characters'),
   JWT_EXPIRES_IN: z.string().default('7d'),
+  REDIS_URL: z.string().default(''),
+  REDIS_TLS_REJECT_UNAUTHORIZED: z.string().default('true'),
+  SESSION_SECRET: z.string().default(''),
+  SESSION_IDLE_TIMEOUT_MS: z
+    .string()
+    .default('1800000')
+    .transform((val) => parseInt(val, 10)),
+  SESSION_ABSOLUTE_TIMEOUT_MS: z
+    .string()
+    .default('604800000')
+    .transform((val) => parseInt(val, 10)),
+  USER_AUTH_CACHE_TTL_MS: z
+    .string()
+    .default('30000')
+    .transform((val) => parseInt(val, 10)),
+  ALLOW_VERCEL_PREVIEW_ORIGINS: z.string().default('false'),
   CLIENT_URL: z.string().default('http://localhost:5173'),
   ALLOWED_ORIGINS: z.string().default(''),
   STRIPE_SECRET_KEY: z.string().default('sk_test_placeholder'),
@@ -21,6 +37,8 @@ const envSchema = z.object({
     .default('5')
     .transform((val) => parseFloat(val)),
   EMAIL_FROM: z.string().default('tickets@outside.vip'),
+  RESEND_API_KEY: z.string().default(''),
+  ADMIN_EMAILS: z.string().default(''),
   CLOUDINARY_CLOUD_NAME: z.string().default(''),
   CLOUDINARY_API_KEY: z.string().default(''),
   CLOUDINARY_API_SECRET: z.string().default(''),
@@ -37,3 +55,24 @@ if (!parsed.success) {
 }
 
 export const env = parsed.data;
+
+export function normalizeEmail(email: string): string {
+  return email.trim().toLowerCase();
+}
+
+export function getAdminEmailsAllowlist(): Set<string> {
+  const raw = process.env.ADMIN_EMAILS !== undefined ? process.env.ADMIN_EMAILS : env.ADMIN_EMAILS;
+  if (!raw) return new Set();
+  return new Set(
+    raw
+      .split(',')
+      .map((entry) => normalizeEmail(entry))
+      .filter((entry) => entry.length > 0)
+  );
+}
+
+export function isEmailInAdminAllowlist(email: string): boolean {
+  const normalized = normalizeEmail(email);
+  if (!normalized) return false;
+  return getAdminEmailsAllowlist().has(normalized);
+}

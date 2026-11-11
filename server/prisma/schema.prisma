@@ -17,6 +17,12 @@ enum Role {
   ADMIN
 }
 
+enum AccountStatus {
+  ACTIVE
+  SUSPENDED
+  DISABLED
+}
+
 enum EventCategory {
   MUSIC
   NIGHTLIFE
@@ -169,6 +175,9 @@ model User {
   passwordHash String
   name         String
   role         Role              @default(ATTENDEE)
+  status       AccountStatus     @default(ACTIVE)
+  emailVerified Boolean          @default(false)
+  emailVerifiedAt DateTime?
   avatarUrl    String?
   stripeAccountId String?        @unique
   stripeAccountCountry String?
@@ -187,8 +196,41 @@ model User {
   transfers    OrganizerTransfer[] @relation("OrganizerTransfers")
   initiatedTransfers OrganizerTransfer[] @relation("InitiatedTransfers")
   connectedPayouts ConnectedPayout[] @relation("OrganizerPayouts")
+  verificationCodes EmailVerificationCode[]
+  adminAuditLogs AdminAuditLog[] @relation("AdminActorLogs")
 
   @@index([email])
+}
+
+model EmailVerificationCode {
+  id         String    @id @default(uuid())
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  email      String
+  codeHash   String
+  expiresAt  DateTime
+  usedAt     DateTime?
+  attempts   Int       @default(0)
+  createdAt  DateTime  @default(now())
+
+  @@index([userId, createdAt])
+  @@index([email, createdAt])
+}
+
+model AdminAuditLog {
+  id          String   @id @default(uuid())
+  actorUserId String?
+  actorUser   User?    @relation("AdminActorLogs", fields: [actorUserId], references: [id], onDelete: SetNull)
+  actorEmail  String
+  action      String
+  targetType  String?
+  targetId    String?
+  metadata    Json?
+  ipAddress   String?
+  createdAt   DateTime @default(now())
+
+  @@index([actorUserId, createdAt])
+  @@index([action, createdAt])
 }
 
 model OrganizerProfile {

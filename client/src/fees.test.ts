@@ -133,7 +133,6 @@ describe('Client Fees & Organizer Earnings Breakdown', () => {
       // Total organizer earnings = 2500 * 250 + 7500 * 100 + 0 * 50 = 625,000 + 750,000 = 1,375,000 cents ($13,750.00)
       expect(combined.totalProjectedEarningsInCents).toBe(1375000);
 
-      // Check sum of tier projected totals
       const sumTierEarnings = combined.tiers.reduce((acc, t) => acc + t.projectedEarningsInCents, 0);
       const sumTierBuyerSpend = combined.tiers.reduce((acc, t) => acc + t.projectedBuyerTotalInCents, 0);
       const sumTierPlatformRev = combined.tiers.reduce((acc, t) => acc + t.projectedPlatformRevenueInCents, 0);
@@ -253,7 +252,7 @@ describe('Client Fees & Organizer Earnings Breakdown', () => {
     });
 
     it('dynamically updates as quantity changes from 1 to 5', () => {
-      const ticketPrice = 3500; // $35.00
+      const ticketPrice = 3500;
       let previousTotal = 0;
 
       for (let qty = 1; qty <= 5; qty++) {
@@ -265,7 +264,6 @@ describe('Client Fees & Organizer Earnings Breakdown', () => {
         expect(b.platformFeeInCents).toBe(Math.round(subtotal * 0.10));
         expect(b.serviceFeeInCents).toBe(qty * 95);
 
-        // Buyer total must increase monotonically
         expect(b.buyerTotalInCents).toBeGreaterThan(previousTotal);
         previousTotal = b.buyerTotalInCents;
 
@@ -287,7 +285,6 @@ describe('Client Fees & Organizer Earnings Breakdown', () => {
           const subtotal = price * qty;
           const b = calculateCheckoutFeeBreakdown(subtotal, qty);
 
-          // All values must be integer cents
           expect(Number.isInteger(b.ticketSubtotalInCents)).toBe(true);
           expect(Number.isInteger(b.platformFeeInCents)).toBe(true);
           expect(Number.isInteger(b.serviceFeeInCents)).toBe(true);
@@ -306,7 +303,7 @@ describe('Client Fees & Organizer Earnings Breakdown', () => {
     });
 
     it('prevents duplicate fee application and ensures Stripe fees cover the gross transaction', () => {
-      const subtotal = 5000; // $50.00
+      const subtotal = 5000;
       const qty = 1;
       const b = calculateCheckoutFeeBreakdown(subtotal, qty);
 
@@ -331,7 +328,6 @@ describe('Client Fees & Organizer Earnings Breakdown', () => {
     });
 
     it('provides customerServiceFeeInCents reconciling the customer-facing 3-line breakdown', () => {
-      // 1 x $20.00 ticket
       const b1 = calculateCheckoutFeeBreakdown(2000, 1);
       expect(b1.ticketSubtotalInCents).toBe(2000);
       expect(b1.customerServiceFeeInCents).toBe(394); // $2.00 (platform) + $0.95 (service) + $0.99 (stripe)

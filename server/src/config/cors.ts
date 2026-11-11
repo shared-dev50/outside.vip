@@ -6,10 +6,7 @@ export function normalizeOrigin(origin: string): string {
   if (!origin) return '';
   let cleaned = origin.trim();
 
-  // Strip surrounding quotes if present (e.g., from .env quotes)
   cleaned = cleaned.replace(/^["']+|["']+$/g, '').trim();
-
-  // Strip trailing slashes
   cleaned = cleaned.replace(/\/+$/, '');
 
   if (!cleaned) return '';
@@ -81,8 +78,14 @@ export function isOriginAllowed(
     return true;
   }
 
-  if (VERCEL_PREVIEW_PATTERN.test(normalized)) {
-    return true;
+  const activeNodeEnv = process.env.NODE_ENV || env.NODE_ENV;
+  const allowPreviewInProd =
+    (process.env.ALLOW_VERCEL_PREVIEW_ORIGINS || env.ALLOW_VERCEL_PREVIEW_ORIGINS) === 'true';
+
+  if (activeNodeEnv !== 'production' || allowPreviewInProd) {
+    if (VERCEL_PREVIEW_PATTERN.test(normalized)) {
+      return true;
+    }
   }
 
   return false;
@@ -119,8 +122,10 @@ export const corsOptions: CorsOptions = {
     'Accept',
     'Origin',
     'x-order-token',
+    'x-event-access-token',
+    'X-CSRF-Token',
   ],
-  exposedHeaders: ['Content-Disposition'],
+  exposedHeaders: ['Content-Disposition', 'X-CSRF-Token'],
   optionsSuccessStatus: 204,
-  maxAge: 86400, // 24 hours preflight cache
+  maxAge: 86400,
 };

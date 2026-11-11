@@ -48,7 +48,11 @@ describe('Stripe Connect Financial Correctness & Money Movement Audit Suite', ()
     organizerStripeAccountId = `acct_audit_${nanoid(12)}`;
     await prisma.user.update({
       where: { id: organizerUserId },
-      data: { stripeAccountId: organizerStripeAccountId },
+      data: {
+        stripeAccountId: organizerStripeAccountId,
+        emailVerified: true,
+        emailVerifiedAt: new Date(),
+      },
     });
 
     // Initialize clean organizer balance record
@@ -941,7 +945,11 @@ describe('Stripe Connect Financial Correctness & Money Movement Audit Suite', ()
 
     await prisma.user.update({
       where: { id: cleanUserId },
-      data: { stripeAccountId: cleanStripeAccountId },
+      data: {
+        stripeAccountId: cleanStripeAccountId,
+        emailVerified: true,
+        emailVerifiedAt: new Date(),
+      },
     });
 
     // Initialize balance

@@ -1,7 +1,8 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import request from 'supertest';
 import { app } from '../app.js';
 import { prisma } from '../db/prisma.js';
+import * as financeService from '../modules/finance/finance.service.js';
 import {
   joinWaitlist,
   processWaitlistForTier,
@@ -39,6 +40,7 @@ describe('Automatic Ticket Waitlist System', () => {
   let occurrenceBTierId: string;
 
   beforeAll(async () => {
+    vi.spyOn(financeService, 'assertStripeReadyForPaidPublishing').mockResolvedValue({} as any);
     resetSentWaitlistEmails();
 
         const orgLogin = await request(app).post('/api/auth/login').send({

@@ -10,7 +10,7 @@ import {
 } from 'lucide-react';
 
 export const Navbar: React.FC = () => {
-  const { user, logout, quickLoginAs } = useAuth();
+  const { user, logout } = useAuth();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [showAccountMenu, setShowAccountMenu] = useState(false);
   const [isScrolled, setIsScrolled] = useState(false);
@@ -20,6 +20,11 @@ export const Navbar: React.FC = () => {
   const isHome = location.pathname === '/';
   const isDiscover = location.pathname.startsWith('/events');
   const isOrganizer = location.pathname.startsWith('/organizer');
+  const isAuthPage =
+    location.pathname.startsWith('/login') ||
+    location.pathname.startsWith('/signin') ||
+    location.pathname.startsWith('/register') ||
+    location.pathname.startsWith('/forgot-password');
 
 
   useEffect(() => {
@@ -36,7 +41,7 @@ export const Navbar: React.FC = () => {
     ? isScrolled
       ? 'bg-[#FAF8F5]/90 backdrop-blur-md border-b border-stone-200/80 shadow-xs'
       : 'bg-transparent border-b border-transparent'
-    : isDiscover || isOrganizer
+    : isDiscover || isOrganizer || isAuthPage
       ? 'bg-[#FAF8F5]/95 backdrop-blur-md border-b border-stone-200/80 shadow-2xs'
       : 'bg-white/95 backdrop-blur-md border-b border-gray-200';
 
@@ -147,66 +152,14 @@ export const Navbar: React.FC = () => {
               )}
             </div>
           ) : (
-            <div className="relative">
-              <button
-                type="button"
-                onClick={() => setShowAccountMenu(!showAccountMenu)}
+            <div className="flex items-center gap-1.5">
+              <Link
+                to="/login"
                 className="inline-flex items-center gap-1.5 text-xs font-semibold text-stone-700 hover:text-black px-3 py-1.5 rounded-lg hover:bg-stone-200/50 transition-colors"
-                aria-expanded={showAccountMenu}
-                aria-haspopup="true"
               >
                 <UserIcon className="w-3.5 h-3.5 text-stone-500" />
                 <span>Sign in</span>
-              </button>
-
-              {showAccountMenu && (
-                <div className="absolute right-0 mt-2 w-52 rounded-lg bg-white border border-stone-200 p-1.5 shadow-lg z-50 text-xs space-y-1 animate-in fade-in zoom-in-95">
-                  <div className="px-2.5 py-1 text-[11px] font-medium text-stone-400 border-b border-stone-100 uppercase tracking-wider">
-                    Demo Sign In
-                  </div>
-                  <button
-                    onClick={async () => {
-                      await quickLoginAs('organizer');
-                      setShowAccountMenu(false);
-                      navigate('/organizer');
-                    }}
-                    className="w-full text-left px-2.5 py-1.5 rounded hover:bg-stone-50 text-stone-700 block"
-                  >
-                    <div className="font-semibold text-stone-900">Organizer Profile</div>
-                    <div className="text-[10px] text-stone-500">Sol Collective & Sound</div>
-                  </button>
-                  <button
-                    onClick={async () => {
-                      await quickLoginAs('attendee');
-                      setShowAccountMenu(false);
-                    }}
-                    className="w-full text-left px-2.5 py-1.5 rounded hover:bg-stone-50 text-stone-700 block"
-                  >
-                    <div className="font-semibold text-stone-900">Attendee Profile</div>
-                    <div className="text-[10px] text-stone-500">Alex Mwangi</div>
-                  </button>
-                  <button
-                    onClick={async () => {
-                      await quickLoginAs('admin');
-                      setShowAccountMenu(false);
-                      navigate('/organizer');
-                    }}
-                    className="w-full text-left px-2.5 py-1.5 rounded hover:bg-stone-50 text-stone-700 block"
-                  >
-                    <div className="font-semibold text-stone-900">Admin Profile</div>
-                    <div className="text-[10px] text-stone-500">Outside Admin</div>
-                  </button>
-                  <div className="pt-1 border-t border-stone-100">
-                    <Link
-                      to="/scanner"
-                      onClick={() => setShowAccountMenu(false)}
-                      className="w-full text-left px-2.5 py-1 text-stone-500 hover:text-stone-900 text-[11px] block"
-                    >
-                      Door Scanner
-                    </Link>
-                  </div>
-                </div>
-              )}
+              </Link>
             </div>
           )}
         </div>
@@ -285,28 +238,22 @@ export const Navbar: React.FC = () => {
                 Sign out ({user.name})
               </button>
             ) : (
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={async () => {
-                    await quickLoginAs('organizer');
-                    setMobileMenuOpen(false);
-                    navigate('/organizer');
-                  }}
-                  className="text-xs text-stone-700 font-semibold hover:underline"
+              <div className="flex items-center gap-3">
+                <Link
+                  to="/login"
+                  onClick={() => setMobileMenuOpen(false)}
+                  className="text-xs text-stone-800 font-semibold hover:underline"
                 >
-                  Organizer
-                </button>
+                  Sign in
+                </Link>
                 <span className="text-stone-300">•</span>
-                <button
-                  onClick={async () => {
-                    await quickLoginAs('admin');
-                    setMobileMenuOpen(false);
-                    navigate('/organizer');
-                  }}
-                  className="text-xs text-stone-700 font-semibold hover:underline"
+                <Link
+                  to="/register"
+                  onClick={() => setMobileMenuOpen(false)}
+                  className="text-xs text-stone-600 font-medium hover:underline"
                 >
-                  Admin
-                </button>
+                  Create account
+                </Link>
               </div>
             )}
           </div>

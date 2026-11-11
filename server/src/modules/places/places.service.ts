@@ -263,8 +263,8 @@ export async function getPlaceDetails(params: {
 
 /**
  * Validates and normalizes location data on the backend.
- * Requirement 4: "Validate selected Place IDs and location details on the backend. Do not blindly trust client-submitted coordinates."
- * Requirement 3: "In manual mode, save the venue name, address and city, with placeId, latitude and longitude set to null. Never retain stale coordinates from a previous Google selection."
+ * Verifies Google Place IDs server-side rather than trusting client-submitted coordinates,
+ * and clears placeId/coordinates when saving manual venue entries.
  */
 export async function verifyAndNormalizeLocation(data: {
   venueName?: string | null;
@@ -335,8 +335,7 @@ export async function verifyAndNormalizeLocation(data: {
     }
   }
 
-  // Manual mode or no placeId selected:
-  // "In manual mode, save the venue name, address and city, with placeId, latitude and longitude set to null. Never retain stale coordinates from a previous Google selection."
+  // Manual mode or no placeId selected: clear placeId and coordinates so stale values are not retained
   return {
     venueName: (data.venueName || '').trim(),
     venueAddress: (data.venueAddress || '').trim(),

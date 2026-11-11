@@ -358,7 +358,6 @@ export async function generateTicketsPdf(
         const col2X = leftMargin + 295;
         const col2Width = contentWidth - 295;
 
-        // Left: Event Title and Organizer
         doc.font('Helvetica-Bold').fontSize(14).fillColor('#111827')
            .text(order.event.title, leftMargin, headerTopY, { width: col1Width });
 
@@ -371,7 +370,6 @@ export async function generateTicketsPdf(
         doc.font('Helvetica-Bold').fontSize(8.5).fillColor('#4B5563')
            .text(`By ${organizerName.toUpperCase()}`, leftMargin, headerTopY + titleHeight + 4, { width: col1Width });
 
-        // Right: Ticket Validity and Address
         let rightHeaderY = headerTopY;
         doc.font('Helvetica-Bold').fontSize(7.5).fillColor('#6B7280')
            .text('TICKET VALIDITY', col2X, rightHeaderY);

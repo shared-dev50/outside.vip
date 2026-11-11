@@ -1,52 +1,78 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { User } from '../types';
-import { api } from '../lib/api';
+import { api, setActiveCsrfToken } from '../lib/api';
 
 interface AuthContextType {
   user: User | null;
-  token: string | null;
   isLoading: boolean;
   login: (email: string, password: string) => Promise<void>;
-  register: (data: { email: string; password: string; name: string; role?: string; organizerDisplayName?: string }) => Promise<void>;
-  logout: () => void;
-  quickLoginAs: (role: 'organizer' | 'attendee' | 'admin') => Promise<void>;
+  register: (data: {
+    email: string;
+    password: string;
+    name: string;
+    role?: string;
+    organizerDisplayName?: string;
+  }) => Promise<void>;
+  verifyEmail: (code: string) => Promise<User>;
+  resendVerification: () => Promise<{ message: string; cooldownSeconds: number }>;
+  refreshUser: () => Promise<User | null>;
+  logout: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
-  const [token, setToken] = useState<string | null>(localStorage.getItem('outside_token'));
   const [isLoading, setIsLoading] = useState<boolean>(true);
 
-  useEffect(() => {
-    async function loadUser() {
-      const storedToken = localStorage.getItem('outside_token');
-      if (!storedToken) {
-        setIsLoading(false);
-        return;
+  const refreshUser = async (): Promise<User | null> => {
+    try {
+      const { user: fetchedUser, csrfToken } = await api.auth.me();
+      if (csrfToken) {
+        setActiveCsrfToken(csrfToken);
       }
+      setUser(fetchedUser);
+      return fetchedUser;
+    } catch {
+      setActiveCsrfToken(null);
+      setUser(null);
+      return null;
+    }
+  };
 
+  useEffect(() => {
+    let isMounted = true;
+
+    async function loadUserSession() {
       try {
-        const { user: fetchedUser } = await api.auth.me();
+        const { user: fetchedUser, csrfToken } = await api.auth.me();
+        if (!isMounted) return;
+        if (csrfToken) {
+          setActiveCsrfToken(csrfToken);
+        }
         setUser(fetchedUser);
-      } catch (err) {
-        console.warn('Session expired or invalid, logging out', err);
-        localStorage.removeItem('outside_token');
-        setToken(null);
+      } catch {
+        if (!isMounted) return;
+        setActiveCsrfToken(null);
         setUser(null);
       } finally {
-        setIsLoading(false);
+        if (isMounted) {
+          setIsLoading(false);
+        }
       }
     }
 
-    loadUser();
+    loadUserSession();
+    return () => {
+      isMounted = false;
+    };
   }, []);
 
   const login = async (email: string, password: string) => {
     const data = await api.auth.login({ email, password });
-    localStorage.setItem('outside_token', data.token);
-    setToken(data.token);
+    if (data.csrfToken) {
+      setActiveCsrfToken(data.csrfToken);
+    }
     setUser(data.user);
   };
 
@@ -58,24 +84,37 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     organizerDisplayName?: string;
   }) => {
     const data = await api.auth.register(input);
-    localStorage.setItem('outside_token', data.token);
-    setToken(data.token);
+    if (data.csrfToken) {
+      setActiveCsrfToken(data.csrfToken);
+    }
     setUser(data.user);
   };
 
-  const logout = () => {
-    localStorage.removeItem('outside_token');
-    setToken(null);
-    setUser(null);
+  const verifyEmail = async (code: string): Promise<User> => {
+    const data = await api.auth.verifyEmail({ code });
+    if (data.csrfToken) {
+      setActiveCsrfToken(data.csrfToken);
+    }
+    setUser(data.user);
+    return data.user;
   };
 
-  const quickLoginAs = async (role: 'organizer' | 'attendee' | 'admin') => {
-    if (role === 'organizer') {
-      await login('sol@outside.vip', 'Outside2026!');
-    } else if (role === 'admin') {
-      await login('admin@outside.vip', 'Outside2026!');
-    } else {
-      await login('alex@outside.vip', 'Outside2026!');
+  const resendVerification = async () => {
+    const data = await api.auth.resendVerification();
+    return {
+      message: data.message,
+      cooldownSeconds: data.cooldownSeconds,
+    };
+  };
+
+  const logout = async () => {
+    try {
+      await api.auth.logout();
+    } catch {
+      // Ensure client state clears even if network is offline
+    } finally {
+      setActiveCsrfToken(null);
+      setUser(null);
     }
   };
 
@@ -83,12 +122,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     <AuthContext.Provider
       value={{
         user,
-        token,
         isLoading,
         login,
         register,
+        verifyEmail,
+        resendVerification,
+        refreshUser,
         logout,
-        quickLoginAs,
       }}
     >
       {children}

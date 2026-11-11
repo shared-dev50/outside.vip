@@ -58,7 +58,7 @@ function getDatePartsInTimezone(date: Date, timezone: string): {
 
   return {
     year: parseInt(partMap.year, 10),
-    month: parseInt(partMap.month, 10), // 1-12
+    month: parseInt(partMap.month, 10),
     day: parseInt(partMap.day, 10),
     hour: parseInt(partMap.hour === '24' ? '0' : partMap.hour, 10),
     minute: parseInt(partMap.minute, 10),
@@ -72,7 +72,7 @@ function getDatePartsInTimezone(date: Date, timezone: string): {
  */
 function createDateInTimezone(
   year: number,
-  month: number, // 1-12
+  month: number,
   day: number,
   hour: number,
   minute: number,

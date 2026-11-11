@@ -41,6 +41,10 @@ describe('Outside.vip Stripe Connect Finance & Account Dashboard API', () => {
     expect(regRes.status).toBe(201);
     secondOrganizerToken = regRes.body.data.token;
     secondOrganizerUserId = regRes.body.data.user.id;
+    await prisma.user.update({
+      where: { id: secondOrganizerUserId },
+      data: { emailVerified: true, emailVerifiedAt: new Date() },
+    });
   });
 
   beforeEach(async () => {
@@ -698,7 +702,7 @@ describe('Outside.vip Stripe Connect Finance & Account Dashboard API', () => {
       expect(res.body.data.sellTickets.status).toBe('disabled');
       expect(res.body.data.sellTickets.message).toContain('reconnect');
 
-      // Requirement 8: Do not silently create new connected accounts when an existing account ID is invalid
+      // Do not silently create new connected accounts when an existing account ID is invalid
       expect(createSpy).not.toHaveBeenCalled();
 
       // Database record remains unchanged until explicit user reconnection action

@@ -11,7 +11,6 @@ import { joinWaitlistSchema } from './waitlist.schema.js';
 import { NotFoundError, ForbiddenError, UnauthorizedError } from '../../utils/errors.js';
 import { verifyEventAccessToken } from '../events/passwordAccess.service.js';
 
-// POST /api/events/:slug/waitlist
 export async function handleJoinWaitlist(
   req: Request,
   res: Response,
@@ -35,7 +34,6 @@ export async function handleJoinWaitlist(
       throw new NotFoundError(`Event with slug '${slug}' was not found`);
     }
 
-    // Verify event password access if protected
     if (event.isPasswordProtected) {
       const accessToken =
         (req.headers['x-event-access-token'] as string) ||
@@ -72,7 +70,6 @@ export async function handleJoinWaitlist(
   }
 }
 
-// GET /api/waitlist/offers/:token
 export async function handleLookupWaitlistOffer(
   req: Request,
   res: Response,
@@ -91,7 +88,6 @@ export async function handleLookupWaitlistOffer(
   }
 }
 
-// POST /api/waitlist/offers/:token/decline
 export async function handleDeclineWaitlistOffer(
   req: Request,
   res: Response,
@@ -111,7 +107,6 @@ export async function handleDeclineWaitlistOffer(
   }
 }
 
-// POST /api/waitlist/maintenance (cron endpoint)
 export async function handleWaitlistMaintenance(
   req: Request,
   res: Response,
@@ -139,7 +134,6 @@ export async function handleWaitlistMaintenance(
   }
 }
 
-// GET /api/organizer/events/:id/waitlist
 export async function handleGetOrganizerWaitlist(
   req: Request,
   res: Response,

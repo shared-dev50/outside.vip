@@ -105,7 +105,7 @@ async function fetchAndAuthorizeOrder(req: Request, orderNumber: string) {
   const isAdmin = req.user?.role === 'ADMIN';
 
   const isOrganizer =
-    req.user?.role === 'ORGANIZER' && order.event?.organizerId === req.user?.userId;
+    Boolean(req.user?.userId) && order.event?.organizerId === req.user?.userId;
 
   if (!hasValidAccessToken && !isOwner && !isAdmin && !isOrganizer) {
     if (!providedToken && !req.user) {
@@ -190,7 +190,6 @@ export async function downloadOrderTicketsPdf(
 
     const order = await fetchAndAuthorizeOrder(req, orderNumber);
 
-    // Verify order is paid / completed before releasing tickets
     if (order.status !== 'COMPLETED') {
       throw new BadRequestError(
         `Tickets are only downloadable for confirmed and paid orders. Current order status: ${order.status}`
