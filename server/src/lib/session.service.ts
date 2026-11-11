@@ -46,7 +46,7 @@ export function getSessionIdleTimeoutMs(): number {
     const parsed = parseInt(raw, 10);
     if (!Number.isNaN(parsed) && parsed > 0) return parsed;
   }
-  return env.SESSION_IDLE_TIMEOUT_MS || 1_800_000; // 30 minutes
+  return env.SESSION_IDLE_TIMEOUT_MS || 1_800_000;
 }
 
 export function getSessionAbsoluteTimeoutMs(): number {
@@ -55,7 +55,7 @@ export function getSessionAbsoluteTimeoutMs(): number {
     const parsed = parseInt(raw, 10);
     if (!Number.isNaN(parsed) && parsed > 0) return parsed;
   }
-  return env.SESSION_ABSOLUTE_TIMEOUT_MS || 604_800_000; // 7 days
+  return env.SESSION_ABSOLUTE_TIMEOUT_MS || 604_800_000;
 }
 
 export function getUserAuthCacheTtlMs(): number {
@@ -64,7 +64,7 @@ export function getUserAuthCacheTtlMs(): number {
     const parsed = parseInt(raw, 10);
     if (!Number.isNaN(parsed) && parsed > 0) return parsed;
   }
-  return env.USER_AUTH_CACHE_TTL_MS || 30_000; // 30 seconds
+  return env.USER_AUTH_CACHE_TTL_MS || 30_000;
 }
 
 export function computeSessionVerifierHash(sessionSecret: string): string {
@@ -373,10 +373,6 @@ export async function listUserSessions(userId: string): Promise<
   }
 }
 
-// ============================================================================
-// Short-Lived 30-Second Redis User Authorization Cache
-// ============================================================================
-
 export async function getCachedUserAuth(userId: string): Promise<CachedUserAuthRecord | null> {
   try {
     const redis = getRedisClient();
@@ -502,10 +498,6 @@ export async function resolveUserAuthWithCache(
   return { user: freshUser, fromCache: false };
 }
 
-// ============================================================================
-// Cookie Formatting & Extraction (`__Host-outside_sid`)
-// ============================================================================
-
 /**
  * Sets the host-only `__Host-outside_sid` cookie:
  * HttpOnly, Secure, SameSite=Lax, Path=/, NO Domain attribute.
@@ -588,10 +580,6 @@ export async function resolveRotatedSessionUserId(req: Request): Promise<string 
     return null;
   }
 }
-
-// ============================================================================
-// Redis-Backed Rate Limiter for Auth Endpoints
-// ============================================================================
 
 export async function checkRedisRateLimit(
   key: string,

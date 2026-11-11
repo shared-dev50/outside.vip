@@ -79,9 +79,6 @@ describe('Stripe Connect End-to-End Automated Integration Test Suite', () => {
     });
   });
 
-  // ==========================================
-  // 1. Account Creation & Country Selection
-  // ==========================================
   describe('1. Account Creation & Country Selection', () => {
     it('GET /api/organizer/finance/countries returns only US platform allowlisted countries', async () => {
       const res = await request(app)
@@ -170,9 +167,6 @@ describe('Stripe Connect End-to-End Automated Integration Test Suite', () => {
     });
   });
 
-  // ==========================================
-  // 2. Live Stripe Test Mode API Operations
-  // ==========================================
   describe('2. Live Stripe Test Mode API Operations', () => {
     it('verifies live Stripe test mode API can retrieve connected accounts and generate onboarding URLs', async () => {
       const liveAccounts = await stripe.accounts.list({ limit: 1 });
@@ -197,9 +191,6 @@ describe('Stripe Connect End-to-End Automated Integration Test Suite', () => {
     });
   });
 
-  // ==========================================
-  // 3. Webhook Signature Verification
-  // ==========================================
   describe('3. Webhook Signature Verification', () => {
     it('rejects webhook requests missing stripe-signature header with 400', async () => {
       const res = await request(app)
@@ -293,9 +284,6 @@ describe('Stripe Connect End-to-End Automated Integration Test Suite', () => {
     });
   });
 
-  // ==========================================
-  // 4. account.updated Processing
-  // ==========================================
   describe('4. account.updated Webhook Processing', () => {
     it('syncs connected account capabilities and external bank details into OrganizerPayoutDetails', async () => {
       await prisma.organizerPayoutDetails.upsert({
@@ -380,9 +368,6 @@ describe('Stripe Connect End-to-End Automated Integration Test Suite', () => {
     });
   });
 
-  // ==========================================
-  // 5. Payment Processing & Ledger Allocation
-  // ==========================================
   describe('5. Payment Processing & Ledger Allocation', () => {
     let orderId: string;
     let paymentIntentId: string;
@@ -511,9 +496,6 @@ describe('Stripe Connect End-to-End Automated Integration Test Suite', () => {
     });
   });
 
-  // ==========================================
-  // 6. Transfer Creation & Withdrawal Failures
-  // ==========================================
   describe('6. Transfer Creation & Withdrawal Failure Handling', () => {
     it('rejects withdrawal if amount is below $1.00 USD (100 cents)', async () => {
       const res = await request(app)

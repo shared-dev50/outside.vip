@@ -6,10 +6,7 @@ export function normalizeOrigin(origin: string): string {
   if (!origin) return '';
   let cleaned = origin.trim();
 
-  // Strip surrounding quotes if present (e.g., from .env quotes)
   cleaned = cleaned.replace(/^["']+|["']+$/g, '').trim();
-
-  // Strip trailing slashes
   cleaned = cleaned.replace(/\/+$/, '');
 
   if (!cleaned) return '';
@@ -130,5 +127,5 @@ export const corsOptions: CorsOptions = {
   ],
   exposedHeaders: ['Content-Disposition', 'X-CSRF-Token'],
   optionsSuccessStatus: 204,
-  maxAge: 86400, // 24 hours preflight cache
+  maxAge: 86400,
 };

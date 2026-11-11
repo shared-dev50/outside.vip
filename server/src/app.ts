@@ -22,7 +22,6 @@ export const app = express();
 app.set('trust proxy', 1);
 app.disable('x-powered-by');
 
-// Security and utility middleware - enable CORS and preflight handling before all routes
 app.use(securityHeaders);
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));

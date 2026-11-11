@@ -39,10 +39,10 @@ import {
 } from '../../lib/session.service.js';
 import { generateStatelessCsrfToken } from '../../middleware/csrf.js';
 
-export const OTP_EXPIRY_MS = 10 * 60 * 1000; // 10 minutes
-export const RESEND_COOLDOWN_MS = 60 * 1000; // 60 seconds
+export const OTP_EXPIRY_MS = 10 * 60 * 1000;
+export const RESEND_COOLDOWN_MS = 60 * 1000;
 export const MAX_CODE_ATTEMPTS = 5;
-export const RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
+export const RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
 export const MAX_VERIFY_REQUESTS_PER_WINDOW = 8;
 export const MAX_RESEND_REQUESTS_PER_WINDOW = 5;
 export const MAX_LOGIN_ATTEMPTS_PER_WINDOW = 20;
@@ -239,7 +239,6 @@ export async function register(req: Request, res: Response, next: NextFunction):
       name: user.name,
     });
 
-    // Populate 30s Redis user authorization cache
     await syncUserToAuthCache(user);
 
     // Rotate any pre-existing session and issue a fresh Redis session
@@ -627,7 +626,6 @@ export async function login(req: Request, res: Response, next: NextFunction): Pr
       );
     }
 
-    // Redis-backed login rate limit
     const loginRateAllowed = await checkRedisRateLimit(
       `login:${normalizedEmail}:${req.ip || 'unknown'}`,
       MAX_LOGIN_ATTEMPTS_PER_WINDOW,
@@ -854,7 +852,7 @@ export async function changePassword(
       data: { passwordHash: newPasswordHash },
     });
 
-    // Requirement 5 & 6: Immediately invalidate Redis user cache and revoke all existing sessions
+    // Immediately invalidate Redis user cache and revoke all existing sessions
     await invalidateUserAuthCache(dbUser.id);
     await revokeAllUserSessions(dbUser.id);
 
@@ -929,7 +927,7 @@ export async function updateUserStatus(
       select: USER_PUBLIC_SELECT,
     });
 
-    // Requirement 5 & 6: Immediately invalidate the Redis user authorization cache
+    // Immediately invalidate the Redis user authorization cache
     await invalidateUserAuthCache(targetUserId);
 
     // If account is suspended or disabled, immediately revoke all active sessions

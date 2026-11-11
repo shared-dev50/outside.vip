@@ -79,7 +79,6 @@ async function main() {
   const passwordHash = await bcrypt.hash('Outside2026!', 10);
   const now = new Date();
 
-  // Upsert Admin User (verified)
   const admin = await prisma.user.upsert({
     where: { email: 'admin@outside.vip' },
     update: {
@@ -145,7 +144,6 @@ async function main() {
     },
   });
 
-  // Upsert Attendee User
   const attendee = await prisma.user.upsert({
     where: { email: 'alex@outside.vip' },
     update: {
@@ -189,7 +187,6 @@ async function main() {
 
   console.log(`✅ Ensured users & organizer: ${organizerProfile.displayName}`);
 
-  // Event 1: SOL FEST - Baobab Edition
   const event1 = await ensureEventWithTiers(
     {
       slug: 'sol-fest-baobab-edition-2026',
@@ -262,7 +259,6 @@ Lineup:
     ]
   );
 
-  // Event 2: Warehouse Rave
   const event2 = await ensureEventWithTiers(
     {
       slug: 'sub-terrain-industrial-warehouse-004',
@@ -314,7 +310,6 @@ Lineup:
     ]
   );
 
-  // Event 3: Tech & Culture Summit
   const event3 = await ensureEventWithTiers(
     {
       slug: 'outside-synapse-future-tech-summit',
@@ -361,7 +356,6 @@ Lineup:
     ]
   );
 
-  // Event 4: Alte Cruise Sunset
   const event4 = await ensureEventWithTiers(
     {
       slug: 'alte-cruise-sunset-rooftop-session',
@@ -414,7 +408,6 @@ Featuring:
     ]
   );
 
-  // Event 5: Coastal Sundowner (Food & Drink)
   const event5 = await ensureEventWithTiers(
     {
       slug: 'coastal-sundowner-diani-seafood',
@@ -452,7 +445,6 @@ Featuring:
     ]
   );
 
-  // Event 6: Savannah Cinema & Vinyl (Arts & Culture)
   const event6 = await ensureEventWithTiers(
     {
       slug: 'savannah-cinema-vinyl-under-stars',

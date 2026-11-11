@@ -264,14 +264,12 @@ export async function getDashboardStats(req: Request, res: Response, next: NextF
   try {
     const organizerId = req.user!.userId;
 
-    // Count events by status
     const [totalEvents, publishedEvents, draftEvents] = await Promise.all([
       prisma.event.count({ where: { organizerId } }),
       prisma.event.count({ where: { organizerId, status: EventStatus.PUBLISHED } }),
       prisma.event.count({ where: { organizerId, status: EventStatus.DRAFT } }),
     ]);
 
-    // Count tickets sold for organizer's events
     const ticketsSoldCount = await prisma.ticket.count({
       where: {
         event: { organizerId },
@@ -279,7 +277,6 @@ export async function getDashboardStats(req: Request, res: Response, next: NextF
       },
     });
 
-    // Sum actual gross revenue from COMPLETED orders for organizer's events
     const completedOrders = await prisma.order.findMany({
       where: {
         event: { organizerId },
@@ -526,7 +523,6 @@ export async function createOrganizerEvent(req: Request, res: Response, next: Ne
     const organizerId = req.user!.userId;
     const input = createEventSchema.parse(req.body);
 
-    // Ensure the verified user has an OrganizerProfile workspace
     await ensureOrganizerWorkspaceForUser(organizerId);
 
     // Saving drafts does not require Stripe onboarding.
@@ -958,14 +954,12 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
       }
     }
 
-    // Validate date order if both or either updated
     const startAtDate = input.startAt ? new Date(input.startAt) : existingEvent.startAt;
     const endAtDate = input.endAt ? new Date(input.endAt) : existingEvent.endAt;
     if (endAtDate.getTime() <= startAtDate.getTime()) {
       throw new BadRequestError('Event end time must be after the start time');
     }
 
-    // YouTube URL normalization & validation
     let youtubeVideoId: string | null | undefined = undefined;
     let youtubeVideoUrl: string | null | undefined = undefined;
     if (input.youtubeVideoUrl !== undefined) {
@@ -984,7 +978,6 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
       }
     }
 
-    // Password protection handling
     let isPasswordProtected: boolean | undefined = undefined;
     let passwordHash: string | null | undefined = undefined;
     if (input.isPasswordProtected !== undefined) {
@@ -1007,7 +1000,6 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
       isPasswordProtected = true;
     }
 
-    // Limits
     if (input.galleryImages && input.galleryImages.length > 10) {
       throw new BadRequestError('A maximum of 10 gallery images is allowed');
     }
@@ -1240,7 +1232,6 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
         }
       }
 
-      // 1. Update event details
       await tx.event.update({
         where: { id },
         data: {
@@ -1281,7 +1272,6 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
         },
       });
 
-      // 2. Manage gallery images if provided
       if (input.galleryImages !== undefined) {
         await tx.eventGalleryImage.deleteMany({ where: { eventId: id } });
         if (input.galleryImages.length > 0) {
@@ -1296,7 +1286,6 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
         }
       }
 
-      // 3. Manage features if provided
       if (input.features !== undefined) {
         await tx.eventFeature.deleteMany({ where: { eventId: id } });
         if (input.features.length > 0) {
@@ -1314,11 +1303,9 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
         }
       }
 
-      // 4. Manage ticket tiers if provided
       if (input.ticketTiers) {
         const incomingTierIds = new Set(input.ticketTiers.filter((t) => t.id).map((t) => t.id));
 
-        // Check for tiers removed in this update
         for (const existingTier of existingEvent.ticketTiers) {
           if (!incomingTierIds.has(existingTier.id)) {
             if (existingTier.soldQuantity > 0) {
@@ -1328,16 +1315,13 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
                 data: { status: TicketTierStatus.HIDDEN },
               });
             } else {
-              // Safe to delete unused tier
               await tx.ticketTier.delete({ where: { id: existingTier.id } });
             }
           }
         }
 
-        // Upsert incoming tiers
         for (const tier of input.ticketTiers) {
           if (tier.id) {
-            // Update existing tier
             await tx.ticketTier.update({
               where: { id: tier.id },
               data: {
@@ -1357,7 +1341,6 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
               },
             });
           } else {
-            // Create new tier
             await tx.ticketTier.create({
               data: {
                 eventId: id,
@@ -1500,7 +1483,6 @@ export async function publishEvent(req: Request, res: Response, next: NextFuncti
       });
     }
 
-    // Comprehensive Publishing Validation
     if (!event.title || event.title.trim().length < 2) {
       throw new BadRequestError('Event title must be at least 2 characters to publish');
     }
@@ -2035,7 +2017,6 @@ export async function checkInTicket(req: Request, res: Response, next: NextFunct
       ? `${actualToken.slice(0, 7)}...${actualToken.slice(-4)}`
       : '***';
 
-    // 2. Token not found
     if (!ticket) {
       console.warn(`[CheckIn] Rejected INVALID_TOKEN: token=${maskedToken}, user=${scannerUserId}`);
       let targetEvent = null;
@@ -2130,7 +2111,6 @@ export async function checkInTicket(req: Request, res: Response, next: NextFunct
       }
     }
 
-    // 5. Check if ticket is cancelled / refunded
     if (ticket.status === 'CANCELLED' || ticket.order.status === 'CANCELLED' || ticket.order.status === 'REFUNDED') {
       console.warn(`[CheckIn] Rejected CANCELLED_TICKET: token=${maskedToken}, ticketStatus=${ticket.status}, orderStatus=${ticket.order.status}`);
       await prisma.checkInLog.create({
@@ -2159,7 +2139,6 @@ export async function checkInTicket(req: Request, res: Response, next: NextFunct
       return;
     }
 
-    // 6. Check duplicate check-in
     if (ticket.status === 'CHECKED_IN') {
       console.warn(`[CheckIn] Rejected ALREADY_CHECKED_IN: token=${maskedToken}, checkedInAt=${ticket.checkedInAt}`);
       await prisma.checkInLog.create({
@@ -2196,7 +2175,6 @@ export async function checkInTicket(req: Request, res: Response, next: NextFunct
       return;
     }
 
-    // 7. Verify order is completed
     if (ticket.order.status !== 'COMPLETED') {
       console.warn(`[CheckIn] Rejected UNPAID_ORDER: token=${maskedToken}, orderStatus=${ticket.order.status}`);
       res.status(400).json({
@@ -2214,7 +2192,6 @@ export async function checkInTicket(req: Request, res: Response, next: NextFunct
       return;
     }
 
-    // 7b. Check ticket validity window (Limit Ticket Validity)
     const now = new Date();
     const validityStart = ticket.ticketTier.validityStartAt;
     const validityEnd = ticket.ticketTier.validityEndAt;

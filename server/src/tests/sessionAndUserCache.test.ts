@@ -73,9 +73,6 @@ describe('Server-Side Redis Sessions & 30-Second Redis User Authorization Cache'
     }
   });
 
-  // =========================================================================
-  // 1. __Host- Cookie Specification, One-Way Verifier & Production Hardening
-  // =========================================================================
   describe('1. __Host-outside_sid Cookie & One-Way Redis Verifier', () => {
     it('sets a host-only __Host-outside_sid cookie (HttpOnly, Secure, SameSite=Lax, Path=/, no Domain) and stores only a SHA-256 verifier in Redis', async () => {
       const email = `session_spec_${Date.now()}@outside.vip`;
@@ -170,9 +167,6 @@ describe('Server-Side Redis Sessions & 30-Second Redis User Authorization Cache'
     });
   });
 
-  // =========================================================================
-  // 2 & 3. 30-Second Redis User Authorization Cache Hits & Expiration
-  // =========================================================================
   describe('2 & 3. 30-Second Redis User Authorization Cache Hits & Expiration', () => {
     let userId: string;
     let sessionCookie: string;
@@ -272,9 +266,6 @@ describe('Server-Side Redis Sessions & 30-Second Redis User Authorization Cache'
     });
   });
 
-  // =========================================================================
-  // 4, 5 & 8. Immediate Cache Invalidation, Role Changes & Atomic Race Guard
-  // =========================================================================
   describe('4, 5 & 8. Immediate Cache Invalidation & Atomic Anti-Race Protection', () => {
     it('immediately invalidates user cache and rotates session when email verification and ADMIN_EMAILS promotion occur', async () => {
       const adminEmail = 'redis_admin_allow@outside.vip';
@@ -361,9 +352,6 @@ describe('Server-Side Redis Sessions & 30-Second Redis User Authorization Cache'
     });
   });
 
-  // =========================================================================
-  // 5 & 6. Account Suspension / Disabling & Immediate Session Revocation
-  // =========================================================================
   describe('5 & 6. Suspended / Disabled Accounts & Immediate Session Revocation', () => {
     it('immediately invalidates user cache and revokes all active sessions when an admin suspends or disables an account', async () => {
       // 1. Create and verify a target user with two concurrent sessions
@@ -443,9 +431,6 @@ describe('Server-Side Redis Sessions & 30-Second Redis User Authorization Cache'
     });
   });
 
-  // =========================================================================
-  // 7. Mandatory Fresh Database Verification for Sensitive Actions
-  // =========================================================================
   describe('7. Mandatory Fresh Database Verification for Sensitive Actions', () => {
     it('always queries PostgreSQL directly for sensitive actions (admin, withdrawals, password change) even when Redis user cache is warm', async () => {
       const email = `fresh_db_check_${Date.now()}@outside.vip`;
@@ -494,9 +479,6 @@ describe('Server-Side Redis Sessions & 30-Second Redis User Authorization Cache'
     });
   });
 
-  // =========================================================================
-  // 9. Fail-Closed Behavior on Redis Failures
-  // =========================================================================
   describe('9. Fail-Closed Behavior on Redis Failures', () => {
     it('fails closed with 503 AUTH_STORE_UNAVAILABLE when Redis fails during an authenticated request and never bypasses session validation', async () => {
       const loginRes = await request(app).post('/api/auth/login').send({
@@ -520,9 +502,6 @@ describe('Server-Side Redis Sessions & 30-Second Redis User Authorization Cache'
     });
   });
 
-  // =========================================================================
-  // 10. Session Expiration (Idle & Absolute), Logout, Password Revocation & CSRF
-  // =========================================================================
   describe('10. Idle & Absolute Expiration, Logout, Password Change & CSRF Enforcement', () => {
     it('enforces 30-minute idle timeout and 7-day absolute session lifetime', async () => {
       const loginRes = await request(app).post('/api/auth/login').send({

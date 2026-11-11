@@ -31,10 +31,8 @@ import { financeRouter } from '../finance/finance.routes.js';
 
 export const organizerRouter = Router();
 
-// Mount Stripe-connected Finance routes
 organizerRouter.use('/finance', financeRouter);
 
-// Protect all organizer endpoints with auth & verified email middleware
 organizerRouter.use(requireAuth);
 organizerRouter.use(requireVerifiedEmail);
 

@@ -451,7 +451,6 @@ export async function createOnboardingLink(
     );
   }
 
-  // Validate country parameter against allowlist if provided
   if (country !== undefined) {
     const normalizedCountry = country.trim().toUpperCase();
     if (!isStripeExpressCountrySupported(normalizedCountry)) {
@@ -554,7 +553,6 @@ export async function createOnboardingLink(
     }
   }
 
-  // Generate the Stripe-hosted onboarding Account Link
   const baseReturn = returnUrl || `${env.CLIENT_URL}/organizer/finance?stripe_return=true`;
   const baseRefresh = refreshUrl || `${env.CLIENT_URL}/organizer/finance?stripe_refresh=true`;
 

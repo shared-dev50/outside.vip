@@ -109,9 +109,6 @@ describe('Account, Role, Email Verification, Organizer Onboarding & Admin Archit
     }
   });
 
-  // =========================================================================
-  // 1. New registration defaults to attendee functionality
-  // =========================================================================
   describe('1. Registration & Default Attendee Functionality', () => {
     it('registers new users with ATTENDEE role and emailVerified=false by default even if ORGANIZER role is passed', async () => {
       const email = `new_attendee_${Date.now()}@outside.vip`;
@@ -189,9 +186,6 @@ describe('Account, Role, Email Verification, Organizer Onboarding & Admin Archit
     });
   });
 
-  // =========================================================================
-  // 2. Email verification success, expiry, reuse, cooldown, and rate limits
-  // =========================================================================
   describe('2. Six-Digit Single-Use OTP Email Verification', () => {
     it('verifies a valid 6-digit OTP code, persists emailVerified & emailVerifiedAt, and prevents code reuse', async () => {
       const email = `otp_verify_${Date.now()}@outside.vip`;
@@ -344,9 +338,6 @@ describe('Account, Role, Email Verification, Organizer Onboarding & Admin Archit
     });
   });
 
-  // =========================================================================
-  // 3. Unverified users cannot create events or access organizer endpoints
-  // =========================================================================
   describe('3. Backend Enforcement of Email Verification for Organizer Access', () => {
     it('blocks unverified users from creating events or accessing organizer endpoints with 403 Forbidden', async () => {
       const email = `unverified_org_${Date.now()}@outside.vip`;
@@ -384,10 +375,6 @@ describe('Account, Role, Email Verification, Organizer Onboarding & Admin Archit
     });
   });
 
-  // =========================================================================
-  // 4 & 5 & 6. Verified attendees can create drafts, publish free events,
-  // and paid event publishing requires Stripe readiness
-  // =========================================================================
   describe('4, 5 & 6. Verified Attendee Organizer Onboarding, Drafts, Free vs Paid Publishing & Dual Attendee-Organizer Capability', () => {
     let verifiedAttendeeToken: string;
     let verifiedAttendeeId: string;
@@ -624,9 +611,6 @@ describe('Account, Role, Email Verification, Organizer Onboarding & Admin Archit
     });
   });
 
-  // =========================================================================
-  // 7 & 8. Existing organizers retain access & Guest checkout works without auth
-  // =========================================================================
   describe('7 & 8. Existing Seeded Organizers & Guest Checkout Preservation', () => {
     it('7. Existing seeded organizer (sol@outside.vip) is verified and retains full event & organization management access', async () => {
       const loginRes = await request(app).post('/api/auth/login').send({
@@ -680,9 +664,6 @@ describe('Account, Role, Email Verification, Organizer Onboarding & Admin Archit
     });
   });
 
-  // =========================================================================
-  // 9 & 10. Admin allowlist provisioning & privilege escalation prevention
-  // =========================================================================
   describe('9 & 10. Admin Allowlist Provisioning & Security Controls', () => {
     it('9. Provisions ADMIN role only AFTER an allowlisted email address is verified (with email normalization and audit logging)', async () => {
       const allowlistedEmail = `allowlisted_admin_${Date.now()}@outside.vip`;
@@ -796,9 +777,6 @@ describe('Account, Role, Email Verification, Organizer Onboarding & Admin Archit
     });
   });
 
-  // =========================================================================
-  // 11. Organization ownership and authorization remain enforced
-  // =========================================================================
   describe('11. Organization Ownership & Event Authorization Enforcement', () => {
     it('prevents one verified organizer from editing, publishing, cancelling, or deleting another organizer’s event', async () => {
       // Create Organizer A and Organizer B (both verified)
@@ -877,9 +855,6 @@ describe('Account, Role, Email Verification, Organizer Onboarding & Admin Archit
     });
   });
 
-  // =========================================================================
-  // 12. Demo authentication cannot be accessed via direct API requests
-  // =========================================================================
   describe('12. Demo Authentication Prevention & Production Hardening', () => {
     it('rejects direct requests to demo authentication routes (/api/auth/demo, /api/auth/demo-login, /api/auth/quick-login)', async () => {
       for (const route of ['/api/auth/demo', '/api/auth/demo-login', '/api/auth/quick-login']) {

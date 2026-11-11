@@ -128,7 +128,6 @@ export async function handleGetBalance(
   }
 }
 
-// Manual withdrawal to Stripe Express account
 export async function handleExecuteWithdrawal(
   req: Request,
   res: Response,
@@ -153,7 +152,6 @@ export async function handleExecuteWithdrawal(
   }
 }
 
-// Admin-initiated withdrawal on behalf of an organizer
 export async function handleAdminWithdrawal(
   req: Request,
   res: Response,
@@ -192,7 +190,6 @@ export async function handleAdminWithdrawal(
   }
 }
 
-// Platform-to-Express transfer history
 export async function handleGetTransfers(
   req: Request,
   res: Response,
@@ -212,7 +209,6 @@ export async function handleGetTransfers(
   }
 }
 
-// Organizer financial ledger audit trail
 export async function handleGetLedger(
   req: Request,
   res: Response,
@@ -233,7 +229,6 @@ export async function handleGetLedger(
   }
 }
 
-// Express-to-bank payout history
 export async function handleGetPayouts(
   req: Request,
   res: Response,
@@ -256,7 +251,6 @@ export async function handleGetPayouts(
       return;
     }
 
-    // Call Stripe API to retrieve payouts
     const stripePayoutsRes = await getConnectedAccountPayouts(userId, limit);
 
     if (stripePayoutsRes.payouts.length > 0) {

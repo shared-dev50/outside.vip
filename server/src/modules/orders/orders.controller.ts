@@ -190,7 +190,6 @@ export async function downloadOrderTicketsPdf(
 
     const order = await fetchAndAuthorizeOrder(req, orderNumber);
 
-    // Verify order is paid / completed before releasing tickets
     if (order.status !== 'COMPLETED') {
       throw new BadRequestError(
         `Tickets are only downloadable for confirmed and paid orders. Current order status: ${order.status}`

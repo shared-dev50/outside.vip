@@ -23,7 +23,6 @@ import {
 
 export const financeRouter = Router();
 
-// Protect all finance endpoints with auth & verified email middleware
 financeRouter.use(requireAuth);
 financeRouter.use(requireVerifiedEmail);
 
