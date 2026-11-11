@@ -294,3 +294,19 @@ export const earningsPreviewInputSchema = z.object({
 
 export type EarningsPreviewInput = z.infer<typeof earningsPreviewInputSchema>;
 
+export const organizerWorkspaceSchema = z.object({
+  displayName: z
+    .string()
+    .trim()
+    .min(2, 'Organizer or collective name must be at least 2 characters')
+    .max(150),
+  bio: z.string().trim().max(2000).optional().nullable(),
+  websiteUrl: z.string().trim().max(500).optional().nullable(),
+  instagramHandle: z.string().trim().max(100).optional().nullable(),
+  twitterHandle: z.string().trim().max(100).optional().nullable(),
+  logoUrl: z.string().trim().max(1000).optional().nullable(),
+});
+
+export type OrganizerWorkspaceInput = z.infer<typeof organizerWorkspaceSchema>;
+
+

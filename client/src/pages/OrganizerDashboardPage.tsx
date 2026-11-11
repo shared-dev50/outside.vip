@@ -6,6 +6,11 @@ import { api } from '../lib/api';
 import { OrganizerEventItem } from '../types';
 import { OrganizerWaitlistModal } from '../components/organizer/OrganizerWaitlistModal';
 import {
+  EmailVerificationGate,
+  OrganizerWorkspaceSetupBanner,
+} from '../components/auth/EmailVerificationGate';
+import { AuthFormCard } from '../components/auth/AuthFormCard';
+import {
   Plus,
   Calendar,
   Ticket,
@@ -19,7 +24,6 @@ import {
   CheckCircle2,
   AlertCircle,
   ExternalLink,
-  ShieldCheck,
   Search,
   RefreshCw,
   X,
@@ -28,7 +32,7 @@ import {
 } from 'lucide-react';
 
 export const OrganizerDashboardPage: React.FC = () => {
-  const { user, quickLoginAs } = useAuth();
+  const { user } = useAuth();
   const queryClient = useQueryClient();
 
   // Sync body background with page theme to prevent bounce discoloration
@@ -59,7 +63,7 @@ export const OrganizerDashboardPage: React.FC = () => {
   } = useQuery({
     queryKey: ['organizer-dashboard'],
     queryFn: () => api.organizer.getDashboard(),
-    enabled: Boolean(user && (user.role === 'ORGANIZER' || user.role === 'ADMIN')),
+    enabled: Boolean(user && user.emailVerified !== false),
   });
 
   const {
@@ -69,7 +73,7 @@ export const OrganizerDashboardPage: React.FC = () => {
   } = useQuery({
     queryKey: ['organizer-events'],
     queryFn: () => api.organizer.listEvents(),
-    enabled: Boolean(user && (user.role === 'ORGANIZER' || user.role === 'ADMIN')),
+    enabled: Boolean(user && user.emailVerified !== false),
   });
 
   const publishMutation = useMutation({
@@ -119,46 +123,32 @@ export const OrganizerDashboardPage: React.FC = () => {
     deleteMutation.mutate(eventToDelete.id);
   };
 
-  if (!user || (user.role !== 'ORGANIZER' && user.role !== 'ADMIN')) {
+  if (!user) {
     return (
       <div className="min-h-screen bg-[#FAF8F5] text-stone-900 flex items-center justify-center p-4 selection:bg-stone-900 selection:text-white">
-        <div className="max-w-md w-full bg-white border border-stone-200/90 rounded-2xl p-8 space-y-6 text-center shadow-xs">
-          <div className="w-14 h-14 rounded-2xl bg-[#EFECE5] border border-[#DDD7CB] flex items-center justify-center mx-auto text-stone-800 shadow-2xs">
-            <ShieldCheck className="w-7 h-7" />
-          </div>
-          <div className="space-y-2">
-            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-[#EFECE5]/80 border border-[#DDD7CB]/70 text-[#7A7165] text-[10px] font-mono uppercase tracking-[0.22em] font-bold">
-              <span className="w-1.5 h-1.5 rounded-full bg-[#96846D]" />
-              <span>Organizer Portal</span>
-            </div>
-            <h1 className="font-display font-extrabold text-2xl tracking-tight text-stone-900">
-              Organizer Access Required
-            </h1>
-            <p className="text-xs text-stone-600 leading-relaxed font-sans">
-              Sign in with an organizer account to access your command center, create events, and configure ticket tiers.
-            </p>
-          </div>
+        <AuthFormCard
+          badgeText="Organizer Portal"
+          loginTitle="Sign In to Manage Events"
+          loginSubtitle="Any verified Outside.vip member can create and host events while keeping full attendee ticket access."
+          onSuccess={() => {
+            refetchStats();
+            refetchEvents();
+          }}
+        />
+      </div>
+    );
+  }
 
-          <div className="space-y-3 pt-2">
-            <button
-              onClick={async () => {
-                await quickLoginAs('organizer');
-                refetchStats();
-                refetchEvents();
-              }}
-              className="w-full py-3 px-4 rounded-xl bg-stone-900 hover:bg-black text-white font-semibold text-xs font-mono uppercase tracking-wider transition-all duration-200 shadow-xs flex items-center justify-center gap-2"
-            >
-              <Sparkles className="w-4 h-4 text-stone-300" />
-              Sign in as Sol Collective (Organizer Demo)
-            </button>
-            <Link
-              to="/"
-              className="block w-full py-2.5 px-4 rounded-xl border border-stone-200 hover:border-stone-300 hover:bg-stone-50 text-xs font-mono text-stone-600 hover:text-stone-900 transition-colors"
-            >
-              Return to Public Discovery
-            </Link>
-          </div>
-        </div>
+  if (user.emailVerified === false) {
+    return (
+      <div className="min-h-screen bg-[#FAF8F5] text-stone-900">
+        <EmailVerificationGate
+          title="Verify Your Email to Access Organizer Studio"
+          onVerified={() => {
+            refetchStats();
+            refetchEvents();
+          }}
+        />
       </div>
     );
   }
@@ -240,6 +230,12 @@ export const OrganizerDashboardPage: React.FC = () => {
       )}
 
       <div className="relative z-10 max-w-[1536px] mx-auto px-4 sm:px-6 lg:px-8 xl:px-10 py-8 sm:py-10 space-y-8">
+        <OrganizerWorkspaceSetupBanner
+          onCreated={() => {
+            refetchStats();
+            refetchEvents();
+          }}
+        />
         <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 pb-6 border-b border-stone-200/90">
           <div>
             <div className="flex items-center gap-2 mb-1.5">

@@ -105,7 +105,7 @@ async function fetchAndAuthorizeOrder(req: Request, orderNumber: string) {
   const isAdmin = req.user?.role === 'ADMIN';
 
   const isOrganizer =
-    req.user?.role === 'ORGANIZER' && order.event?.organizerId === req.user?.userId;
+    Boolean(req.user?.userId) && order.event?.organizerId === req.user?.userId;
 
   if (!hasValidAccessToken && !isOwner && !isAdmin && !isOrganizer) {
     if (!providedToken && !req.user) {

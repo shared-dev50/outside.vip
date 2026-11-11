@@ -7,9 +7,17 @@ interface AuthContextType {
   token: string | null;
   isLoading: boolean;
   login: (email: string, password: string) => Promise<void>;
-  register: (data: { email: string; password: string; name: string; role?: string; organizerDisplayName?: string }) => Promise<void>;
+  register: (data: {
+    email: string;
+    password: string;
+    name: string;
+    role?: string;
+    organizerDisplayName?: string;
+  }) => Promise<void>;
+  verifyEmail: (code: string) => Promise<User>;
+  resendVerification: () => Promise<{ message: string; cooldownSeconds: number }>;
+  refreshUser: () => Promise<User | null>;
   logout: () => void;
-  quickLoginAs: (role: 'organizer' | 'attendee' | 'admin') => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -18,6 +26,25 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [user, setUser] = useState<User | null>(null);
   const [token, setToken] = useState<string | null>(localStorage.getItem('outside_token'));
   const [isLoading, setIsLoading] = useState<boolean>(true);
+
+  const refreshUser = async (): Promise<User | null> => {
+    const storedToken = localStorage.getItem('outside_token');
+    if (!storedToken) {
+      setUser(null);
+      return null;
+    }
+    try {
+      const { user: fetchedUser } = await api.auth.me();
+      setUser(fetchedUser);
+      return fetchedUser;
+    } catch (err) {
+      console.warn('Session expired or invalid, logging out', err);
+      localStorage.removeItem('outside_token');
+      setToken(null);
+      setUser(null);
+      return null;
+    }
+  };
 
   useEffect(() => {
     async function loadUser() {
@@ -63,20 +90,26 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setUser(data.user);
   };
 
+  const verifyEmail = async (code: string): Promise<User> => {
+    const data = await api.auth.verifyEmail({ code });
+    localStorage.setItem('outside_token', data.token);
+    setToken(data.token);
+    setUser(data.user);
+    return data.user;
+  };
+
+  const resendVerification = async () => {
+    const data = await api.auth.resendVerification();
+    return {
+      message: data.message,
+      cooldownSeconds: data.cooldownSeconds,
+    };
+  };
+
   const logout = () => {
     localStorage.removeItem('outside_token');
     setToken(null);
     setUser(null);
-  };
-
-  const quickLoginAs = async (role: 'organizer' | 'attendee' | 'admin') => {
-    if (role === 'organizer') {
-      await login('sol@outside.vip', 'Outside2026!');
-    } else if (role === 'admin') {
-      await login('admin@outside.vip', 'Outside2026!');
-    } else {
-      await login('alex@outside.vip', 'Outside2026!');
-    }
   };
 
   return (
@@ -87,8 +120,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         isLoading,
         login,
         register,
+        verifyEmail,
+        resendVerification,
+        refreshUser,
         logout,
-        quickLoginAs,
       }}
     >
       {children}

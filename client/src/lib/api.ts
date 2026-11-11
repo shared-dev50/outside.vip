@@ -270,6 +270,19 @@ export const api = {
   },
   organizer: {
     getDashboard: () => request<OrganizerDashboardStats>('/organizer/dashboard'),
+    getWorkspace: () => request<{ organizer: User['organizer'] }>('/organizer/workspace'),
+    upsertWorkspace: (payload: {
+      displayName: string;
+      bio?: string | null;
+      websiteUrl?: string | null;
+      instagramHandle?: string | null;
+      twitterHandle?: string | null;
+      logoUrl?: string | null;
+    }) =>
+      request<{ organizer: User['organizer'] }>('/organizer/workspace', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }),
     listEvents: () => request<{ events: OrganizerEventItem[] }>('/organizer/events'),
     getEvent: (id: string) => request<{ event: Event }>(`/organizer/events/${id}`),
     getPayoutDetails: () =>
@@ -495,10 +508,23 @@ export const api = {
         body: JSON.stringify(credentials),
       }),
     register: (data: { email: string; password: string; name: string; role?: string; organizerDisplayName?: string }) =>
-      request<{ user: User; token: string }>('/auth/register', {
+      request<{ user: User; token: string; verificationRequired?: boolean }>('/auth/register', {
         method: 'POST',
         body: JSON.stringify(data),
       }),
+    verifyEmail: (payload: { code: string; email?: string }) =>
+      request<{ user: User; token: string }>('/auth/verify-email', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }),
+    resendVerification: (payload?: { email?: string }) =>
+      request<{ message: string; expiresAt: string; cooldownSeconds: number }>(
+        '/auth/resend-verification',
+        {
+          method: 'POST',
+          body: JSON.stringify(payload || {}),
+        }
+      ),
   },
   checkout: {
     createSession: (payload: CheckoutSessionInput) =>

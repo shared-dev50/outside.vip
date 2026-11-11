@@ -21,6 +21,8 @@ const envSchema = z.object({
     .default('5')
     .transform((val) => parseFloat(val)),
   EMAIL_FROM: z.string().default('tickets@outside.vip'),
+  RESEND_API_KEY: z.string().default(''),
+  ADMIN_EMAILS: z.string().default(''),
   CLOUDINARY_CLOUD_NAME: z.string().default(''),
   CLOUDINARY_API_KEY: z.string().default(''),
   CLOUDINARY_API_SECRET: z.string().default(''),
@@ -37,3 +39,24 @@ if (!parsed.success) {
 }
 
 export const env = parsed.data;
+
+export function normalizeEmail(email: string): string {
+  return email.trim().toLowerCase();
+}
+
+export function getAdminEmailsAllowlist(): Set<string> {
+  const raw = process.env.ADMIN_EMAILS !== undefined ? process.env.ADMIN_EMAILS : env.ADMIN_EMAILS;
+  if (!raw) return new Set();
+  return new Set(
+    raw
+      .split(',')
+      .map((entry) => normalizeEmail(entry))
+      .filter((entry) => entry.length > 0)
+  );
+}
+
+export function isEmailInAdminAllowlist(email: string): boolean {
+  const normalized = normalizeEmail(email);
+  if (!normalized) return false;
+  return getAdminEmailsAllowlist().has(normalized);
+}

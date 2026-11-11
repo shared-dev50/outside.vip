@@ -14,6 +14,10 @@ describe('Outside.vip Client Library', () => {
     expect(typeof api.auth.login).toBe('function');
     expect(typeof api.auth.register).toBe('function');
     expect(typeof api.auth.me).toBe('function');
+    expect(typeof api.auth.verifyEmail).toBe('function');
+    expect(typeof api.auth.resendVerification).toBe('function');
+    expect(typeof api.organizer.getWorkspace).toBe('function');
+    expect(typeof api.organizer.upsertWorkspace).toBe('function');
   });
 
   it('api.events.list builds correct query string with filters and sorting', async () => {

@@ -1,6 +1,5 @@
 import { Router } from 'express';
-import { Role } from '@prisma/client';
-import { requireAuth, requireRole } from '../../middleware/auth.js';
+import { requireAuth, requireVerifiedEmail } from '../../middleware/auth.js';
 import {
   getDashboardStats,
   listOrganizerEvents,
@@ -19,6 +18,8 @@ import {
   updateOrganizerPayoutDetails,
   checkInTicket,
   getOrganizerEarningsPreview,
+  getOrganizerWorkspace,
+  upsertOrganizerWorkspace,
 } from './organizer.controller.js';
 import { handleGetOrganizerWaitlist } from '../waitlist/waitlist.controller.js';
 import { uploadCoverMiddleware } from '../../middleware/upload.js';
@@ -29,9 +30,14 @@ export const organizerRouter = Router();
 // Mount Stripe-connected Finance routes
 organizerRouter.use('/finance', financeRouter);
 
-// Protect all organizer endpoints with auth & role middleware
+// Protect all organizer endpoints with auth & verified email middleware
 organizerRouter.use(requireAuth);
-organizerRouter.use(requireRole(Role.ORGANIZER, Role.ADMIN));
+organizerRouter.use(requireVerifiedEmail);
+
+organizerRouter.get('/workspace', getOrganizerWorkspace);
+organizerRouter.post('/workspace', upsertOrganizerWorkspace);
+organizerRouter.put('/workspace', upsertOrganizerWorkspace);
+organizerRouter.post('/onboarding', upsertOrganizerWorkspace);
 
 organizerRouter.post('/check-in', checkInTicket);
 organizerRouter.post('/upload/sign', getUploadSignature);

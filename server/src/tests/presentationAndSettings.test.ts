@@ -1,8 +1,9 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import request from 'supertest';
 import { app } from '../app.js';
 import { extractYouTubeVideoId, normalizeYouTubeUrl } from '../utils/youtube.js';
 import { prisma } from '../db/prisma.js';
+import * as financeService from '../modules/finance/finance.service.js';
 
 describe('Event Presentation & Page Configuration Features', () => {
   let organizerToken: string;
@@ -15,6 +16,8 @@ describe('Event Presentation & Page Configuration Features', () => {
   let protectedEventSlug: string;
 
   beforeAll(async () => {
+    vi.spyOn(financeService, 'assertStripeReadyForPaidPublishing').mockResolvedValue({} as any);
+
     // Authenticate seeded organizer
     const organizerLogin = await request(app).post('/api/auth/login').send({
       email: 'sol@outside.vip',
@@ -33,6 +36,7 @@ describe('Event Presentation & Page Configuration Features', () => {
   });
 
   afterAll(async () => {
+    vi.restoreAllMocks();
     // Cleanup any test events created during this test suite
     const ids = [createdEventId, hiddenEventId, protectedEventId].filter(Boolean);
     for (const id of ids) {

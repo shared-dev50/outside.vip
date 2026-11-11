@@ -995,3 +995,57 @@ export async function updateConnectedAccountPayoutSchedule(
     );
   }
 }
+
+/**
+ * Verifies that an organizer's Stripe Connect Express account is sufficiently onboarded
+ * and eligible to receive transfers before publishing a paid event.
+ */
+export async function assertStripeReadyForPaidPublishing(
+  organizerId: string
+): Promise<ConnectedAccountStatusResponse> {
+  const status = await getConnectedAccountStatus(organizerId);
+
+  if (status.connected && status.detailsSubmitted && status.transferBalance.enabled) {
+    return status;
+  }
+
+  const missingItems: string[] = [];
+
+  if (!status.connected) {
+    if (status.connectionStatus === 'not_connected') {
+      missingItems.push(
+        'Connect your Stripe Express account in Finance & Payouts to receive event revenue transfers'
+      );
+    } else {
+      missingItems.push(status.transferBalance.message || status.sellTickets.message);
+    }
+  } else {
+    if (!status.detailsSubmitted) {
+      missingItems.push('Submit required business or identity onboarding details in Stripe Express');
+    }
+    if (status.requirements.disabledReason) {
+      missingItems.push(`Resolve Stripe account restriction (${status.requirements.disabledReason})`);
+    }
+    for (const req of status.requirements.pastDue) {
+      missingItems.push(req.description);
+    }
+    for (const req of status.requirements.currentlyDue) {
+      if (!missingItems.includes(req.description)) {
+        missingItems.push(req.description);
+      }
+    }
+    if (!status.transferBalance.enabled && missingItems.length === 0) {
+      missingItems.push(
+        status.transferBalance.message ||
+          'Ensure your Stripe Express account transfers capability is active'
+      );
+    }
+  }
+
+  const explanation =
+    missingItems.length > 0
+      ? `Cannot publish paid event until Stripe onboarding is complete. What you need to complete: ${missingItems.join('; ')}. You can still save this event as a draft or publish free events without Stripe onboarding.`
+      : 'Cannot publish paid event: A verified Stripe Connect Express account eligible to receive transfers is required.';
+
+  throw new BadRequestError(explanation, 'STRIPE_ONBOARDING_INCOMPLETE');
+}

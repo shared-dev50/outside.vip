@@ -3,6 +3,8 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../lib/api';
 import { useAuth } from '../context/AuthContext';
+import { EmailVerificationGate } from '../components/auth/EmailVerificationGate';
+import { AuthFormCard } from '../components/auth/AuthFormCard';
 import {
   EventCategory,
   TicketTierStatus,
@@ -142,7 +144,7 @@ export const CreateEventPage: React.FC = () => {
   const isEditing = Boolean(id);
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const { user, quickLoginAs } = useAuth();
+  const { user } = useAuth();
 
   const [currentStep, setCurrentStep] = useState<WizardStep>(1);
 
@@ -1285,22 +1287,22 @@ export const CreateEventPage: React.FC = () => {
     },
   });
 
-  if (!user || (user.role !== 'ORGANIZER' && user.role !== 'ADMIN')) {
+  if (!user) {
     return (
       <div className="min-h-screen bg-[#FAF8F5] text-stone-900 flex items-center justify-center p-4">
-        <div className="max-w-md w-full bg-white border border-stone-200 rounded-xl p-8 space-y-4 text-center shadow-xs">
-          <Lock className="w-10 h-10 text-stone-700 mx-auto" />
-          <h2 className="font-display font-black text-xl text-stone-900 uppercase tracking-tight">Organizer Access Required</h2>
-          <p className="text-xs text-stone-500 font-sans">
-            Sign in as an event organizer to create, configure, and publish experiences.
-          </p>
-          <button
-            onClick={() => quickLoginAs('organizer')}
-            className="w-full py-2.5 rounded-lg bg-stone-900 hover:bg-black text-white font-semibold text-xs font-mono uppercase tracking-wider transition-colors shadow-2xs"
-          >
-            Sign in as Sol Collective (Demo)
-          </button>
-        </div>
+        <AuthFormCard
+          badgeText="Create Event"
+          loginTitle="Sign In Required"
+          loginSubtitle="Sign in and verify your email address to create, save drafts, and publish events on Outside.vip."
+        />
+      </div>
+    );
+  }
+
+  if (user.emailVerified === false) {
+    return (
+      <div className="min-h-screen bg-[#FAF8F5] text-stone-900">
+        <EmailVerificationGate title="Verify Your Email to Create an Event" />
       </div>
     );
   }

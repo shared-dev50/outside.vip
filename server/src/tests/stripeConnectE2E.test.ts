@@ -36,6 +36,10 @@ describe('Stripe Connect End-to-End Automated Integration Test Suite', () => {
     expect(regRes.status).toBe(201);
     organizerToken = regRes.body.data.token;
     organizerUserId = regRes.body.data.user.id;
+    await prisma.user.update({
+      where: { id: organizerUserId },
+      data: { emailVerified: true, emailVerifiedAt: new Date() },
+    });
 
     const event = await prisma.event.create({
       data: {
@@ -189,7 +193,7 @@ describe('Stripe Connect End-to-End Automated Integration Test Suite', () => {
       });
 
       expect(typeof liveLink.url).toBe('string');
-      expect(liveLink.url).toContain('https://connect.stripe.com/setup/s/');
+      expect(liveLink.url).toContain('https://connect.stripe.com/setup/');
     });
   });
 

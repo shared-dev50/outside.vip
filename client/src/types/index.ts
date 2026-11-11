@@ -75,6 +75,8 @@ export interface User {
   email: string;
   name: string;
   role: Role;
+  emailVerified?: boolean;
+  emailVerifiedAt?: string | null;
   avatarUrl?: string | null;
   organizer?: OrganizerProfile | null;
 }

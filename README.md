@@ -102,6 +102,14 @@ Example database URL:
 DATABASE_URL="postgresql://username:password@localhost:5432/outside_vip?schema=public"
 ```
 
+### Email Verification & Admin Provisioning Environment Variables (`server/.env`)
+
+- **Recommended Transactional Email Provider:** **Resend** (`https://resend.com`).
+  - `EMAIL_FROM="Outside.vip <no-reply@outside.vip>"` — Verified sender address on your domain.
+  - `RESEND_API_KEY="re_..."` — Production Resend API key used to dispatch 6-digit single-use OTP verification emails via `https://api.resend.com/emails`. When omitted in local development or tests, OTP emails are logged to the console and recorded in-memory without using personal email accounts.
+- **Administrator Allowlist:**
+  - `ADMIN_EMAILS="admin@outside.vip,admin2@outside.vip"` — Comma-separated allowlist of email addresses. Only accounts whose normalized email address matches this allowlist **and** has completed OTP email verification are provisioned with `ADMIN` privileges.
+
 Use your own credentials and keep `.env` files out of version control. Never commit API keys, database passwords, or webhook signing secrets.
 
 ### 4. Set up the database

@@ -22,6 +22,7 @@ import {
   adminWithdrawFundsSchema,
 } from './finance.schema.js';
 import { prisma } from '../../db/prisma.js';
+import { recordAdminAuditLog } from '../../lib/auditLogger.js';
 import {
   STRIPE_EXPRESS_SUPPORTED_COUNTRIES,
   DEFAULT_STRIPE_CONNECT_COUNTRY,
@@ -168,6 +169,19 @@ export async function handleAdminWithdrawal(
       notes: input.notes,
       initiatedByUserId: adminUserId,
       isAdmin: true,
+    });
+    await recordAdminAuditLog({
+      actorUserId: adminUserId,
+      actorEmail: req.user!.email,
+      action: 'ADMIN_WITHDRAWAL_INITIATED',
+      targetType: 'User',
+      targetId: input.organizerId,
+      metadata: {
+        amountInCents: input.amountInCents,
+        idempotencyKey: input.idempotencyKey,
+        notes: input.notes ?? null,
+      },
+      ipAddress: req.ip,
     });
     res.json({
       success: true,

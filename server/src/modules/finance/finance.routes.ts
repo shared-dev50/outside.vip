@@ -1,6 +1,5 @@
 import { Router } from 'express';
-import { Role } from '@prisma/client';
-import { requireAuth, requireRole } from '../../middleware/auth.js';
+import { requireAuth, requireVerifiedEmail, requireAdmin } from '../../middleware/auth.js';
 import {
   handleGetAccountStatus,
   handleCreateOnboardingLink,
@@ -19,9 +18,9 @@ import {
 
 export const financeRouter = Router();
 
-// Protect all finance endpoints with auth & organizer/admin role
+// Protect all finance endpoints with auth & verified email middleware
 financeRouter.use(requireAuth);
-financeRouter.use(requireRole(Role.ORGANIZER, Role.ADMIN));
+financeRouter.use(requireVerifiedEmail);
 
 financeRouter.get('/countries', handleGetSupportedCountries);
 financeRouter.get('/account', handleGetAccountStatus);
@@ -29,7 +28,7 @@ financeRouter.post('/onboarding-link', handleCreateOnboardingLink);
 financeRouter.post('/login-link', handleCreateLoginLink);
 financeRouter.get('/balance', handleGetBalance);
 financeRouter.post('/withdraw', handleExecuteWithdrawal);
-financeRouter.post('/admin/withdraw', requireRole(Role.ADMIN), handleAdminWithdrawal);
+financeRouter.post('/admin/withdraw', requireAdmin, handleAdminWithdrawal);
 financeRouter.get('/transfers', handleGetTransfers);
 financeRouter.get('/ledger', handleGetLedger);
 financeRouter.get('/payouts', handleGetPayouts);
