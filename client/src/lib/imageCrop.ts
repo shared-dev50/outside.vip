@@ -22,7 +22,7 @@ export const CROP_ASPECT_RATIOS: AspectRatioOption[] = [
 ];
 
 export const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
-export const MAX_RAW_FILE_SIZE = 15 * 1024 * 1024; // 15 MB max selection for client cropping
+export const MAX_RAW_FILE_SIZE = 15 * 1024 * 1024;
 
 export interface CropState {
   zoom: number; // 1.0 to 3.0+
@@ -293,7 +293,6 @@ export async function createCroppedImageFile(params: {
         if (b && b.size > 0) {
           resolve(b);
         } else {
-          // Fallback to JPEG
           canvas.toBlob(
             (jpegBlob) => {
               if (jpegBlob && jpegBlob.size > 0) {

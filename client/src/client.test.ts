@@ -535,7 +535,6 @@ describe('Outside.vip Client Library', () => {
       const clientConfig = JSON.parse(fs.readFileSync(clientConfigPath, 'utf8'));
       const rewrites = clientConfig.rewrites as Array<{ source: string; destination: string }>;
 
-      // Helper function simulating Vercel rewrite matching
       function resolveRewrite(requestPath: string): { destination: string; type: 'api' | 'spa' } {
         for (const rule of rewrites) {
           if (rule.source === '/api/:path*' && requestPath.startsWith('/api')) {
@@ -548,25 +547,21 @@ describe('Outside.vip Client Library', () => {
         return { destination: requestPath, type: 'spa' };
       }
 
-      // Deep route: /organizer/finance
       expect(resolveRewrite('/organizer/finance')).toEqual({
         destination: '/index.html',
         type: 'spa',
       });
 
-      // Stripe Return URL: /organizer/finance?stripe_return=true
       expect(resolveRewrite('/organizer/finance?stripe_return=true')).toEqual({
         destination: '/index.html',
         type: 'spa',
       });
 
-      // Stripe Refresh URL: /organizer/finance?stripe_refresh=true
       expect(resolveRewrite('/organizer/finance?stripe_refresh=true')).toEqual({
         destination: '/index.html',
         type: 'spa',
       });
 
-      // Other React Router SPA routes
       expect(resolveRewrite('/events')).toEqual({
         destination: '/index.html',
         type: 'spa',
@@ -584,7 +579,6 @@ describe('Outside.vip Client Library', () => {
         type: 'spa',
       });
 
-      // API requests proxy to Render
       expect(resolveRewrite('/api/organizer/finance/account')).toEqual({
         destination: 'https://outside-vip.onrender.com/api/:path*',
         type: 'api',

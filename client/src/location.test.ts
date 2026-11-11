@@ -5,7 +5,6 @@ import { api } from './lib/api';
 describe('Event Location Autocomplete & Selection Logic', () => {
   describe('1. Location Clearing & State Isolation (Requirement 2)', () => {
     it('does not destroy the selected location when the organizer types a new query', () => {
-      // Current selected place
       const savedLocation: LocationData = {
         venueName: 'The Alchemist Bar',
         venueAddress: 'Parklands Road, Nairobi, Kenya',
@@ -16,7 +15,6 @@ describe('Event Location Autocomplete & Selection Logic', () => {
         placeId: 'ChIJg_k_places_test_123',
       };
 
-      // Organizer begins typing a search query
       const searchQuery = 'Muze Club';
       expect(searchQuery.length).toBeGreaterThan(0);
       // In LocationAutocompleteInput, searchQuery is isolated local state and does NOT mutate savedLocation
@@ -25,7 +23,6 @@ describe('Event Location Autocomplete & Selection Logic', () => {
       expect(savedLocation.longitude).toBe(36.8045);
       expect(savedLocation.venueName).toBe('The Alchemist Bar');
 
-      // Only when a suggestion is chosen is the location updated
       const newSelectedSuggestion = {
         venueName: 'Muze Club',
         venueAddress: 'Mpaka Road, Westlands, Nairobi',
@@ -68,7 +65,6 @@ describe('Event Location Autocomplete & Selection Logic', () => {
 
   describe('2. Manual Entry Fallback & Stale Data Clearing (Requirement 3)', () => {
     it('sets placeId, latitude, and longitude to null in manual mode with no stale coordinates', () => {
-      // Prior Google Places selection
       const previousGoogleSelection: LocationData = {
         venueName: 'The Baobab Amphitheatre',
         venueAddress: 'Bofa Beach Road, Kilifi',
@@ -79,7 +75,6 @@ describe('Event Location Autocomplete & Selection Logic', () => {
         placeId: 'ChIJ_kilifi_baobab',
       };
 
-      // Switching to manual mode or updating in manual mode
       const manualLocation: LocationData = {
         venueName: previousGoogleSelection.venueName,
         venueAddress: previousGoogleSelection.venueAddress,
@@ -99,7 +94,6 @@ describe('Event Location Autocomplete & Selection Logic', () => {
 
   describe('3. Backward Compatibility for Legacy Events (Requirement 1)', () => {
     it('initializes gracefully for legacy events without placeId or coordinates', () => {
-      // Existing legacy event record from database
       const legacyEvent: LocationData = {
         venueName: 'Carnivore Grounds',
         venueAddress: 'Langata Road, Nairobi',
@@ -282,27 +276,21 @@ describe('Event Location Autocomplete & Selection Logic', () => {
     it('infers timezone reliably from venue coordinates or state', async () => {
       const { inferTimezoneFromLocation } = await import('./lib/timezone');
 
-      // New York / Brooklyn venue
       expect(inferTimezoneFromLocation({ stateCode: 'NY' })).toBe('America/New_York');
       expect(inferTimezoneFromLocation({ latitude: 40.7128, longitude: -74.006 })).toBe('America/New_York');
 
-      // Los Angeles / California venue
       expect(inferTimezoneFromLocation({ stateCode: 'CA' })).toBe('America/Los_Angeles');
       expect(inferTimezoneFromLocation({ latitude: 34.0522, longitude: -118.2437 })).toBe('America/Los_Angeles');
 
-      // Chicago / Illinois venue
       expect(inferTimezoneFromLocation({ stateCode: 'IL' })).toBe('America/Chicago');
       expect(inferTimezoneFromLocation({ latitude: 41.8781, longitude: -87.6298 })).toBe('America/Chicago');
 
-      // Denver / Colorado venue
       expect(inferTimezoneFromLocation({ stateCode: 'CO' })).toBe('America/Denver');
       expect(inferTimezoneFromLocation({ latitude: 39.7392, longitude: -104.9903 })).toBe('America/Denver');
 
-      // Honolulu / Hawaii venue
       expect(inferTimezoneFromLocation({ stateCode: 'HI' })).toBe('Pacific/Honolulu');
       expect(inferTimezoneFromLocation({ latitude: 21.3069, longitude: -157.8583 })).toBe('Pacific/Honolulu');
 
-      // Nairobi venue
       expect(inferTimezoneFromLocation({ country: 'Kenya' })).toBe('Africa/Nairobi');
       expect(inferTimezoneFromLocation({ countryCode: 'KE' })).toBe('Africa/Nairobi');
       expect(inferTimezoneFromLocation({ latitude: -1.2921, longitude: 36.8219 })).toBe('Africa/Nairobi');

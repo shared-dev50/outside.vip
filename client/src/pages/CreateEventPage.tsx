@@ -161,7 +161,6 @@ export const CreateEventPage: React.FC = () => {
   const [galleryUploadError, setGalleryUploadError] = useState<string | null>(null);
   const [galleryUrlInput, setGalleryUrlInput] = useState('');
 
-  // Cover Artwork Crop & Upload State
   const [coverCropModalOpen, setCoverCropModalOpen] = useState(false);
   const [selectedCoverRawFile, setSelectedCoverRawFile] = useState<File | null>(null);
   const [coverCroppedFile, setCoverCroppedFile] = useState<File | null>(null);
@@ -174,7 +173,6 @@ export const CreateEventPage: React.FC = () => {
   });
   const coverAbortControllerRef = useRef<AbortController | null>(null);
 
-  // Gallery Photo Crop & Upload State
   const [galleryCropModalOpen, setGalleryCropModalOpen] = useState(false);
   const [selectedGalleryRawFile, setSelectedGalleryRawFile] = useState<File | null>(null);
   const [galleryCroppedFile, setGalleryCroppedFile] = useState<File | null>(null);
@@ -491,7 +489,6 @@ export const CreateEventPage: React.FC = () => {
     setHasUnsavedChanges(true);
   };
 
-  // --- Cover Flyer Crop & Upload ---
   const handleCoverFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -608,7 +605,6 @@ export const CreateEventPage: React.FC = () => {
     setIsUploadingImage(false);
   };
 
-  // --- Gallery Crop & Upload ---
   const handleGalleryFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -1805,7 +1801,6 @@ export const CreateEventPage: React.FC = () => {
                             />
                           </label>
 
-                          {/* Cover Flyer Upload Progress Card */}
                           {coverUploadProgress.state !== 'idle' && (
                             <div className="mt-2.5">
                               <UploadProgressCard
@@ -1952,7 +1947,6 @@ export const CreateEventPage: React.FC = () => {
                           />
                         </label>
 
-                        {/* Gallery Upload Progress Card */}
                         {galleryUploadProgress.state !== 'idle' && (
                           <div className="mt-2.5">
                             <UploadProgressCard
@@ -2712,7 +2706,6 @@ export const CreateEventPage: React.FC = () => {
                             </button>
                           </div>
 
-                          {/* Limit Ticket Sales Period */}
                           <div className="p-3.5 rounded-lg bg-white border border-stone-200 space-y-3">
                             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                               <div className="space-y-0.5 max-w-md">
@@ -2792,7 +2785,6 @@ export const CreateEventPage: React.FC = () => {
                             )}
                           </div>
 
-                          {/* Limit Ticket Validity */}
                           <div className="p-3.5 rounded-lg bg-white border border-stone-200 space-y-3">
                             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                               <div className="space-y-0.5 max-w-md">
@@ -3657,7 +3649,6 @@ export const CreateEventPage: React.FC = () => {
         </div>
       )}
 
-      {/* Cover Artwork Image Crop Modal */}
       <ImageCropModal
         isOpen={coverCropModalOpen}
         file={selectedCoverRawFile}
@@ -3667,7 +3658,6 @@ export const CreateEventPage: React.FC = () => {
         onConfirm={handleConfirmCoverCrop}
       />
 
-      {/* Gallery Photo Image Crop Modal */}
       <ImageCropModal
         isOpen={galleryCropModalOpen}
         file={selectedGalleryRawFile}

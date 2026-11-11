@@ -8,16 +8,13 @@ import { calculateTierEarnings, calculateCombinedEarnings } from './lib/fees';
 describe('Numeric & Currency Input Editing (Outside.vip)', () => {
   describe('1. Clearing a Value (Smart Clearing & Placeholder Preservation)', () => {
     it('clears all digits to an empty string without reverting to 0 or 1', () => {
-      // User had a VIP ticket with price $75
       const initial = '75';
       expect(parseNumericString(initial).numericValue).toBe(75);
 
-      // User presses backspace to delete '5' -> '7'
       const step1 = parseNumericString('7');
       expect(step1.cleanString).toBe('7');
       expect(step1.numericValue).toBe(7);
 
-      // User presses backspace to delete '7' -> ''
       const step2 = parseNumericString('');
       expect(step2.cleanString).toBe('');
       expect(step2.numericValue).toBe('');
@@ -27,7 +24,6 @@ describe('Numeric & Currency Input Editing (Outside.vip)', () => {
     });
 
     it('clears an existing 0 without getting stuck', () => {
-      // If user had free ticket $0, backspacing should leave empty string
       const res = parseNumericString('');
       expect(res.cleanString).toBe('');
       expect(res.numericValue).toBe('');
@@ -41,12 +37,10 @@ describe('Numeric & Currency Input Editing (Outside.vip)', () => {
 
   describe('2. Typing Replacement Without Preceding Zero Selection', () => {
     it('allows typing new digits directly into empty field', () => {
-      // User types '5' into empty field
       const res1 = parseNumericString('5');
       expect(res1.cleanString).toBe('5');
       expect(res1.numericValue).toBe(5);
 
-      // User types '0' to make '50'
       const res2 = parseNumericString('50');
       expect(res2.cleanString).toBe('50');
       expect(res2.numericValue).toBe(50);
@@ -61,7 +55,6 @@ describe('Numeric & Currency Input Editing (Outside.vip)', () => {
 
   describe('3. Decimal Entry (Ticket Prices & Currency Amounts)', () => {
     it('preserves trailing period while typing without swallowing it or forcing early truncation', () => {
-      // User types '12.'
       const res = parseNumericString('12.', { allowDecimals: true, decimalPlaces: 2 });
       expect(res.cleanString).toBe('12.');
       expect(res.numericValue).toBe(12);

@@ -111,7 +111,6 @@ export const ImageCropModal: React.FC<ImageCropModalProps> = ({
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isOpen, onCancel]);
 
-  // Canvas drawing loop
   useEffect(() => {
     if (!isOpen || !imageLoaded || !imageElementRef.current || !canvasRef.current || !containerRef.current) {
       return;
@@ -169,13 +168,9 @@ export const ImageCropModal: React.FC<ImageCropModalProps> = ({
 
     // 3. Draw dark vignette outside the crop frame
     ctx.fillStyle = 'rgba(0, 0, 0, 0.72)';
-    // Top
     ctx.fillRect(0, 0, viewW, frameTop);
-    // Bottom
     ctx.fillRect(0, frameTop + bounds.frameHeight, viewW, viewH - (frameTop + bounds.frameHeight));
-    // Left
     ctx.fillRect(0, frameTop, frameLeft, bounds.frameHeight);
-    // Right
     ctx.fillRect(
       frameLeft + bounds.frameWidth,
       frameTop,
@@ -186,13 +181,11 @@ export const ImageCropModal: React.FC<ImageCropModalProps> = ({
     // 4. Draw rule of thirds grid inside crop frame
     ctx.strokeStyle = 'rgba(255, 255, 255, 0.22)';
     ctx.lineWidth = 1;
-    // Horizontal grid
     ctx.beginPath();
     ctx.moveTo(frameLeft, frameTop + bounds.frameHeight / 3);
     ctx.lineTo(frameLeft + bounds.frameWidth, frameTop + bounds.frameHeight / 3);
     ctx.moveTo(frameLeft, frameTop + (bounds.frameHeight * 2) / 3);
     ctx.lineTo(frameLeft + bounds.frameWidth, frameTop + (bounds.frameHeight * 2) / 3);
-    // Vertical grid
     ctx.moveTo(frameLeft + bounds.frameWidth / 3, frameTop);
     ctx.lineTo(frameLeft + bounds.frameWidth / 3, frameTop + bounds.frameHeight);
     ctx.moveTo(frameLeft + (bounds.frameWidth * 2) / 3, frameTop);
@@ -209,28 +202,24 @@ export const ImageCropModal: React.FC<ImageCropModalProps> = ({
     ctx.strokeStyle = '#D2FF00'; // Outside.vip signature electric volt accent
     ctx.lineWidth = 3;
 
-    // Top-Left
     ctx.beginPath();
     ctx.moveTo(frameLeft - 1, frameTop + cornerSize);
     ctx.lineTo(frameLeft - 1, frameTop - 1);
     ctx.lineTo(frameLeft + cornerSize, frameTop - 1);
     ctx.stroke();
 
-    // Top-Right
     ctx.beginPath();
     ctx.moveTo(frameLeft + bounds.frameWidth - cornerSize, frameTop - 1);
     ctx.lineTo(frameLeft + bounds.frameWidth + 1, frameTop - 1);
     ctx.lineTo(frameLeft + bounds.frameWidth + 1, frameTop + cornerSize);
     ctx.stroke();
 
-    // Bottom-Left
     ctx.beginPath();
     ctx.moveTo(frameLeft - 1, frameTop + bounds.frameHeight - cornerSize);
     ctx.lineTo(frameLeft - 1, frameTop + bounds.frameHeight + 1);
     ctx.lineTo(frameLeft + cornerSize, frameTop + bounds.frameHeight + 1);
     ctx.stroke();
 
-    // Bottom-Right
     ctx.beginPath();
     ctx.moveTo(frameLeft + bounds.frameWidth - cornerSize, frameTop + bounds.frameHeight + 1);
     ctx.lineTo(frameLeft + bounds.frameWidth + 1, frameTop + bounds.frameHeight + 1);
@@ -262,7 +251,6 @@ export const ImageCropModal: React.FC<ImageCropModalProps> = ({
     }
   }, [isOpen, imageLoaded, naturalWidth, naturalHeight, aspectRatio, zoom, pan, mode]);
 
-  // Mouse drag handlers
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
     setIsDragging(true);
     setDragStart({ x: e.clientX - pan.x, y: e.clientY - pan.y });
@@ -280,14 +268,12 @@ export const ImageCropModal: React.FC<ImageCropModalProps> = ({
     setIsDragging(false);
   };
 
-  // Wheel zoom handler
   const handleWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
     e.preventDefault();
     const delta = e.deltaY < 0 ? 0.08 : -0.08;
     setZoom((prev) => Math.max(1, Math.min(3, +(prev + delta).toFixed(2))));
   };
 
-  // Touch handlers
   const handleTouchStart = (e: React.TouchEvent<HTMLCanvasElement>) => {
     if (e.touches.length === 1) {
       setIsDragging(true);
@@ -379,7 +365,6 @@ export const ImageCropModal: React.FC<ImageCropModalProps> = ({
   const modalTitle =
     title || (mode === 'cover' ? 'Crop & Frame Cover Artwork' : 'Crop Gallery Photo');
 
-  // Preview dimensions helper
   const previewRatio = mode === 'cover' ? 1.6 : aspectRatio === 'free' ? (naturalWidth / naturalHeight || 1.33) : (aspectRatio === '16:9' ? 16/9 : aspectRatio === '1:1' ? 1 : 4/3);
   const previewBoxW = 120;
   const previewBoxH = Math.round(previewBoxW / previewRatio);
@@ -391,7 +376,6 @@ export const ImageCropModal: React.FC<ImageCropModalProps> = ({
       aria-modal="true"
     >
       <div className="relative w-full max-w-3xl rounded-2xl bg-stone-900 border border-stone-800 text-stone-100 shadow-2xl flex flex-col max-h-[92vh] overflow-hidden">
-        {/* Modal Header */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-stone-800 bg-stone-950/40">
           <div className="flex items-center gap-3">
             <div className="w-8 h-8 rounded-lg bg-stone-800 border border-stone-700 flex items-center justify-center text-brand-neon">
@@ -425,9 +409,7 @@ export const ImageCropModal: React.FC<ImageCropModalProps> = ({
           </button>
         </div>
 
-        {/* Viewport & Controls */}
         <div className="flex-1 flex flex-col p-4 sm:p-5 gap-4 overflow-y-auto">
-          {/* Canvas Viewport */}
           <div
             ref={containerRef}
             className="relative w-full h-[320px] sm:h-[380px] rounded-xl overflow-hidden bg-stone-950 border border-stone-800 flex items-center justify-center select-none shadow-inner"
@@ -454,7 +436,6 @@ export const ImageCropModal: React.FC<ImageCropModalProps> = ({
               />
             )}
 
-            {/* Viewport Overlay Controls */}
             <div className="absolute bottom-3 left-3 px-2.5 py-1 rounded-md bg-black/75 backdrop-blur-md text-[11px] font-mono text-stone-300 border border-white/10 flex items-center gap-2 pointer-events-none">
               <span>{naturalWidth} × {naturalHeight} px</span>
               <span className="text-stone-600">•</span>
@@ -472,9 +453,7 @@ export const ImageCropModal: React.FC<ImageCropModalProps> = ({
             </button>
           </div>
 
-          {/* Configuration Toolbar */}
           <div className="grid grid-cols-1 md:grid-cols-12 gap-3.5 items-center bg-stone-950/60 p-3.5 rounded-xl border border-stone-800/80">
-            {/* Left: Aspect Ratio Controls */}
             <div className="md:col-span-5 flex flex-col gap-1.5">
               <span className="text-[11px] font-mono uppercase tracking-wider text-stone-400 font-bold">
                 {mode === 'cover' ? 'Aspect Ratio (Fixed 16:10)' : 'Aspect Ratio Preset'}
@@ -508,7 +487,6 @@ export const ImageCropModal: React.FC<ImageCropModalProps> = ({
               )}
             </div>
 
-            {/* Middle: Zoom Controls */}
             <div className="md:col-span-4 flex flex-col gap-1.5">
               <div className="flex items-center justify-between text-[11px] font-mono text-stone-400">
                 <span className="uppercase tracking-wider font-bold">Zoom Level</span>
@@ -543,7 +521,6 @@ export const ImageCropModal: React.FC<ImageCropModalProps> = ({
               </div>
             </div>
 
-            {/* Right: Live Preview Box */}
             <div className="md:col-span-3 flex items-center gap-2.5 pl-0 md:pl-2 border-t md:border-t-0 md:border-l border-stone-800/80 pt-2.5 md:pt-0">
               <div
                 style={{ width: previewBoxW, height: previewBoxH }}
@@ -567,7 +544,6 @@ export const ImageCropModal: React.FC<ImageCropModalProps> = ({
           </div>
         </div>
 
-        {/* Modal Footer */}
         <div className="px-5 py-3.5 border-t border-stone-800 bg-stone-950/60 flex flex-wrap items-center justify-between gap-3">
           <p className="text-[11px] font-mono text-stone-500 hidden sm:block">
             Scroll or pinch to zoom • Drag to center framing

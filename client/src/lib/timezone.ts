@@ -155,7 +155,6 @@ export function inferTimezoneFromLocation(params: {
 }): string | null {
   const { latitude, longitude, stateCode, country, countryCode } = params;
 
-  // 1. Check US state code if present
   if (stateCode) {
     const cleanState = stateCode.trim().toUpperCase();
     if (US_STATE_TO_TIMEZONE[cleanState]) {
@@ -163,7 +162,6 @@ export function inferTimezoneFromLocation(params: {
     }
   }
 
-  // 2. Check Kenya / East Africa
   const normalizedCountry = (country || '').toLowerCase().trim();
   const normalizedCountryCode = (countryCode || '').toUpperCase().trim();
   if (
@@ -175,7 +173,6 @@ export function inferTimezoneFromLocation(params: {
     return 'Africa/Nairobi';
   }
 
-  // 3. Check coordinates
   if (typeof latitude === 'number' && typeof longitude === 'number') {
     // East Africa box
     if (latitude >= -5 && latitude <= 5.5 && longitude >= 33 && longitude <= 42) {
@@ -200,24 +197,23 @@ export function inferTimezoneFromLocation(params: {
     // Continental US longitude bands
     if (latitude >= 24 && latitude <= 50) {
       if (longitude < -114.5) {
-        return 'America/Los_Angeles'; // Pacific
+        return 'America/Los_Angeles';
       }
       if (longitude >= -114.5 && longitude < -102) {
         if (latitude >= 31.3 && latitude <= 37.0 && longitude >= -114.8 && longitude <= -109.0) {
           return 'America/Phoenix';
         }
-        return 'America/Denver'; // Mountain
+        return 'America/Denver';
       }
       if (longitude >= -102 && longitude < -85.5) {
-        return 'America/Chicago'; // Central
+        return 'America/Chicago';
       }
       if (longitude >= -85.5 && longitude <= -66.5) {
-        return 'America/New_York'; // Eastern
+        return 'America/New_York';
       }
     }
   }
 
-  // 4. Default US
   if (
     normalizedCountryCode === 'US' ||
     normalizedCountry === 'united states' ||

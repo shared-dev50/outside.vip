@@ -52,13 +52,11 @@ export const LocationAutocompleteInput: React.FC<LocationAutocompleteInputProps>
   disabled = false,
 }) => {
   const componentInstanceId = useId();
-  // Mode: 'google' or 'manual'
   // If placeId exists, we are in Google mode with a selected location.
   // If no placeId but venueName exists, we preserve manual mode for backward compatibility.
   const isLegacyOrManual = !value.placeId && (Boolean(value.venueName) || Boolean(value.venueAddress));
   const [isManualMode, setIsManualMode] = useState<boolean>(isLegacyOrManual);
 
-  // Search input state
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [isSearching, setIsSearching] = useState<boolean>(false);
   const [isFetchingDetails, setIsFetchingDetails] = useState<boolean>(false);
@@ -79,7 +77,6 @@ export const LocationAutocompleteInput: React.FC<LocationAutocompleteInputProps>
   const [searchRegion, setSearchRegion] = useState<string>(propCountryCode || 'US');
   const [backendDefaultCountry, setBackendDefaultCountry] = useState<string>('US');
 
-  // Show active search box when user chooses to change location
   const [isChangingLocation, setIsChangingLocation] = useState<boolean>(false);
 
   // Session token for Google Places billing
@@ -121,7 +118,6 @@ export const LocationAutocompleteInput: React.FC<LocationAutocompleteInputProps>
     };
   }, [value.placeId, propCountryCode]);
 
-  // Click outside listener to close dropdown
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
       if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
@@ -179,7 +175,6 @@ export const LocationAutocompleteInput: React.FC<LocationAutocompleteInputProps>
     return () => clearTimeout(timer);
   }, [searchQuery, searchRegion, isManualMode]);
 
-  // Handle selecting a place suggestion
   const handleSelectSuggestion = async (placeId: string, mainText: string) => {
     setIsFetchingDetails(true);
     setErrorMessage(null);
@@ -218,7 +213,6 @@ export const LocationAutocompleteInput: React.FC<LocationAutocompleteInputProps>
     }
   };
 
-  // Explicitly clear selected location
   const handleClearLocation = () => {
     onChange({
       venueName: '',
@@ -235,7 +229,6 @@ export const LocationAutocompleteInput: React.FC<LocationAutocompleteInputProps>
     sessionTokenRef.current = null;
   };
 
-  // Switch to manual mode
   const handleSwitchToManual = () => {
     setIsManualMode(true);
     setIsChangingLocation(false);
@@ -252,7 +245,6 @@ export const LocationAutocompleteInput: React.FC<LocationAutocompleteInputProps>
     });
   };
 
-  // Switch to Google mode
   const handleSwitchToGoogle = () => {
     setIsManualMode(false);
     setErrorMessage(null);
@@ -270,7 +262,6 @@ export const LocationAutocompleteInput: React.FC<LocationAutocompleteInputProps>
     });
   };
 
-  // Manual mode input updates
   const handleManualChange = (field: keyof LocationData, val: any) => {
     onChange({
       ...value,
@@ -282,7 +273,6 @@ export const LocationAutocompleteInput: React.FC<LocationAutocompleteInputProps>
     });
   };
 
-  // Google Maps preview link
   const googleMapsUrl = value.placeId
     ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
       value.venueAddress || value.venueName
@@ -295,7 +285,6 @@ export const LocationAutocompleteInput: React.FC<LocationAutocompleteInputProps>
 
   return (
     <div ref={containerRef} className={`space-y-4 ${className}`}>
-      {/* Header bar with Mode Switcher */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 pb-1">
         <div>
           <div className="flex items-center gap-2">
@@ -320,7 +309,6 @@ export const LocationAutocompleteInput: React.FC<LocationAutocompleteInputProps>
           </p>
         </div>
 
-        {/* Mode Toggle Button */}
         {apiConfigured !== false && (
           <div className="flex items-center">
             {isManualMode ? (
@@ -347,7 +335,6 @@ export const LocationAutocompleteInput: React.FC<LocationAutocompleteInputProps>
         )}
       </div>
 
-      {/* Error Message */}
       {errorMessage && (
         <div className="flex items-center justify-between gap-2 p-3 bg-rose-50 border border-rose-200 rounded-lg text-xs text-rose-700">
           <div className="flex items-center gap-2">
@@ -364,9 +351,6 @@ export const LocationAutocompleteInput: React.FC<LocationAutocompleteInputProps>
         </div>
       )}
 
-      {/* ------------------------------------------------------------- */}
-      {/* 1. GOOGLE MODE (Selected Place Card) */}
-      {/* ------------------------------------------------------------- */}
       {!isManualMode && value.placeId && !isChangingLocation && (
         <div className="rounded-xl border border-emerald-200/80 bg-gradient-to-b from-emerald-50/40 to-white p-4 space-y-4 shadow-sm transition-all">
           <div className="flex items-start justify-between gap-3">
@@ -415,7 +399,6 @@ export const LocationAutocompleteInput: React.FC<LocationAutocompleteInputProps>
               </div>
             </div>
 
-            {/* Action buttons */}
             <div className="flex items-center gap-1.5 shrink-0">
               <button
                 type="button"
@@ -445,7 +428,6 @@ export const LocationAutocompleteInput: React.FC<LocationAutocompleteInputProps>
             </div>
           </div>
 
-          {/* Separate editable input for venueName once location is selected */}
           <div className="pt-3 border-t border-emerald-100/60">
             <label
               htmlFor={`venue-display-name-${componentInstanceId}`}
@@ -469,9 +451,6 @@ export const LocationAutocompleteInput: React.FC<LocationAutocompleteInputProps>
         </div>
       )}
 
-      {/* ------------------------------------------------------------- */}
-      {/* 2. GOOGLE MODE (Autocomplete Search Box) */}
-      {/* ------------------------------------------------------------- */}
       {!isManualMode && (!value.placeId || isChangingLocation) && (
         <div className="space-y-3 relative">
           {isChangingLocation && value.placeId && (
@@ -499,7 +478,6 @@ export const LocationAutocompleteInput: React.FC<LocationAutocompleteInputProps>
                 Search Venue or Destination <span className="text-rose-600">*</span>
               </label>
 
-              {/* Search Region Switcher (US Default vs Worldwide) */}
               <div className="flex items-center gap-1.5 text-xs font-mono">
                 <button
                   type="button"
@@ -571,7 +549,6 @@ export const LocationAutocompleteInput: React.FC<LocationAutocompleteInputProps>
               </div>
             </div>
 
-            {/* Suggestions Dropdown */}
             {isDropdownOpen && (
               <div className="absolute z-40 left-0 right-0 mt-1.5 bg-white border border-stone-200 rounded-xl shadow-xl overflow-hidden max-h-72 overflow-y-auto divide-y divide-stone-100">
                 {suggestions.length > 0 ? (
@@ -646,9 +623,6 @@ export const LocationAutocompleteInput: React.FC<LocationAutocompleteInputProps>
         </div>
       )}
 
-      {/* ------------------------------------------------------------- */}
-      {/* 3. MANUAL ENTRY MODE (Redesigned Clean US-First Form) */}
-      {/* ------------------------------------------------------------- */}
       {isManualMode && (
         <div className="space-y-4 p-4 rounded-xl border border-stone-200 bg-[#FAF8F5]/60">
           <div className="flex items-center justify-between pb-2 border-b border-stone-200">
