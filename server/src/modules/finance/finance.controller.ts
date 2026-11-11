@@ -22,6 +22,7 @@ import {
   adminWithdrawFundsSchema,
 } from './finance.schema.js';
 import { prisma } from '../../db/prisma.js';
+import { recordAdminAuditLog } from '../../lib/auditLogger.js';
 import {
   STRIPE_EXPRESS_SUPPORTED_COUNTRIES,
   DEFAULT_STRIPE_CONNECT_COUNTRY,
@@ -127,7 +128,6 @@ export async function handleGetBalance(
   }
 }
 
-// Manual withdrawal to Stripe Express account
 export async function handleExecuteWithdrawal(
   req: Request,
   res: Response,
@@ -152,7 +152,6 @@ export async function handleExecuteWithdrawal(
   }
 }
 
-// Admin-initiated withdrawal on behalf of an organizer
 export async function handleAdminWithdrawal(
   req: Request,
   res: Response,
@@ -169,6 +168,19 @@ export async function handleAdminWithdrawal(
       initiatedByUserId: adminUserId,
       isAdmin: true,
     });
+    await recordAdminAuditLog({
+      actorUserId: adminUserId,
+      actorEmail: req.user!.email,
+      action: 'ADMIN_WITHDRAWAL_INITIATED',
+      targetType: 'User',
+      targetId: input.organizerId,
+      metadata: {
+        amountInCents: input.amountInCents,
+        idempotencyKey: input.idempotencyKey,
+        notes: input.notes ?? null,
+      },
+      ipAddress: req.ip,
+    });
     res.json({
       success: true,
       data: result,
@@ -178,7 +190,6 @@ export async function handleAdminWithdrawal(
   }
 }
 
-// Platform-to-Express transfer history
 export async function handleGetTransfers(
   req: Request,
   res: Response,
@@ -198,7 +209,6 @@ export async function handleGetTransfers(
   }
 }
 
-// Organizer financial ledger audit trail
 export async function handleGetLedger(
   req: Request,
   res: Response,
@@ -219,7 +229,6 @@ export async function handleGetLedger(
   }
 }
 
-// Express-to-bank payout history
 export async function handleGetPayouts(
   req: Request,
   res: Response,
@@ -242,7 +251,6 @@ export async function handleGetPayouts(
       return;
     }
 
-    // Call Stripe API to retrieve payouts
     const stripePayoutsRes = await getConnectedAccountPayouts(userId, limit);
 
     if (stripePayoutsRes.payouts.length > 0) {

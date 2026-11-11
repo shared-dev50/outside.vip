@@ -78,9 +78,6 @@ describe('Today Event Filter Timezone & Midnight Regression Suite', () => {
     }
   }, 30000);
 
-  // --------------------------------------------------------------------------
-  // Test 1: Event shortly after midnight in Nairobi (00:03 AM on Nov 7)
-  // --------------------------------------------------------------------------
   it('1. Event shortly after midnight in Nairobi does not appear on Nov 6, but appears on Nov 7', async () => {
     // 00:03 AM to 10:03 AM on Nov 7 in Nairobi (UTC+3) => 21:03 on Nov 6 to 07:03 on Nov 7 UTC
     const event = await createTestEvent({
@@ -123,9 +120,6 @@ describe('Today Event Filter Timezone & Midnight Regression Suite', () => {
     expect(inNov8).toBe(false);
   });
 
-  // --------------------------------------------------------------------------
-  // Test 2: Event shortly before midnight in Nairobi (21:00 to 23:55 on Nov 6)
-  // --------------------------------------------------------------------------
   it('2. Event shortly before midnight in Nairobi appears on Nov 6, but does not appear on Nov 7', async () => {
     // 21:00 to 23:55 on Nov 6 in Nairobi => 18:00 to 20:55 UTC on Nov 6
     const event = await createTestEvent({
@@ -152,9 +146,6 @@ describe('Today Event Filter Timezone & Midnight Regression Suite', () => {
     expect(inNov7).toBe(false);
   });
 
-  // --------------------------------------------------------------------------
-  // Test 3: Events spanning midnight in Nairobi (22:00 Nov 6 to 04:00 Nov 7)
-  // --------------------------------------------------------------------------
   it('3. Event spanning midnight appears under both overlapping local calendar days', async () => {
     // 22:00 Nov 6 to 04:00 Nov 7 in Nairobi => 19:00 Nov 6 to 01:00 Nov 7 UTC
     const event = await createTestEvent({
@@ -193,9 +184,6 @@ describe('Today Event Filter Timezone & Midnight Regression Suite', () => {
     expect(resSunday.body.data.events.some((e: any) => e.id === event.id)).toBe(false);
   });
 
-  // --------------------------------------------------------------------------
-  // Test 4: Events in DST-observing timezone (America/New_York)
-  // --------------------------------------------------------------------------
   it('4. Correctly handles DST transition in America/New_York on Nov 1, 2026', async () => {
     // Nov 1, 2026 is US fall-back DST transition (2:00 AM EDT -> 1:00 AM EST)
     // Event: 01:30 EDT to 04:30 EST on Nov 1 => 05:30 UTC to 09:30 UTC
@@ -229,9 +217,6 @@ describe('Today Event Filter Timezone & Midnight Regression Suite', () => {
     expect(resNov2.body.data.events.some((e: any) => e.id === event.id)).toBe(false);
   });
 
-  // --------------------------------------------------------------------------
-  // Test 5: Events whose UTC date differs from local calendar date (America/Los_Angeles)
-  // --------------------------------------------------------------------------
   it('5. Event whose UTC date differs from local date classifies by authoritative local date', async () => {
     // Event is Friday Nov 6 from 19:00 to 23:00 PST in America/Los_Angeles (UTC-8)
     // In UTC, this is Saturday Nov 7 from 03:00 to 07:00 UTC!
@@ -258,9 +243,6 @@ describe('Today Event Filter Timezone & Midnight Regression Suite', () => {
     expect(resSaturdayLA.body.data.events.some((e: any) => e.id === event.id)).toBe(false);
   });
 
-  // --------------------------------------------------------------------------
-  // Test 6: Invalid timezone fallback to UTC
-  // --------------------------------------------------------------------------
   it('6. Event with invalid timezone safely falls back to UTC without throwing error', async () => {
     // Event with invalid timezone: starts Nov 10 at 12:00 UTC, ends Nov 10 at 16:00 UTC
     const event = await createTestEvent({

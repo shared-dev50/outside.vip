@@ -3,6 +3,8 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../lib/api';
 import { useAuth } from '../context/AuthContext';
+import { EmailVerificationGate } from '../components/auth/EmailVerificationGate';
+import { AuthFormCard } from '../components/auth/AuthFormCard';
 import {
   EventCategory,
   TicketTierStatus,
@@ -142,7 +144,7 @@ export const CreateEventPage: React.FC = () => {
   const isEditing = Boolean(id);
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const { user, quickLoginAs } = useAuth();
+  const { user } = useAuth();
 
   const [currentStep, setCurrentStep] = useState<WizardStep>(1);
 
@@ -159,7 +161,6 @@ export const CreateEventPage: React.FC = () => {
   const [galleryUploadError, setGalleryUploadError] = useState<string | null>(null);
   const [galleryUrlInput, setGalleryUrlInput] = useState('');
 
-  // Cover Artwork Crop & Upload State
   const [coverCropModalOpen, setCoverCropModalOpen] = useState(false);
   const [selectedCoverRawFile, setSelectedCoverRawFile] = useState<File | null>(null);
   const [coverCroppedFile, setCoverCroppedFile] = useState<File | null>(null);
@@ -172,7 +173,6 @@ export const CreateEventPage: React.FC = () => {
   });
   const coverAbortControllerRef = useRef<AbortController | null>(null);
 
-  // Gallery Photo Crop & Upload State
   const [galleryCropModalOpen, setGalleryCropModalOpen] = useState(false);
   const [selectedGalleryRawFile, setSelectedGalleryRawFile] = useState<File | null>(null);
   const [galleryCroppedFile, setGalleryCroppedFile] = useState<File | null>(null);
@@ -489,7 +489,6 @@ export const CreateEventPage: React.FC = () => {
     setHasUnsavedChanges(true);
   };
 
-  // --- Cover Flyer Crop & Upload ---
   const handleCoverFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -606,7 +605,6 @@ export const CreateEventPage: React.FC = () => {
     setIsUploadingImage(false);
   };
 
-  // --- Gallery Crop & Upload ---
   const handleGalleryFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -1285,22 +1283,22 @@ export const CreateEventPage: React.FC = () => {
     },
   });
 
-  if (!user || (user.role !== 'ORGANIZER' && user.role !== 'ADMIN')) {
+  if (!user) {
     return (
       <div className="min-h-screen bg-[#FAF8F5] text-stone-900 flex items-center justify-center p-4">
-        <div className="max-w-md w-full bg-white border border-stone-200 rounded-xl p-8 space-y-4 text-center shadow-xs">
-          <Lock className="w-10 h-10 text-stone-700 mx-auto" />
-          <h2 className="font-display font-black text-xl text-stone-900 uppercase tracking-tight">Organizer Access Required</h2>
-          <p className="text-xs text-stone-500 font-sans">
-            Sign in as an event organizer to create, configure, and publish experiences.
-          </p>
-          <button
-            onClick={() => quickLoginAs('organizer')}
-            className="w-full py-2.5 rounded-lg bg-stone-900 hover:bg-black text-white font-semibold text-xs font-mono uppercase tracking-wider transition-colors shadow-2xs"
-          >
-            Sign in as Sol Collective (Demo)
-          </button>
-        </div>
+        <AuthFormCard
+          badgeText="Create Event"
+          loginTitle="Sign In Required"
+          loginSubtitle="Sign in and verify your email address to create, save drafts, and publish events on Outside.vip."
+        />
+      </div>
+    );
+  }
+
+  if (user.emailVerified === false) {
+    return (
+      <div className="min-h-screen bg-[#FAF8F5] text-stone-900">
+        <EmailVerificationGate title="Verify Your Email to Create an Event" />
       </div>
     );
   }
@@ -1803,7 +1801,6 @@ export const CreateEventPage: React.FC = () => {
                             />
                           </label>
 
-                          {/* Cover Flyer Upload Progress Card */}
                           {coverUploadProgress.state !== 'idle' && (
                             <div className="mt-2.5">
                               <UploadProgressCard
@@ -1950,7 +1947,6 @@ export const CreateEventPage: React.FC = () => {
                           />
                         </label>
 
-                        {/* Gallery Upload Progress Card */}
                         {galleryUploadProgress.state !== 'idle' && (
                           <div className="mt-2.5">
                             <UploadProgressCard
@@ -2710,7 +2706,6 @@ export const CreateEventPage: React.FC = () => {
                             </button>
                           </div>
 
-                          {/* Limit Ticket Sales Period */}
                           <div className="p-3.5 rounded-lg bg-white border border-stone-200 space-y-3">
                             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                               <div className="space-y-0.5 max-w-md">
@@ -2790,7 +2785,6 @@ export const CreateEventPage: React.FC = () => {
                             )}
                           </div>
 
-                          {/* Limit Ticket Validity */}
                           <div className="p-3.5 rounded-lg bg-white border border-stone-200 space-y-3">
                             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                               <div className="space-y-0.5 max-w-md">
@@ -3655,7 +3649,6 @@ export const CreateEventPage: React.FC = () => {
         </div>
       )}
 
-      {/* Cover Artwork Image Crop Modal */}
       <ImageCropModal
         isOpen={coverCropModalOpen}
         file={selectedCoverRawFile}
@@ -3665,7 +3658,6 @@ export const CreateEventPage: React.FC = () => {
         onConfirm={handleConfirmCoverCrop}
       />
 
-      {/* Gallery Photo Image Crop Modal */}
       <ImageCropModal
         isOpen={galleryCropModalOpen}
         file={selectedGalleryRawFile}

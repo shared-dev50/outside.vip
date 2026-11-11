@@ -53,7 +53,6 @@ export function parseNumericString(
   // Remove commas, spaces, currency symbols if pasted
   let s = String(raw).replace(/[,\s$]/g, '');
 
-  // Handle negative sign
   let isNegative = false;
   if (allowNegative && s.startsWith('-')) {
     isNegative = true;
@@ -142,7 +141,6 @@ export const NumericInput = forwardRef<HTMLInputElement, NumericInputProps>(
 
     const [isFocused, setIsFocused] = useState(false);
 
-    // Initial string value based on prop
     const formatInitialValue = (val: number | string | null | undefined): string => {
       if (val === '' || val === null || val === undefined) return '';
       return String(val);
@@ -150,7 +148,6 @@ export const NumericInput = forwardRef<HTMLInputElement, NumericInputProps>(
 
     const [textValue, setTextValue] = useState<string>(() => formatInitialValue(value));
 
-    // Synchronize textValue when external prop changes
     useEffect(() => {
       if (!isFocused) {
         setTextValue(formatInitialValue(value));

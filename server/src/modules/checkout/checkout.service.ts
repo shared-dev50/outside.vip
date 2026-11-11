@@ -163,7 +163,6 @@ export async function createCheckoutSession(
     }
   }
 
-  // Validate waitlist offer token if provided
   let verifiedOffer: any = null;
   if (offerToken) {
     const tokenHash = hashOfferToken(offerToken);
@@ -210,7 +209,6 @@ export async function createCheckoutSession(
     }
   }
 
-  // Check idempotency if provided
   const finalIdempotencyKey = clientIdempotency || `idem_${nanoid(24)}`;
   const existingOrder = await prisma.order.findUnique({
     where: { idempotencyKey: finalIdempotencyKey },

@@ -98,7 +98,6 @@ export const ticketTierInputSchema = z
 
 export const payoutDetailsInputSchema = z
   .object({
-    // Organisation details
     orgType: z.enum(['Company', 'Partnership', 'NGO/Non-profit', 'Other'], {
       errorMap: () => ({ message: 'Please select a valid organisation type' }),
     }),
@@ -109,8 +108,6 @@ export const payoutDetailsInputSchema = z
     address: z.string().max(500).optional().nullable(),
     contactPersonName: z.string().min(2, "Authorised contact person's full name is required").max(150),
     contactEmail: z.string().email('Please enter a valid contact email').max(255),
-
-    // Payout bank details
     accountHolderName: z.string().min(2, 'Account holder name is required').max(150),
     bankName: z.string().min(2, 'Bank name is required').max(150),
     bankCountry: z.string().min(2, 'Bank country is required').max(100),
@@ -195,8 +192,6 @@ export const createEventSchema = z
     ticketTiers: z.array(ticketTierInputSchema).default([]),
     payoutDetails: payoutDetailsInputSchema.optional().nullable(),
     recurrence: recurrenceRuleInputSchema.optional().nullable(),
-
-    // New presentation & page settings
     youtubeVideoUrl: z
       .string()
       .trim()
@@ -257,8 +252,6 @@ export const updateEventSchema = z.object({
   payoutDetails: payoutDetailsInputSchema.optional().nullable(),
   recurrence: recurrenceRuleInputSchema.optional().nullable(),
   applyToFuture: z.boolean().optional().default(false),
-
-  // New presentation & page settings
   youtubeVideoUrl: z
     .string()
     .trim()
@@ -293,4 +286,20 @@ export const earningsPreviewInputSchema = z.object({
 });
 
 export type EarningsPreviewInput = z.infer<typeof earningsPreviewInputSchema>;
+
+export const organizerWorkspaceSchema = z.object({
+  displayName: z
+    .string()
+    .trim()
+    .min(2, 'Organizer or collective name must be at least 2 characters')
+    .max(150),
+  bio: z.string().trim().max(2000).optional().nullable(),
+  websiteUrl: z.string().trim().max(500).optional().nullable(),
+  instagramHandle: z.string().trim().max(100).optional().nullable(),
+  twitterHandle: z.string().trim().max(100).optional().nullable(),
+  logoUrl: z.string().trim().max(1000).optional().nullable(),
+});
+
+export type OrganizerWorkspaceInput = z.infer<typeof organizerWorkspaceSchema>;
+
 

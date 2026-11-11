@@ -14,10 +14,15 @@ describe('CORS Configuration and Middleware', () => {
       expect(normalizeOrigin('')).toBe('');
     });
 
-    it('identifies production, preview, and local origins as allowed', () => {
+    it('identifies production custom domain, www variant, Vercel, preview, and local origins as allowed', () => {
       const allowed = getAllAllowedOrigins();
 
-      // Production origin
+      // Custom domain (apex and www)
+      expect(isOriginAllowed('https://outside.vip', allowed)).toBe(true);
+      expect(isOriginAllowed('https://outside.vip/', allowed)).toBe(true);
+      expect(isOriginAllowed('https://www.outside.vip', allowed)).toBe(true);
+      expect(isOriginAllowed('https://www.outside.vip/', allowed)).toBe(true);
+      // Production Vercel origin
       expect(isOriginAllowed('https://outside-vip.vercel.app', allowed)).toBe(true);
       // Normalized trailing slash
       expect(isOriginAllowed('https://outside-vip.vercel.app/', allowed)).toBe(true);
@@ -26,6 +31,22 @@ describe('CORS Configuration and Middleware', () => {
       // Local dev
       expect(isOriginAllowed('http://localhost:5173', allowed)).toBe(true);
       expect(isOriginAllowed('http://127.0.0.1:5173', allowed)).toBe(true);
+    });
+
+    it('automatically pairs apex and www variants for custom domains configured in CLIENT_URL', () => {
+      const prevClientUrl = process.env.CLIENT_URL;
+      try {
+        process.env.CLIENT_URL = 'https://outside.vip';
+        const allowed = getAllAllowedOrigins();
+        expect(allowed.has('https://outside.vip')).toBe(true);
+        expect(allowed.has('https://www.outside.vip')).toBe(true);
+      } finally {
+        if (prevClientUrl === undefined) {
+          delete process.env.CLIENT_URL;
+        } else {
+          process.env.CLIENT_URL = prevClientUrl;
+        }
+      }
     });
 
     it('rejects unauthorized or malicious origins', () => {
@@ -39,9 +60,34 @@ describe('CORS Configuration and Middleware', () => {
   });
 
   describe('HTTP Endpoints & Preflight Requests', { timeout: 20000 }, () => {
+    const CUSTOM_DOMAIN_ORIGIN = 'https://outside.vip';
+    const CUSTOM_DOMAIN_WWW_ORIGIN = 'https://www.outside.vip';
     const PRODUCTION_ORIGIN = 'https://outside-vip.vercel.app';
     const LOCAL_ORIGIN = 'http://localhost:5173';
     const DISALLOWED_ORIGIN = 'https://malicious-site.com';
+
+    it('handles OPTIONS preflight and credentialed requests for custom domain https://outside.vip and https://www.outside.vip', async () => {
+      for (const origin of [CUSTOM_DOMAIN_ORIGIN, CUSTOM_DOMAIN_WWW_ORIGIN]) {
+        const preflightRes = await request(app)
+          .options('/api/events')
+          .set('Origin', origin)
+          .set('Access-Control-Request-Method', 'POST')
+          .set('Access-Control-Request-Headers', 'content-type,x-csrf-token');
+
+        expect(preflightRes.status).toBe(204);
+        expect(preflightRes.headers['access-control-allow-origin']).toBe(origin);
+        expect(preflightRes.headers['access-control-allow-credentials']).toBe('true');
+        expect(preflightRes.headers['access-control-allow-headers']).toContain('X-CSRF-Token');
+
+        const getRes = await request(app)
+          .get('/api/events')
+          .set('Origin', origin);
+
+        expect(getRes.status).toBe(200);
+        expect(getRes.headers['access-control-allow-origin']).toBe(origin);
+        expect(getRes.headers['access-control-allow-credentials']).toBe('true');
+      }
+    });
 
     it('handles OPTIONS preflight for production origin https://outside-vip.vercel.app', async () => {
       const res = await request(app)

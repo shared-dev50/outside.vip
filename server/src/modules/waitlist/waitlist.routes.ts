@@ -8,7 +8,6 @@ import {
 
 export const waitlistRouter = Router();
 
-// Public offer lookup & decline endpoints
 waitlistRouter.get('/offers/:token', handleLookupWaitlistOffer);
 waitlistRouter.post('/offers/:token/decline', handleDeclineWaitlistOffer);
 

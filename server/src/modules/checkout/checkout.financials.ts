@@ -42,10 +42,10 @@ export function calculateFinancialBreakdown(
   };
 }
 
-export const PLATFORM_FEE_PERCENT = 10; // 10%
-export const SERVICE_FEE_CENTS = 95; // $0.95 per ticket
-export const STRIPE_PERCENT = 0.029; // 2.9%
-export const STRIPE_FIXED_CENTS = 30; // $0.30 per transaction
+export const PLATFORM_FEE_PERCENT = 10;
+export const SERVICE_FEE_CENTS = 95;
+export const STRIPE_PERCENT = 0.029;
+export const STRIPE_FIXED_CENTS = 30;
 
 export interface TierFeeBreakdown {
   ticketPriceInCents: number;

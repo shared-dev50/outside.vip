@@ -1,7 +1,13 @@
 import fs from 'fs';
 import path from 'path';
 import { describe, it, expect, vi } from 'vitest';
-import { api, resolveApiBaseUrl, buildApiUrl } from './lib/api';
+import {
+  api,
+  resolveApiBaseUrl,
+  buildApiUrl,
+  getActiveCsrfToken,
+  setActiveCsrfToken,
+} from './lib/api';
 
 describe('Outside.vip Client Library', () => {
   it('should define public API service routes', () => {
@@ -13,7 +19,49 @@ describe('Outside.vip Client Library', () => {
     expect(api.auth).toBeDefined();
     expect(typeof api.auth.login).toBe('function');
     expect(typeof api.auth.register).toBe('function');
+    expect(typeof api.auth.logout).toBe('function');
+    expect(typeof api.auth.logoutAll).toBe('function');
+    expect(typeof api.auth.changePassword).toBe('function');
+    expect(typeof api.auth.csrf).toBe('function');
     expect(typeof api.auth.me).toBe('function');
+    expect(typeof api.auth.verifyEmail).toBe('function');
+    expect(typeof api.auth.resendVerification).toBe('function');
+    expect(typeof api.organizer.getWorkspace).toBe('function');
+    expect(typeof api.organizer.upsertWorkspace).toBe('function');
+  });
+
+  it('sends credentials: include and attaches X-CSRF-Token on state-changing requests without storing tokens in localStorage', async () => {
+    setActiveCsrfToken('csrf_test_token_256bit');
+    expect(getActiveCsrfToken()).toBe('csrf_test_token_256bit');
+
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementationOnce(() =>
+      Promise.resolve({
+        ok: true,
+        headers: { get: () => 'csrf_rotated_token_256bit' },
+        json: () =>
+          Promise.resolve({
+            success: true,
+            data: { message: 'Logged out' },
+          }),
+      } as any)
+    );
+
+    await api.auth.logout();
+
+    expect(fetchSpy).toHaveBeenCalledWith(
+      '/api/auth/logout',
+      expect.objectContaining({
+        method: 'POST',
+        credentials: 'include',
+        headers: expect.objectContaining({
+          'X-CSRF-Token': 'csrf_test_token_256bit',
+        }),
+      })
+    );
+    // Logout clears the in-memory CSRF token
+    expect(getActiveCsrfToken()).toBeNull();
+
+    fetchSpy.mockRestore();
   });
 
   it('api.events.list builds correct query string with filters and sorting', async () => {
@@ -383,28 +431,23 @@ describe('Outside.vip Client Library', () => {
   });
 
   describe('API base URL resolution and endpoint composition', () => {
-    it('resolves production Render backend URL ending in /api', () => {
-      expect(resolveApiBaseUrl('https://outside-vip.onrender.com/api')).toBe(
-        'https://outside-vip.onrender.com/api'
-      );
+    it('routes proxied Render and custom domain URLs to relative /api so requests use the Vercel proxy', () => {
+      expect(resolveApiBaseUrl('https://outside-vip.onrender.com/api')).toBe('/api');
+      expect(resolveApiBaseUrl('https://outside-vip.onrender.com/api/')).toBe('/api');
+      expect(resolveApiBaseUrl('https://outside-vip.onrender.com')).toBe('/api');
+      expect(resolveApiBaseUrl('https://outside-vip.onrender.com/')).toBe('/api');
+      expect(resolveApiBaseUrl('https://outside.vip')).toBe('/api');
+      expect(resolveApiBaseUrl('https://www.outside.vip')).toBe('/api');
+      expect(resolveApiBaseUrl('https://outside-vip.vercel.app')).toBe('/api');
     });
 
-    it('resolves production Render backend URL with trailing slash', () => {
-      expect(resolveApiBaseUrl('https://outside-vip.onrender.com/api/')).toBe(
-        'https://outside-vip.onrender.com/api'
-      );
+    it('appends /api if an explicit non-proxied base URL is provided without /api', () => {
+      expect(resolveApiBaseUrl('http://localhost:4000')).toBe('http://localhost:4000/api');
+      expect(resolveApiBaseUrl('http://localhost:4000/')).toBe('http://localhost:4000/api');
+      expect(resolveApiBaseUrl('http://localhost:4000/api')).toBe('http://localhost:4000/api');
     });
 
-    it('appends /api if base domain is provided without /api', () => {
-      expect(resolveApiBaseUrl('https://outside-vip.onrender.com')).toBe(
-        'https://outside-vip.onrender.com/api'
-      );
-      expect(resolveApiBaseUrl('https://outside-vip.onrender.com/')).toBe(
-        'https://outside-vip.onrender.com/api'
-      );
-    });
-
-    it('defaults to /api for relative path or undefined in local dev', () => {
+    it('defaults to /api for relative path or undefined in local dev and production', () => {
       expect(resolveApiBaseUrl('/api')).toBe('/api');
       expect(resolveApiBaseUrl('/api/')).toBe('/api');
       expect(resolveApiBaseUrl('')).toBe('/api');
@@ -412,32 +455,46 @@ describe('Outside.vip Client Library', () => {
       expect(resolveApiBaseUrl('   ')).toBe('/api');
     });
 
-    it('builds full production endpoint URLs matching Render without duplicating /api', () => {
-      const renderBase = 'https://outside-vip.onrender.com/api';
-      expect(buildApiUrl('/events', renderBase)).toBe(
-        'https://outside-vip.onrender.com/api/events'
-      );
-      expect(buildApiUrl('/api/events', renderBase)).toBe(
-        'https://outside-vip.onrender.com/api/events'
-      );
-      expect(buildApiUrl('events', renderBase)).toBe(
-        'https://outside-vip.onrender.com/api/events'
-      );
-      expect(buildApiUrl('/events?sortBy=date_asc&limit=12', renderBase)).toBe(
-        'https://outside-vip.onrender.com/api/events?sortBy=date_asc&limit=12'
-      );
-      expect(buildApiUrl('/orders/OUT-2026-99999/tickets/pdf?token=abc', renderBase)).toBe(
-        'https://outside-vip.onrender.com/api/orders/OUT-2026-99999/tickets/pdf?token=abc'
-      );
-    });
-
-    it('builds relative endpoint URLs for local development', () => {
+    it('builds relative endpoint URLs for the /api proxy without duplicating /api', () => {
       expect(buildApiUrl('/events', '/api')).toBe('/api/events');
       expect(buildApiUrl('/api/events', '/api')).toBe('/api/events');
       expect(buildApiUrl('events', '/api')).toBe('/api/events');
       expect(buildApiUrl('/events?sortBy=date_asc&limit=12', '/api')).toBe(
         '/api/events?sortBy=date_asc&limit=12'
       );
+      expect(buildApiUrl('/orders/OUT-2026-99999/tickets/pdf?token=abc', '/api')).toBe(
+        '/api/orders/OUT-2026-99999/tickets/pdf?token=abc'
+      );
+    });
+
+    it('builds full endpoint URLs for explicit custom base without duplicating /api', () => {
+      const customBase = 'http://localhost:4000/api';
+      expect(buildApiUrl('/events', customBase)).toBe('http://localhost:4000/api/events');
+      expect(buildApiUrl('/api/events', customBase)).toBe('http://localhost:4000/api/events');
+      expect(buildApiUrl('events', customBase)).toBe('http://localhost:4000/api/events');
+    });
+
+    it('omits Content-Type: application/json on bodyless GET requests to avoid unnecessary CORS preflights', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementationOnce(() =>
+        Promise.resolve({
+          ok: true,
+          json: () =>
+            Promise.resolve({
+              success: true,
+              data: { events: [] },
+            }),
+        } as any)
+      );
+
+      await api.events.featured();
+
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      const requestInit = fetchSpy.mock.calls[0][1] as RequestInit;
+      const headers = (requestInit.headers || {}) as Record<string, string>;
+      expect(headers['Content-Type']).toBeUndefined();
+      expect(requestInit.credentials).toBe('include');
+
+      fetchSpy.mockRestore();
     });
   });
 
@@ -487,7 +544,6 @@ describe('Outside.vip Client Library', () => {
       const clientConfig = JSON.parse(fs.readFileSync(clientConfigPath, 'utf8'));
       const rewrites = clientConfig.rewrites as Array<{ source: string; destination: string }>;
 
-      // Helper function simulating Vercel rewrite matching
       function resolveRewrite(requestPath: string): { destination: string; type: 'api' | 'spa' } {
         for (const rule of rewrites) {
           if (rule.source === '/api/:path*' && requestPath.startsWith('/api')) {
@@ -500,25 +556,21 @@ describe('Outside.vip Client Library', () => {
         return { destination: requestPath, type: 'spa' };
       }
 
-      // Deep route: /organizer/finance
       expect(resolveRewrite('/organizer/finance')).toEqual({
         destination: '/index.html',
         type: 'spa',
       });
 
-      // Stripe Return URL: /organizer/finance?stripe_return=true
       expect(resolveRewrite('/organizer/finance?stripe_return=true')).toEqual({
         destination: '/index.html',
         type: 'spa',
       });
 
-      // Stripe Refresh URL: /organizer/finance?stripe_refresh=true
       expect(resolveRewrite('/organizer/finance?stripe_refresh=true')).toEqual({
         destination: '/index.html',
         type: 'spa',
       });
 
-      // Other React Router SPA routes
       expect(resolveRewrite('/events')).toEqual({
         destination: '/index.html',
         type: 'spa',
@@ -536,7 +588,6 @@ describe('Outside.vip Client Library', () => {
         type: 'spa',
       });
 
-      // API requests proxy to Render
       expect(resolveRewrite('/api/organizer/finance/account')).toEqual({
         destination: 'https://outside-vip.onrender.com/api/:path*',
         type: 'api',

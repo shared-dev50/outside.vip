@@ -5,11 +5,9 @@ import { startWaitlistBackgroundWorker, stopWaitlistBackgroundWorker } from './m
 
 async function startServer() {
   try {
-    // Verify database connectivity
     await prisma.$connect();
     console.log('⚡ Connected to Outside.vip PostgreSQL database successfully');
 
-    // Start waitlist background worker (sweeps expired offers and reservations)
     startWaitlistBackgroundWorker(60_000);
 
     const server = app.listen(env.PORT, () => {

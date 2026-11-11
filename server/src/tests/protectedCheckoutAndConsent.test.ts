@@ -3,6 +3,7 @@ import request from 'supertest';
 import { app } from '../app.js';
 import { prisma } from '../db/prisma.js';
 import { stripe } from '../lib/stripe.js';
+import * as financeService from '../modules/finance/finance.service.js';
 import { hashEventPassword } from '../modules/events/passwordAccess.service.js';
 import { normalizePhoneNumber } from '../utils/phone.js';
 
@@ -24,6 +25,8 @@ describe('Password-Protected Event Checkout, Mandatory Phone & Marketing Consent
   const updatedPassword = 'NewSecretVIPPassword2026!';
 
   beforeAll(async () => {
+    vi.spyOn(financeService, 'assertStripeReadyForPaidPublishing').mockResolvedValue({} as any);
+
     // 1. Create primary organizer
     const orgEmail = `vip_org_${Date.now()}@outside.vip`;
     const regOrg = await request(app)
@@ -36,6 +39,10 @@ describe('Password-Protected Event Checkout, Mandatory Phone & Marketing Consent
       });
     organizerToken = regOrg.body.data.token;
     organizerId = regOrg.body.data.user.id;
+    await prisma.user.update({
+      where: { id: organizerId },
+      data: { emailVerified: true, emailVerifiedAt: new Date() },
+    });
 
     // 2. Create secondary organizer for isolation testing
     const otherOrgEmail = `other_org_${Date.now()}@outside.vip`;
@@ -49,6 +56,10 @@ describe('Password-Protected Event Checkout, Mandatory Phone & Marketing Consent
       });
     otherOrganizerToken = regOther.body.data.token;
     otherOrganizerId = regOther.body.data.user.id;
+    await prisma.user.update({
+      where: { id: otherOrganizerId },
+      data: { emailVerified: true, emailVerifiedAt: new Date() },
+    });
 
     // 3. Create a password-protected event
     const pwHash = await hashEventPassword(initialPassword);

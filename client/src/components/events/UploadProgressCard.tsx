@@ -22,7 +22,7 @@ export interface UploadProgressInfo {
   filename: string;
   fileSizeBytes?: number;
   previewUrl?: string;
-  percent: number; // 0 to 100
+  percent: number;
   loadedBytes: number;
   totalBytes: number;
   errorMessage?: string | null;
@@ -65,7 +65,6 @@ export const UploadProgressCard: React.FC<UploadProgressCardProps> = ({
       }`}
     >
       <div className="flex items-start gap-3">
-        {/* Thumbnail or File Icon */}
         <div className="relative w-12 h-12 rounded-lg overflow-hidden bg-stone-900 border border-stone-200 shrink-0 flex items-center justify-center">
           {info.previewUrl ? (
             <img
@@ -84,9 +83,7 @@ export const UploadProgressCard: React.FC<UploadProgressCardProps> = ({
           )}
         </div>
 
-        {/* Info Column */}
         <div className="flex-1 min-w-0 space-y-1.5">
-          {/* Top Line: Filename and Status Badge */}
           <div className="flex items-center justify-between gap-2">
             <div className="min-w-0">
               {title && (
@@ -99,7 +96,6 @@ export const UploadProgressCard: React.FC<UploadProgressCardProps> = ({
               </p>
             </div>
 
-            {/* Status Badges */}
             <div className="shrink-0 flex items-center gap-1.5">
               {isUploading && (
                 <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-stone-900 text-brand-neon">
@@ -129,7 +125,6 @@ export const UploadProgressCard: React.FC<UploadProgressCardProps> = ({
                 </span>
               )}
 
-              {/* Dismiss / Cancel buttons */}
               {isUploading && onCancel && (
                 <button
                   type="button"
@@ -154,7 +149,6 @@ export const UploadProgressCard: React.FC<UploadProgressCardProps> = ({
             </div>
           </div>
 
-          {/* Progress Bar */}
           <div className="w-full h-1.5 rounded-full bg-stone-200 overflow-hidden">
             <div
               className={`h-full transition-all duration-200 ease-out ${
@@ -172,7 +166,6 @@ export const UploadProgressCard: React.FC<UploadProgressCardProps> = ({
             />
           </div>
 
-          {/* Bottom Line: Byte info / Error message / Actions */}
           <div className="flex items-center justify-between text-[11px] text-stone-600">
             {isUploading && (
               <span>
@@ -198,7 +191,6 @@ export const UploadProgressCard: React.FC<UploadProgressCardProps> = ({
               </span>
             )}
 
-            {/* Action buttons */}
             {isError && onRetry && (
               <button
                 type="button"

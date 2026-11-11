@@ -3,9 +3,8 @@ import { Readable } from 'stream';
 import { env } from '../config/env';
 
 export const CLOUDINARY_FOLDER = 'outside-vip/event-covers';
-export const MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024; // 5 MB
+export const MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024;
 
-// Configure Cloudinary SDK if credentials exist
 if (env.CLOUDINARY_CLOUD_NAME && env.CLOUDINARY_API_KEY && env.CLOUDINARY_API_SECRET) {
   cloudinary.config({
     cloud_name: env.CLOUDINARY_CLOUD_NAME,
@@ -170,7 +169,6 @@ export async function uploadImageBuffer(
   });
 }
 
-// Only delete assets inside the designated event covers folder
 export async function deleteCloudinaryAsset(publicId?: string | null): Promise<boolean> {
   if (!isCloudinaryConfigured()) return false;
   if (!publicId || typeof publicId !== 'string') return false;

@@ -6,10 +6,7 @@ export function normalizeOrigin(origin: string): string {
   if (!origin) return '';
   let cleaned = origin.trim();
 
-  // Strip surrounding quotes if present (e.g., from .env quotes)
   cleaned = cleaned.replace(/^["']+|["']+$/g, '').trim();
-
-  // Strip trailing slashes
   cleaned = cleaned.replace(/\/+$/, '');
 
   if (!cleaned) return '';
@@ -23,6 +20,40 @@ export function normalizeOrigin(origin: string): string {
   }
 }
 
+function addOriginWithWwwVariant(origins: Set<string>, rawOrigin: string): void {
+  const normalized = normalizeOrigin(rawOrigin);
+  if (!normalized) return;
+
+  origins.add(normalized);
+
+  try {
+    const parsed = new URL(normalized);
+    if (parsed.protocol !== 'https:') return;
+
+    const host = parsed.hostname.toLowerCase();
+    if (
+      host === 'localhost' ||
+      host === '127.0.0.1' ||
+      host.endsWith('.vercel.app') ||
+      host.endsWith('.onrender.com')
+    ) {
+      return;
+    }
+
+    const portSuffix = parsed.port ? `:${parsed.port}` : '';
+    if (host.startsWith('www.')) {
+      const apexHost = host.slice(4);
+      if (apexHost.includes('.')) {
+        origins.add(`${parsed.protocol}//${apexHost}${portSuffix}`);
+      }
+    } else if (host.split('.').length === 2) {
+      origins.add(`${parsed.protocol}//www.${host}${portSuffix}`);
+    }
+  } catch {
+    // Non-URL string; already added if normalized
+  }
+}
+
 export function getAllAllowedOrigins(): Set<string> {
   const origins = new Set<string>();
 
@@ -32,8 +63,7 @@ export function getAllAllowedOrigins(): Set<string> {
     'https://www.outside.vip',
   ];
   for (const origin of defaultProductionOrigins) {
-    const normalized = normalizeOrigin(origin);
-    if (normalized) origins.add(normalized);
+    addOriginWithWwwVariant(origins, origin);
   }
 
   const defaultLocalOrigins = [
@@ -49,16 +79,16 @@ export function getAllAllowedOrigins(): Set<string> {
     if (normalized) origins.add(normalized);
   }
 
-  if (env.CLIENT_URL) {
-    const normalizedClient = normalizeOrigin(env.CLIENT_URL);
-    if (normalizedClient) origins.add(normalizedClient);
+  const clientUrl = process.env.CLIENT_URL || env.CLIENT_URL;
+  if (clientUrl) {
+    addOriginWithWwwVariant(origins, clientUrl);
   }
 
-  if (env.ALLOWED_ORIGINS) {
-    const customOrigins = env.ALLOWED_ORIGINS.split(/[\s,]+/);
+  const allowedOriginsEnv = process.env.ALLOWED_ORIGINS || env.ALLOWED_ORIGINS;
+  if (allowedOriginsEnv) {
+    const customOrigins = allowedOriginsEnv.split(/[\s,]+/);
     for (const item of customOrigins) {
-      const normalized = normalizeOrigin(item);
-      if (normalized) origins.add(normalized);
+      addOriginWithWwwVariant(origins, item);
     }
   }
 
@@ -81,8 +111,14 @@ export function isOriginAllowed(
     return true;
   }
 
-  if (VERCEL_PREVIEW_PATTERN.test(normalized)) {
-    return true;
+  const activeNodeEnv = process.env.NODE_ENV || env.NODE_ENV;
+  const allowPreviewInProd =
+    (process.env.ALLOW_VERCEL_PREVIEW_ORIGINS || env.ALLOW_VERCEL_PREVIEW_ORIGINS) === 'true';
+
+  if (activeNodeEnv !== 'production' || allowPreviewInProd) {
+    if (VERCEL_PREVIEW_PATTERN.test(normalized)) {
+      return true;
+    }
   }
 
   return false;
@@ -119,8 +155,10 @@ export const corsOptions: CorsOptions = {
     'Accept',
     'Origin',
     'x-order-token',
+    'x-event-access-token',
+    'X-CSRF-Token',
   ],
-  exposedHeaders: ['Content-Disposition'],
+  exposedHeaders: ['Content-Disposition', 'X-CSRF-Token'],
   optionsSuccessStatus: 204,
-  maxAge: 86400, // 24 hours preflight cache
+  maxAge: 86400,
 };

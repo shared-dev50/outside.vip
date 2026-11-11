@@ -1,6 +1,10 @@
 import { Router } from 'express';
-import { Role } from '@prisma/client';
-import { requireAuth, requireRole } from '../../middleware/auth.js';
+import {
+  requireAuth,
+  requireVerifiedEmail,
+  requireAdmin,
+  requireFreshUserVerification,
+} from '../../middleware/auth.js';
 import {
   handleGetAccountStatus,
   handleCreateOnboardingLink,
@@ -19,20 +23,19 @@ import {
 
 export const financeRouter = Router();
 
-// Protect all finance endpoints with auth & organizer/admin role
 financeRouter.use(requireAuth);
-financeRouter.use(requireRole(Role.ORGANIZER, Role.ADMIN));
+financeRouter.use(requireVerifiedEmail);
 
 financeRouter.get('/countries', handleGetSupportedCountries);
 financeRouter.get('/account', handleGetAccountStatus);
-financeRouter.post('/onboarding-link', handleCreateOnboardingLink);
-financeRouter.post('/login-link', handleCreateLoginLink);
+financeRouter.post('/onboarding-link', requireFreshUserVerification, handleCreateOnboardingLink);
+financeRouter.post('/login-link', requireFreshUserVerification, handleCreateLoginLink);
 financeRouter.get('/balance', handleGetBalance);
-financeRouter.post('/withdraw', handleExecuteWithdrawal);
-financeRouter.post('/admin/withdraw', requireRole(Role.ADMIN), handleAdminWithdrawal);
+financeRouter.post('/withdraw', requireFreshUserVerification, handleExecuteWithdrawal);
+financeRouter.post('/admin/withdraw', requireAdmin, handleAdminWithdrawal);
 financeRouter.get('/transfers', handleGetTransfers);
 financeRouter.get('/ledger', handleGetLedger);
 financeRouter.get('/payouts', handleGetPayouts);
 financeRouter.get('/disputes', handleGetDisputes);
-financeRouter.patch('/payout-schedule', handleUpdatePayoutSchedule);
+financeRouter.patch('/payout-schedule', requireFreshUserVerification, handleUpdatePayoutSchedule);
 financeRouter.get('/reconcile', handleReconcile);

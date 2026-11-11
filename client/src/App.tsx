@@ -12,6 +12,7 @@ import { EventPreviewPage } from './pages/EventPreviewPage';
 import { ScannerPage } from './pages/ScannerPage';
 import { OrderConfirmationPage } from './pages/OrderConfirmationPage';
 import { FinanceOrganizationPage } from './pages/FinanceOrganizationPage';
+import { AuthPage } from './pages/AuthPage';
 
 export const App: React.FC = () => {
   const location = useLocation();
@@ -21,6 +22,10 @@ export const App: React.FC = () => {
     location.pathname.startsWith('/events') ||
     location.pathname.startsWith('/organizer') ||
     location.pathname.startsWith('/teams');
+    location.pathname.startsWith('/login') ||
+    location.pathname.startsWith('/signin') ||
+    location.pathname.startsWith('/register') ||
+    location.pathname.startsWith('/forgot-password');
 
   return (
     <div
@@ -32,6 +37,10 @@ export const App: React.FC = () => {
       <main className={`flex-1 ${isHome ? '-mt-16' : ''}`}>
         <Routes>
           <Route path="/" element={<HomePage />} />
+          <Route path="/login" element={<AuthPage />} />
+          <Route path="/signin" element={<AuthPage />} />
+          <Route path="/register" element={<AuthPage />} />
+          <Route path="/forgot-password" element={<AuthPage />} />
           <Route path="/events" element={<DiscoverPage />} />
           <Route path="/events/:slug" element={<EventDetailPage />} />
           <Route path="/teams" element={<TeamsPage />} />

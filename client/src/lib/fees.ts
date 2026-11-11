@@ -3,10 +3,10 @@
  * All monetary amounts are computed authoritatively in integer minor currency units (cents).
  */
 
-export const PLATFORM_FEE_PERCENT = 10; // 10% of ticket price
-export const SERVICE_FEE_CENTS = 95; // $0.95 (95 cents per ticket paid by buyer)
-export const STRIPE_PERCENT = 0.029; // 2.9%
-export const STRIPE_FIXED_CENTS = 30; // $0.30 (30 cents per transaction)
+export const PLATFORM_FEE_PERCENT = 10;
+export const SERVICE_FEE_CENTS = 95;
+export const STRIPE_PERCENT = 0.029;
+export const STRIPE_FIXED_CENTS = 30;
 
 export interface TierFeeBreakdown {
   ticketPriceInCents: number;

@@ -1,7 +1,8 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import request from 'supertest';
 import { app } from '../app.js';
 import { prisma } from '../db/prisma.js';
+import * as financeService from '../modules/finance/finance.service.js';
 import { calculateOccurrences, formatOccurrenceSlugSuffix, formatRecurrenceSummary } from '../modules/events/recurrence.service.js';
 
 describe('Recurring Events: Recurrence Calculation Service', () => {
@@ -132,6 +133,8 @@ describe('Recurring Events: End-to-End API Lifecycle', () => {
   let secondEventId: string;
 
   beforeAll(async () => {
+    vi.spyOn(financeService, 'assertStripeReadyForPaidPublishing').mockResolvedValue({} as any);
+
     // Authenticate as seeded organizer (Sol Collective)
     const loginRes = await request(app).post('/api/auth/login').send({
       email: 'sol@outside.vip',
@@ -143,6 +146,7 @@ describe('Recurring Events: End-to-End API Lifecycle', () => {
   });
 
   afterAll(async () => {
+    vi.restoreAllMocks();
     // Cleanup created test events and series
     if (createdSeriesId) {
       await prisma.event.deleteMany({ where: { seriesId: createdSeriesId } });

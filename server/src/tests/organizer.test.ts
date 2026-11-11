@@ -1,6 +1,7 @@
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import request from 'supertest';
 import { app } from '../app.js';
+import * as financeService from '../modules/finance/finance.service.js';
 
 describe('Outside.vip Organizer API & Event Management', () => {
   let organizerToken: string;
@@ -8,6 +9,8 @@ describe('Outside.vip Organizer API & Event Management', () => {
   let createdEventId: string;
 
   beforeAll(async () => {
+    vi.spyOn(financeService, 'assertStripeReadyForPaidPublishing').mockResolvedValue({} as any);
+
     // Authenticate seeded organizer
     const organizerLogin = await request(app).post('/api/auth/login').send({
       email: 'sol@outside.vip',
@@ -23,6 +26,10 @@ describe('Outside.vip Organizer API & Event Management', () => {
     });
     expect(attendeeLogin.status).toBe(200);
     attendeeToken = attendeeLogin.body.data.token;
+  });
+
+  afterAll(() => {
+    vi.restoreAllMocks();
   });
 
   it('GET /api/organizer/dashboard without token should return 401 Unauthorized', async () => {

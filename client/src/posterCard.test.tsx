@@ -41,11 +41,9 @@ describe('Homepage PosterCard UI & Event Title Component', () => {
       </MemoryRouter>
     );
 
-    // Event title must be present and rendered
     expect(html).toContain('Savannah Cinema: African Classic Film &amp; Vinyl');
     expect(html).toContain('title="Savannah Cinema: African Classic Film &amp; Vinyl"');
 
-    // Title element has prominent typography
     expect(html).toContain('font-display');
     expect(html).toContain('font-black');
     expect(html).toContain('uppercase');
@@ -85,9 +83,7 @@ describe('Homepage PosterCard UI & Event Title Component', () => {
     );
 
     expect(html).toContain('Savannah Cinema: African Classic Film &amp; Vinyl');
-    // Elevated sparkle element
     expect(html).toContain('✦');
-    // Elevation translation class
     expect(html).toContain('-translate-y-3');
   });
 

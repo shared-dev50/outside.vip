@@ -128,9 +128,6 @@ describe('Ticket Sales Period and Ticket Validity Controls API', () => {
     vi.restoreAllMocks();
   });
 
-  // -------------------------------------------------------------
-  // PART 1: Limit Ticket Sales Period (Purchase & Checkout API)
-  // -------------------------------------------------------------
   describe('Part 1: Ticket Sales Period Enforcement at Checkout', () => {
     it('1.1: Rejects checkout when sales period has not started yet (before sales window)', async () => {
       const res = await request(app)
@@ -238,9 +235,6 @@ describe('Ticket Sales Period and Ticket Validity Controls API', () => {
     });
   });
 
-  // -------------------------------------------------------------
-  // PART 2: Limit Ticket Validity (QR Scanner & Check-in API)
-  // -------------------------------------------------------------
   describe('Part 2: Ticket Validity Window Enforcement at Entry Gate', () => {
     const mockOrder = {
       orderNumber: 'OUT-2026-VAL01',
@@ -471,9 +465,6 @@ describe('Ticket Sales Period and Ticket Validity Controls API', () => {
     });
   });
 
-  // -------------------------------------------------------------
-  // PART 3: Independence of Sales Period & Ticket Validity
-  // -------------------------------------------------------------
   describe('Part 3: Independence of Sales Period and Ticket Validity', () => {
     it('3.1: Already-purchased tickets remain valid for entry even after sales period ends', async () => {
       // Sales period ended 3 days ago, but entry validity is active right now!
@@ -527,9 +518,6 @@ describe('Ticket Sales Period and Ticket Validity Controls API', () => {
     });
   });
 
-  // -------------------------------------------------------------
-  // PART 4: Public Event Details & Computed Sales Status
-  // -------------------------------------------------------------
   describe('Part 4: Public Event Details & Availability Flags', () => {
     it('4.1: Computes isSalesPending, isSalesEnded and isAvailable accurately on public event API', async () => {
       const res = await request(app).get(`/api/events/${testEvent.slug}`);
