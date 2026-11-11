@@ -26,6 +26,18 @@ import {
   StripeConnectCountry,
 } from '../types';
 
+const PROXIED_API_HOSTS = new Set([
+  'outside-vip.onrender.com',
+  'outside.vip',
+  'www.outside.vip',
+  'outside-vip.vercel.app',
+]);
+
+/**
+ * Resolves the API base URL. Defaults to relative `/api` so browser requests
+ * route through the same-origin Vercel `/api/:path*` proxy, preserving
+ * `__Host-` session cookies and avoiding cross-origin CORS preflights.
+ */
 export function resolveApiBaseUrl(rawUrl?: string): string {
   const url = (rawUrl ?? '').trim();
   if (!url) {
@@ -36,6 +48,20 @@ export function resolveApiBaseUrl(rawUrl?: string): string {
 
   if (!clean || clean === '/api') {
     return '/api';
+  }
+
+  try {
+    const parsed = new URL(clean);
+    if (
+      PROXIED_API_HOSTS.has(parsed.hostname.toLowerCase()) ||
+      (typeof window !== 'undefined' &&
+        window.location?.origin &&
+        parsed.origin === window.location.origin)
+    ) {
+      return '/api';
+    }
+  } catch {
+    // Relative path
   }
 
   if (clean.endsWith('/api')) {
@@ -100,8 +126,12 @@ const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
 async function request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
   const method = (options.method || 'GET').toUpperCase();
+  const hasJsonBody =
+    options.body !== undefined &&
+    options.body !== null &&
+    (typeof FormData === 'undefined' || !(options.body instanceof FormData));
   const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
+    ...(hasJsonBody ? { 'Content-Type': 'application/json' } : {}),
     ...(MUTATING_METHODS.has(method) && activeCsrfToken
       ? { 'X-CSRF-Token': activeCsrfToken }
       : {}),

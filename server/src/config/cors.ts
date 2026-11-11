@@ -20,6 +20,40 @@ export function normalizeOrigin(origin: string): string {
   }
 }
 
+function addOriginWithWwwVariant(origins: Set<string>, rawOrigin: string): void {
+  const normalized = normalizeOrigin(rawOrigin);
+  if (!normalized) return;
+
+  origins.add(normalized);
+
+  try {
+    const parsed = new URL(normalized);
+    if (parsed.protocol !== 'https:') return;
+
+    const host = parsed.hostname.toLowerCase();
+    if (
+      host === 'localhost' ||
+      host === '127.0.0.1' ||
+      host.endsWith('.vercel.app') ||
+      host.endsWith('.onrender.com')
+    ) {
+      return;
+    }
+
+    const portSuffix = parsed.port ? `:${parsed.port}` : '';
+    if (host.startsWith('www.')) {
+      const apexHost = host.slice(4);
+      if (apexHost.includes('.')) {
+        origins.add(`${parsed.protocol}//${apexHost}${portSuffix}`);
+      }
+    } else if (host.split('.').length === 2) {
+      origins.add(`${parsed.protocol}//www.${host}${portSuffix}`);
+    }
+  } catch {
+    // Non-URL string; already added if normalized
+  }
+}
+
 export function getAllAllowedOrigins(): Set<string> {
   const origins = new Set<string>();
 
@@ -29,8 +63,7 @@ export function getAllAllowedOrigins(): Set<string> {
     'https://www.outside.vip',
   ];
   for (const origin of defaultProductionOrigins) {
-    const normalized = normalizeOrigin(origin);
-    if (normalized) origins.add(normalized);
+    addOriginWithWwwVariant(origins, origin);
   }
 
   const defaultLocalOrigins = [
@@ -46,16 +79,16 @@ export function getAllAllowedOrigins(): Set<string> {
     if (normalized) origins.add(normalized);
   }
 
-  if (env.CLIENT_URL) {
-    const normalizedClient = normalizeOrigin(env.CLIENT_URL);
-    if (normalizedClient) origins.add(normalizedClient);
+  const clientUrl = process.env.CLIENT_URL || env.CLIENT_URL;
+  if (clientUrl) {
+    addOriginWithWwwVariant(origins, clientUrl);
   }
 
-  if (env.ALLOWED_ORIGINS) {
-    const customOrigins = env.ALLOWED_ORIGINS.split(/[\s,]+/);
+  const allowedOriginsEnv = process.env.ALLOWED_ORIGINS || env.ALLOWED_ORIGINS;
+  if (allowedOriginsEnv) {
+    const customOrigins = allowedOriginsEnv.split(/[\s,]+/);
     for (const item of customOrigins) {
-      const normalized = normalizeOrigin(item);
-      if (normalized) origins.add(normalized);
+      addOriginWithWwwVariant(origins, item);
     }
   }
 

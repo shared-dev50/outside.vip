@@ -431,28 +431,23 @@ describe('Outside.vip Client Library', () => {
   });
 
   describe('API base URL resolution and endpoint composition', () => {
-    it('resolves production Render backend URL ending in /api', () => {
-      expect(resolveApiBaseUrl('https://outside-vip.onrender.com/api')).toBe(
-        'https://outside-vip.onrender.com/api'
-      );
+    it('routes proxied Render and custom domain URLs to relative /api so requests use the Vercel proxy', () => {
+      expect(resolveApiBaseUrl('https://outside-vip.onrender.com/api')).toBe('/api');
+      expect(resolveApiBaseUrl('https://outside-vip.onrender.com/api/')).toBe('/api');
+      expect(resolveApiBaseUrl('https://outside-vip.onrender.com')).toBe('/api');
+      expect(resolveApiBaseUrl('https://outside-vip.onrender.com/')).toBe('/api');
+      expect(resolveApiBaseUrl('https://outside.vip')).toBe('/api');
+      expect(resolveApiBaseUrl('https://www.outside.vip')).toBe('/api');
+      expect(resolveApiBaseUrl('https://outside-vip.vercel.app')).toBe('/api');
     });
 
-    it('resolves production Render backend URL with trailing slash', () => {
-      expect(resolveApiBaseUrl('https://outside-vip.onrender.com/api/')).toBe(
-        'https://outside-vip.onrender.com/api'
-      );
+    it('appends /api if an explicit non-proxied base URL is provided without /api', () => {
+      expect(resolveApiBaseUrl('http://localhost:4000')).toBe('http://localhost:4000/api');
+      expect(resolveApiBaseUrl('http://localhost:4000/')).toBe('http://localhost:4000/api');
+      expect(resolveApiBaseUrl('http://localhost:4000/api')).toBe('http://localhost:4000/api');
     });
 
-    it('appends /api if base domain is provided without /api', () => {
-      expect(resolveApiBaseUrl('https://outside-vip.onrender.com')).toBe(
-        'https://outside-vip.onrender.com/api'
-      );
-      expect(resolveApiBaseUrl('https://outside-vip.onrender.com/')).toBe(
-        'https://outside-vip.onrender.com/api'
-      );
-    });
-
-    it('defaults to /api for relative path or undefined in local dev', () => {
+    it('defaults to /api for relative path or undefined in local dev and production', () => {
       expect(resolveApiBaseUrl('/api')).toBe('/api');
       expect(resolveApiBaseUrl('/api/')).toBe('/api');
       expect(resolveApiBaseUrl('')).toBe('/api');
@@ -460,32 +455,46 @@ describe('Outside.vip Client Library', () => {
       expect(resolveApiBaseUrl('   ')).toBe('/api');
     });
 
-    it('builds full production endpoint URLs matching Render without duplicating /api', () => {
-      const renderBase = 'https://outside-vip.onrender.com/api';
-      expect(buildApiUrl('/events', renderBase)).toBe(
-        'https://outside-vip.onrender.com/api/events'
-      );
-      expect(buildApiUrl('/api/events', renderBase)).toBe(
-        'https://outside-vip.onrender.com/api/events'
-      );
-      expect(buildApiUrl('events', renderBase)).toBe(
-        'https://outside-vip.onrender.com/api/events'
-      );
-      expect(buildApiUrl('/events?sortBy=date_asc&limit=12', renderBase)).toBe(
-        'https://outside-vip.onrender.com/api/events?sortBy=date_asc&limit=12'
-      );
-      expect(buildApiUrl('/orders/OUT-2026-99999/tickets/pdf?token=abc', renderBase)).toBe(
-        'https://outside-vip.onrender.com/api/orders/OUT-2026-99999/tickets/pdf?token=abc'
-      );
-    });
-
-    it('builds relative endpoint URLs for local development', () => {
+    it('builds relative endpoint URLs for the /api proxy without duplicating /api', () => {
       expect(buildApiUrl('/events', '/api')).toBe('/api/events');
       expect(buildApiUrl('/api/events', '/api')).toBe('/api/events');
       expect(buildApiUrl('events', '/api')).toBe('/api/events');
       expect(buildApiUrl('/events?sortBy=date_asc&limit=12', '/api')).toBe(
         '/api/events?sortBy=date_asc&limit=12'
       );
+      expect(buildApiUrl('/orders/OUT-2026-99999/tickets/pdf?token=abc', '/api')).toBe(
+        '/api/orders/OUT-2026-99999/tickets/pdf?token=abc'
+      );
+    });
+
+    it('builds full endpoint URLs for explicit custom base without duplicating /api', () => {
+      const customBase = 'http://localhost:4000/api';
+      expect(buildApiUrl('/events', customBase)).toBe('http://localhost:4000/api/events');
+      expect(buildApiUrl('/api/events', customBase)).toBe('http://localhost:4000/api/events');
+      expect(buildApiUrl('events', customBase)).toBe('http://localhost:4000/api/events');
+    });
+
+    it('omits Content-Type: application/json on bodyless GET requests to avoid unnecessary CORS preflights', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementationOnce(() =>
+        Promise.resolve({
+          ok: true,
+          json: () =>
+            Promise.resolve({
+              success: true,
+              data: { events: [] },
+            }),
+        } as any)
+      );
+
+      await api.events.featured();
+
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      const requestInit = fetchSpy.mock.calls[0][1] as RequestInit;
+      const headers = (requestInit.headers || {}) as Record<string, string>;
+      expect(headers['Content-Type']).toBeUndefined();
+      expect(requestInit.credentials).toBe('include');
+
+      fetchSpy.mockRestore();
     });
   });
 
