@@ -36,7 +36,7 @@ const envSchema = z.object({
     .string()
     .default('5')
     .transform((val) => parseFloat(val)),
-  EMAIL_FROM: z.string().default('tickets@outside.vip'),
+  EMAIL_FROM: z.string().default('Outside.vip <no-reply@out-side.vip>'),
   RESEND_API_KEY: z.string().default(''),
   ADMIN_EMAILS: z.string().default(''),
   CLOUDINARY_CLOUD_NAME: z.string().default(''),

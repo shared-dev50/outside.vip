@@ -21,7 +21,7 @@ import {
   TooManyRequestsError,
   NotFoundError,
 } from '../../utils/errors.js';
-import { sendVerificationOtpEmail } from '../../lib/email.service.js';
+import { sendVerificationOtpEmail, EmailDeliveryResult } from '../../lib/email.service.js';
 import { recordAdminAuditLog } from '../../lib/auditLogger.js';
 import {
   createSession,
@@ -126,41 +126,47 @@ async function issueVerificationCodeForUser(user: {
   id: string;
   email: string;
   name: string;
-}): Promise<{ code: string; expiresAt: Date }> {
-  const now = new Date();
-  const expiresAt = new Date(now.getTime() + OTP_EXPIRY_MS);
+}): Promise<{ expiresAt: Date; emailDelivery: EmailDeliveryResult }> {
+  const issuedAt = new Date();
+  const expiresAt = new Date(issuedAt.getTime() + OTP_EXPIRY_MS);
   const code = generateSixDigitOtp();
   const codeHash = hashVerificationCode(user.id, code);
+  const codeId = crypto.randomUUID();
 
-  // Expire any previous unused codes for this user so only the latest code is valid
-  await prisma.emailVerificationCode.updateMany({
-    where: {
-      userId: user.id,
-      usedAt: null,
-      expiresAt: { gt: now },
-    },
-    data: {
-      expiresAt: new Date(now.getTime() - 1000),
-    },
-  });
-
-  await prisma.emailVerificationCode.create({
-    data: {
-      userId: user.id,
-      email: normalizeEmail(user.email),
-      codeHash,
-      expiresAt,
-    },
-  });
-
-  await sendVerificationOtpEmail({
+  // Dispatch email BEFORE invalidating prior valid codes or creating a cooldown row
+  // so failed deliveries preserve previously active OTPs and avoid starting the 60s cooldown.
+  const emailDelivery = await sendVerificationOtpEmail({
     to: user.email,
     name: user.name,
     code,
     expiresInMinutes: 10,
+    idempotencyKey: `otp-verification-${codeId}`,
   });
 
-  return { code, expiresAt };
+  const now = new Date();
+  await prisma.$transaction([
+    prisma.emailVerificationCode.updateMany({
+      where: {
+        userId: user.id,
+        usedAt: null,
+        expiresAt: { gt: now },
+      },
+      data: {
+        expiresAt: new Date(now.getTime() - 1000),
+      },
+    }),
+    prisma.emailVerificationCode.create({
+      data: {
+        id: codeId,
+        userId: user.id,
+        email: normalizeEmail(user.email),
+        codeHash,
+        expiresAt,
+      },
+    }),
+  ]);
+
+  return { expiresAt, emailDelivery };
 }
 
 export async function getCsrfToken(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -233,11 +239,20 @@ export async function register(req: Request, res: Response, next: NextFunction):
       select: USER_PUBLIC_SELECT,
     });
 
-    await issueVerificationCodeForUser({
-      id: user.id,
-      email: user.email,
-      name: user.name,
-    });
+    let emailDelivery: EmailDeliveryResult;
+    try {
+      const issued = await issueVerificationCodeForUser({
+        id: user.id,
+        email: user.email,
+        name: user.name,
+      });
+      emailDelivery = issued.emailDelivery;
+    } catch (deliveryError) {
+      // Roll back the newly created account if the initial verification email cannot be sent
+      // so the user does not hit a false success or a duplicate-email conflict when retrying.
+      await prisma.user.delete({ where: { id: user.id } }).catch(() => {});
+      throw deliveryError;
+    }
 
     await syncUserToAuthCache(user);
 
@@ -261,6 +276,7 @@ export async function register(req: Request, res: Response, next: NextFunction):
         csrfToken: issuedSession.csrfToken,
         ...(activeNodeEnv !== 'production' ? { token: issuedSession.rawCookieValue } : {}),
         verificationRequired: true,
+        emailDelivery,
       },
     });
   } catch (error) {
@@ -533,7 +549,7 @@ export async function resendVerification(
       );
     }
 
-    const { expiresAt } = await issueVerificationCodeForUser({
+    const { expiresAt, emailDelivery } = await issueVerificationCodeForUser({
       id: targetUser.id,
       email: targetUser.email,
       name: targetUser.name,
@@ -545,6 +561,7 @@ export async function resendVerification(
         message: 'A new 6-digit verification code has been sent to your email.',
         expiresAt,
         cooldownSeconds: Math.floor(RESEND_COOLDOWN_MS / 1000),
+        emailDelivery,
       },
     });
   } catch (error) {
