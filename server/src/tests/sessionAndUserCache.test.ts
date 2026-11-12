@@ -642,14 +642,20 @@ describe('Server-Side Redis Sessions & 30-Second Redis User Authorization Cache'
       expect(crossSiteRes.status).toBe(403);
       expect(crossSiteRes.body.error.code).toBe('CSRF_CROSS_SITE_BLOCKED');
 
-      // 5. Valid Origin + Valid X-CSRF-Token -> 200 OK
-      const validUpdateRes = await request(app)
-        .patch('/api/auth/profile')
-        .set('Origin', 'https://outside.vip')
-        .set('Cookie', cookiePair)
-        .set('X-CSRF-Token', validCsrf)
-        .send({ name: 'Sol Collective' });
-      expect(validUpdateRes.status).toBe(200);
+      // 5. Valid Origin + Valid X-CSRF-Token -> 200 OK (for https://out-side.vip, https://www.out-side.vip, and https://outside.vip)
+      for (const trustedOrigin of [
+        'https://out-side.vip',
+        'https://www.out-side.vip',
+        'https://outside.vip',
+      ]) {
+        const validUpdateRes = await request(app)
+          .patch('/api/auth/profile')
+          .set('Origin', trustedOrigin)
+          .set('Cookie', cookiePair)
+          .set('X-CSRF-Token', validCsrf)
+          .send({ name: 'Sol Collective' });
+        expect(validUpdateRes.status).toBe(200);
+      }
     });
   });
 });

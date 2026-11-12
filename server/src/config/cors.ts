@@ -9,14 +9,16 @@ export function normalizeOrigin(origin: string): string {
   cleaned = cleaned.replace(/^["']+|["']+$/g, '').trim();
   cleaned = cleaned.replace(/\/+$/, '');
 
-  if (!cleaned) return '';
+  if (!cleaned || cleaned.includes('*')) return '';
 
   try {
     const parsed = new URL(cleaned);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return '';
+    }
     return parsed.origin;
   } catch {
-    // If not a full URL (e.g. malformed or partial), return trimmed lowercase
-    return cleaned.toLowerCase();
+    return '';
   }
 }
 
@@ -58,9 +60,11 @@ export function getAllAllowedOrigins(): Set<string> {
   const origins = new Set<string>();
 
   const defaultProductionOrigins = [
-    'https://outside-vip.vercel.app',
+    'https://out-side.vip',
+    'https://www.out-side.vip',
     'https://outside.vip',
     'https://www.outside.vip',
+    'https://outside-vip.vercel.app',
   ];
   for (const origin of defaultProductionOrigins) {
     addOriginWithWwwVariant(origins, origin);
@@ -79,12 +83,21 @@ export function getAllAllowedOrigins(): Set<string> {
     if (normalized) origins.add(normalized);
   }
 
-  const clientUrl = process.env.CLIENT_URL || env.CLIENT_URL;
-  if (clientUrl) {
-    addOriginWithWwwVariant(origins, clientUrl);
+  const rawClientUrls = [
+    process.env.CLIENT_URL,
+    process.env.FRONTEND_URL,
+    env.CLIENT_URL,
+  ];
+  for (const raw of rawClientUrls) {
+    if (raw) {
+      for (const item of raw.split(/[\s,]+/)) {
+        addOriginWithWwwVariant(origins, item);
+      }
+    }
   }
 
-  const allowedOriginsEnv = process.env.ALLOWED_ORIGINS || env.ALLOWED_ORIGINS;
+  const allowedOriginsEnv =
+    process.env.ALLOWED_ORIGINS !== undefined ? process.env.ALLOWED_ORIGINS : env.ALLOWED_ORIGINS;
   if (allowedOriginsEnv) {
     const customOrigins = allowedOriginsEnv.split(/[\s,]+/);
     for (const item of customOrigins) {
@@ -111,9 +124,13 @@ export function isOriginAllowed(
     return true;
   }
 
-  const activeNodeEnv = process.env.NODE_ENV || env.NODE_ENV;
-  const allowPreviewInProd =
-    (process.env.ALLOW_VERCEL_PREVIEW_ORIGINS || env.ALLOW_VERCEL_PREVIEW_ORIGINS) === 'true';
+  const activeNodeEnv =
+    process.env.NODE_ENV !== undefined ? process.env.NODE_ENV : env.NODE_ENV;
+  const rawAllowPreview =
+    process.env.ALLOW_VERCEL_PREVIEW_ORIGINS !== undefined
+      ? process.env.ALLOW_VERCEL_PREVIEW_ORIGINS
+      : env.ALLOW_VERCEL_PREVIEW_ORIGINS;
+  const allowPreviewInProd = rawAllowPreview === 'true';
 
   if (activeNodeEnv !== 'production' || allowPreviewInProd) {
     if (VERCEL_PREVIEW_PATTERN.test(normalized)) {

@@ -4,7 +4,7 @@ const CONTENT_SECURITY_POLICY = [
   "default-src 'self'",
   "script-src 'self' https://js.stripe.com",
   "frame-src 'self' https://js.stripe.com https://hooks.stripe.com https://www.youtube.com https://www.youtube-nocookie.com",
-  "connect-src 'self' https://api.stripe.com https://api.cloudinary.com https://outside.vip https://www.outside.vip https://api.outside.vip https://outside-vip.onrender.com",
+  "connect-src 'self' https://api.stripe.com https://api.cloudinary.com https://out-side.vip https://www.out-side.vip https://api.out-side.vip https://outside.vip https://www.outside.vip https://api.outside.vip https://outside-vip.onrender.com",
   "img-src 'self' data: blob: https://res.cloudinary.com https://images.unsplash.com https://*.stripe.com",
   "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
   "font-src 'self' data: https://fonts.gstatic.com",
