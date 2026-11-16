@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
-import { EventStatus, TicketTierStatus, OrderStatus, TicketStatus, RecurrenceFrequency, Role } from '@prisma/client';
+import { randomUUID } from 'node:crypto';
+import { EventStatus, TicketTierStatus, OrderStatus, TicketStatus, RecurrenceFrequency, Role, EventStaffStatus, Prisma } from '@prisma/client';
 import { prisma } from '../../db/prisma.js';
 import {
   createEventSchema,
@@ -8,9 +9,11 @@ import {
   PayoutDetailsInput,
   earningsPreviewInputSchema,
   organizerWorkspaceSchema,
+  organizerOrdersQuerySchema,
 } from './organizer.schema.js';
 import { calculateCombinedEarnings } from '../checkout/checkout.financials.js';
-import { NotFoundError, ForbiddenError, BadRequestError } from '../../utils/errors.js';
+import { NotFoundError, ForbiddenError, BadRequestError, ConflictError, UnauthorizedError } from '../../utils/errors.js';
+import { getRedisClient } from '../../lib/redis.js';
 import { calculateOccurrences, formatOccurrenceSlugSuffix } from '../events/recurrence.service.js';
 import { assertStripeReadyForPaidPublishing } from '../finance/finance.service.js';
 import { recordAdminAuditLog } from '../../lib/auditLogger.js';
@@ -1937,9 +1940,60 @@ export async function updateOrganizerPayoutDetails(req: Request, res: Response, 
 }
 
 export async function checkInTicket(req: Request, res: Response, next: NextFunction): Promise<void> {
+  const lockId = randomUUID();
+  let idemRedisKey: string | null = null;
+  let redisClient: ReturnType<typeof getRedisClient> | null = null;
+
   try {
     const rawToken = req.body.token;
     const eventIdOrSlug = req.body.eventId;
+
+    // Header & body key extraction and strict conflict validation
+    const h1 = req.headers['idempotency-key'];
+    const h2 = req.headers['x-idempotency-key'];
+    const b1 = req.body?.idempotencyKey;
+
+    // Reject empty string or whitespace-only keys
+    if (typeof h1 === 'string' && h1.trim().length === 0) {
+      throw new BadRequestError('Idempotency key cannot be empty or whitespace.', 'INVALID_IDEMPOTENCY_KEY');
+    }
+    if (typeof h2 === 'string' && h2.trim().length === 0) {
+      throw new BadRequestError('Idempotency key cannot be empty or whitespace.', 'INVALID_IDEMPOTENCY_KEY');
+    }
+    if (typeof b1 === 'string' && b1.trim().length === 0) {
+      throw new BadRequestError('Idempotency key cannot be empty or whitespace.', 'INVALID_IDEMPOTENCY_KEY');
+    }
+
+    const rawKeys = [
+      typeof h1 === 'string' && h1.trim() ? h1.trim() : null,
+      typeof h2 === 'string' && h2.trim() ? h2.trim() : null,
+      typeof b1 === 'string' && b1.trim() ? b1.trim() : null,
+    ].filter((k): k is string => k !== null);
+
+    const uniqueKeys = Array.from(new Set(rawKeys));
+    if (uniqueKeys.length > 1) {
+      throw new BadRequestError(
+        'Conflicting idempotency keys provided in request headers and body.',
+        'IDEMPOTENCY_KEY_CONFLICT'
+      );
+    }
+
+    const idempotencyKey = uniqueKeys[0] || undefined;
+    if (idempotencyKey) {
+      if (idempotencyKey.length < 8 || idempotencyKey.length > 128) {
+        throw new BadRequestError(
+          'Idempotency key must be between 8 and 128 characters.',
+          'INVALID_IDEMPOTENCY_KEY'
+        );
+      }
+      const IDEMPOTENCY_KEY_REGEX = /^[a-zA-Z0-9_\-.:]{8,128}$/;
+      if (!IDEMPOTENCY_KEY_REGEX.test(idempotencyKey)) {
+        throw new BadRequestError(
+          'Idempotency key contains invalid characters. Only alphanumeric, underscore, hyphen, colon, and period are permitted.',
+          'INVALID_IDEMPOTENCY_KEY'
+        );
+      }
+    }
 
     if (!rawToken || typeof rawToken !== 'string') {
       throw new BadRequestError('Ticket token is required');
@@ -1948,6 +2002,137 @@ export async function checkInTicket(req: Request, res: Response, next: NextFunct
     const token = rawToken.trim();
     const scannerUserId = req.user!.userId;
     const isAdmin = req.user!.role === 'ADMIN';
+    const isOrganizerRole = req.user!.role === 'ORGANIZER' || isAdmin;
+
+    if (!isOrganizerRole) {
+      let hasStaffAccess = false;
+      try {
+        if (eventIdOrSlug && eventIdOrSlug !== 'all' && eventIdOrSlug !== 'all_events') {
+          const staffRecord = await prisma.eventStaff.findFirst({
+            where: {
+              userId: scannerUserId,
+              status: 'ACTIVE',
+              event: {
+                OR: [{ id: eventIdOrSlug }, { slug: eventIdOrSlug }],
+              },
+            },
+            select: { id: true },
+          });
+          hasStaffAccess = !!staffRecord;
+        } else {
+          const anyStaffRecord = await prisma.eventStaff.findFirst({
+            where: {
+              userId: scannerUserId,
+              status: 'ACTIVE',
+            },
+            select: { id: true },
+          });
+          hasStaffAccess = !!anyStaffRecord;
+        }
+      } catch (err: any) {
+        if (err?.code !== 'P2021') throw err;
+      }
+
+      if (!hasStaffAccess) {
+        throw new ForbiddenError('You do not have permission to check in attendees for this event');
+      }
+    }
+
+    // Safe check-in retry idempotency via Redis
+    if (idempotencyKey) {
+      redisClient = getRedisClient();
+      idemRedisKey = `checkin_idem:${scannerUserId}:${idempotencyKey}`;
+
+      const existingRaw = await redisClient.get(idemRedisKey);
+      if (existingRaw) {
+        const record = JSON.parse(existingRaw);
+
+        // Strict event match: both must be identical normalized strings
+        const currentEventNormalized = (eventIdOrSlug || '').trim();
+        const recordedEventNormalized = (record.eventId || '').trim();
+        if (currentEventNormalized !== recordedEventNormalized) {
+          throw new BadRequestError(
+            'Idempotency key was previously used with a different ticket or event.',
+            'IDEMPOTENCY_KEY_MISMATCH'
+          );
+        }
+
+        // Token match: case-insensitive and prefix-insensitive
+        const normCurrent = token.toLowerCase();
+        const normRecorded = (record.token || '').toLowerCase();
+        const normCurrentPrefixed = normCurrent.startsWith('tkt_sec_') ? normCurrent : `tkt_sec_${normCurrent}`;
+        const normRecordedPrefixed = normRecorded.startsWith('tkt_sec_') ? normRecorded : `tkt_sec_${normRecorded}`;
+
+        if (normCurrentPrefixed !== normRecordedPrefixed) {
+          throw new BadRequestError(
+            'Idempotency key was previously used with a different ticket or event.',
+            'IDEMPOTENCY_KEY_MISMATCH'
+          );
+        }
+
+        if (record.status === 'COMPLETED') {
+          res.status(record.responseStatus).json(record.responseBody);
+          return;
+        }
+
+        if (record.status === 'PENDING') {
+          let waitCount = 0;
+          while (waitCount < 60) {
+            await new Promise((resolve) => setTimeout(resolve, 50));
+            const pollRaw = await redisClient.get(idemRedisKey);
+            if (pollRaw) {
+              const pollRecord = JSON.parse(pollRaw);
+              if (pollRecord.status === 'COMPLETED') {
+                res.status(pollRecord.responseStatus).json(pollRecord.responseBody);
+                return;
+              }
+            } else {
+              break;
+            }
+            waitCount++;
+          }
+          if (waitCount >= 60) {
+            throw new ConflictError(
+              'A check-in operation with this idempotency key is currently processing. Please retry in a moment.',
+              'IDEMPOTENCY_CONCURRENT_REQUEST'
+            );
+          }
+        }
+      }
+
+      const acquiredLock = await redisClient.setNxPx(
+        idemRedisKey,
+        JSON.stringify({
+          lockId,
+          scannerUserId,
+          token,
+          eventId: (eventIdOrSlug || '').trim(),
+          status: 'PENDING',
+          createdAt: Date.now(),
+        }),
+        25_000
+      );
+
+      if (!acquiredLock) {
+        let waitCount = 0;
+        while (waitCount < 60) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          const pollRaw = await redisClient.get(idemRedisKey);
+          if (pollRaw) {
+            const pollRecord = JSON.parse(pollRaw);
+            if (pollRecord.status === 'COMPLETED') {
+              res.status(pollRecord.responseStatus).json(pollRecord.responseBody);
+              return;
+            }
+          }
+          waitCount++;
+        }
+        throw new ConflictError(
+          'A check-in operation with this idempotency key is currently processing. Please retry in a moment.',
+          'IDEMPOTENCY_CONCURRENT_REQUEST'
+        );
+      }
+    }
 
     const ticketInclude = {
       event: {
@@ -2018,21 +2203,60 @@ export async function checkInTicket(req: Request, res: Response, next: NextFunct
       : '***';
 
     if (!ticket) {
+      if (idemRedisKey && redisClient) {
+        await redisClient.delLockIfMatches(idemRedisKey, lockId).catch(() => {});
+      }
       console.warn(`[CheckIn] Rejected INVALID_TOKEN: token=${maskedToken}, user=${scannerUserId}`);
-      let targetEvent = null;
+
+      // Fix foreign-event audit-log pollution:
+      // Only write to CheckInLog if the authenticated scanner actually owns this event, is active staff, or is platform admin.
+      // Never allow an unauthorized user or ordinary attendee to write check-in records against another organizer's event.
+      let authorizedEvent: { id: string } | null = null;
       if (eventIdOrSlug && eventIdOrSlug !== 'all' && eventIdOrSlug !== 'all_events') {
-        targetEvent = await prisma.event.findFirst({
-          where: {
-            OR: [{ id: eventIdOrSlug }, { slug: eventIdOrSlug }],
-          },
-          select: { id: true },
-        });
+        if (isAdmin) {
+          authorizedEvent = await prisma.event.findFirst({
+            where: {
+              AND: [{ OR: [{ id: eventIdOrSlug }, { slug: eventIdOrSlug }] }],
+            },
+            select: { id: true },
+          });
+        } else {
+          authorizedEvent = await prisma.event.findFirst({
+            where: {
+              AND: [
+                { OR: [{ id: eventIdOrSlug }, { slug: eventIdOrSlug }] },
+                { organizerId: scannerUserId },
+              ],
+            },
+            select: { id: true },
+          });
+
+          if (!authorizedEvent) {
+            try {
+              const staffAssignment = await prisma.eventStaff.findFirst({
+                where: {
+                  userId: scannerUserId,
+                  status: EventStaffStatus.ACTIVE,
+                  event: {
+                    OR: [{ id: eventIdOrSlug }, { slug: eventIdOrSlug }],
+                  },
+                },
+                select: { eventId: true },
+              });
+              if (staffAssignment) {
+                authorizedEvent = { id: staffAssignment.eventId };
+              }
+            } catch (err: any) {
+              if (err?.code !== 'P2021') throw err;
+            }
+          }
+        }
       }
 
-      if (targetEvent) {
+      if (authorizedEvent) {
         await prisma.checkInLog.create({
           data: {
-            eventId: targetEvent.id,
+            eventId: authorizedEvent.id,
             scannedToken: token,
             scannedByUserId: scannerUserId,
             result: 'INVALID_TOKEN',
@@ -2056,10 +2280,34 @@ export async function checkInTicket(req: Request, res: Response, next: NextFunct
       return;
     }
 
-    // 3. Authorization check: organizer must own the event unless admin
-    if (!isAdmin && ticket.event.organizerId !== scannerUserId) {
-      console.warn(`[CheckIn] Rejected FORBIDDEN: user=${scannerUserId} does not own event ${ticket.event.id}`);
-      throw new ForbiddenError('You do not have permission to check in attendees for this event');
+    // 3. Authorization check: organizer must own the event, or user is admin, or active staff
+    const isOwner = ticket.event.organizerId === scannerUserId;
+    let isStaff = false;
+
+    if (!isAdmin && !isOwner) {
+      let staffMember: { status: string } | null = null;
+      try {
+        staffMember = await prisma.eventStaff.findUnique({
+          where: {
+            eventId_userId: {
+              eventId: ticket.eventId,
+              userId: scannerUserId,
+            },
+          },
+          select: { status: true },
+        });
+      } catch (err: any) {
+        if (err?.code !== 'P2021') throw err;
+      }
+
+      if (!staffMember || staffMember.status !== 'ACTIVE') {
+        if (idemRedisKey && redisClient) {
+          await redisClient.delLockIfMatches(idemRedisKey, lockId).catch(() => {});
+        }
+        console.warn(`[CheckIn] Rejected FORBIDDEN: user=${scannerUserId} does not own or have staff access to event ${ticket.event.id}`);
+        throw new ForbiddenError('You do not have permission to check in attendees for this event');
+      }
+      isStaff = true;
     }
 
     // 4. Check if ticket is for the scanned event (if gate specified and not "all")
@@ -2068,6 +2316,9 @@ export async function checkInTicket(req: Request, res: Response, next: NextFunct
         ticket.eventId === eventIdOrSlug || ticket.event.slug === eventIdOrSlug;
 
       if (!isTargetEvent) {
+        if (idemRedisKey && redisClient) {
+          await redisClient.delLockIfMatches(idemRedisKey, lockId).catch(() => {});
+        }
         console.warn(
           `[CheckIn] Rejected WRONG_EVENT: token=${maskedToken}, ticketEvent="${ticket.event.title}" (${ticket.event.slug}), gate="${eventIdOrSlug}"`
         );
@@ -2112,6 +2363,9 @@ export async function checkInTicket(req: Request, res: Response, next: NextFunct
     }
 
     if (ticket.status === 'CANCELLED' || ticket.order.status === 'CANCELLED' || ticket.order.status === 'REFUNDED') {
+      if (idemRedisKey && redisClient) {
+        await redisClient.delLockIfMatches(idemRedisKey, lockId).catch(() => {});
+      }
       console.warn(`[CheckIn] Rejected CANCELLED_TICKET: token=${maskedToken}, ticketStatus=${ticket.status}, orderStatus=${ticket.order.status}`);
       await prisma.checkInLog.create({
         data: {
@@ -2140,6 +2394,72 @@ export async function checkInTicket(req: Request, res: Response, next: NextFunct
     }
 
     if (ticket.status === 'CHECKED_IN') {
+      // Recovery of committed check-in if this exact scanner committed with this exact idempotencyKey:
+      if (idempotencyKey && ticket.checkedInByUserId === scannerUserId) {
+        const matchingSuccessLog = await prisma.checkInLog.findFirst({
+          where: {
+            ticketId: ticket.id,
+            scannedByUserId: scannerUserId,
+            result: 'SUCCESS',
+            notes: `idem:${idempotencyKey}`,
+          },
+          orderBy: { createdAt: 'desc' },
+        });
+
+        if (matchingSuccessLog) {
+          const totalCheckedIn = await prisma.ticket.count({
+            where: {
+              eventId: ticket.eventId,
+              status: 'CHECKED_IN',
+            },
+          });
+
+          const recoveredPayload = {
+            success: true,
+            data: {
+              result: 'SUCCESS' as const,
+              message: 'Valid admission pass verified.',
+              ticket: {
+                id: ticket.id,
+                attendeeName: ticket.attendeeName,
+                attendeeEmail: ticket.attendeeEmail,
+                tierName: ticket.ticketTier.name,
+                orderNumber: ticket.order.orderNumber,
+                checkedInAt: ticket.checkedInAt || matchingSuccessLog.createdAt,
+                eventTitle: ticket.event.title,
+                validityStartAt: ticket.ticketTier.validityStartAt,
+                validityEndAt: ticket.ticketTier.validityEndAt,
+              },
+              totalCheckedIn,
+            },
+          };
+
+          if (idemRedisKey && redisClient) {
+            await redisClient.completeIdempotencyLock(
+              idemRedisKey,
+              lockId,
+              JSON.stringify({
+                scannerUserId,
+                token,
+                eventId: (eventIdOrSlug || '').trim(),
+                ticketId: ticket.id,
+                status: 'COMPLETED',
+                responseStatus: 200,
+                responseBody: recoveredPayload,
+                createdAt: Date.now(),
+              }),
+              86_400_000
+            );
+          }
+
+          res.json(recoveredPayload);
+          return;
+        }
+      }
+
+      if (idemRedisKey && redisClient) {
+        await redisClient.delLockIfMatches(idemRedisKey, lockId).catch(() => {});
+      }
       console.warn(`[CheckIn] Rejected ALREADY_CHECKED_IN: token=${maskedToken}, checkedInAt=${ticket.checkedInAt}`);
       await prisma.checkInLog.create({
         data: {
@@ -2176,6 +2496,9 @@ export async function checkInTicket(req: Request, res: Response, next: NextFunct
     }
 
     if (ticket.order.status !== 'COMPLETED') {
+      if (idemRedisKey && redisClient) {
+        await redisClient.delLockIfMatches(idemRedisKey, lockId).catch(() => {});
+      }
       console.warn(`[CheckIn] Rejected UNPAID_ORDER: token=${maskedToken}, orderStatus=${ticket.order.status}`);
       res.status(400).json({
         success: false,
@@ -2197,6 +2520,9 @@ export async function checkInTicket(req: Request, res: Response, next: NextFunct
     const validityEnd = ticket.ticketTier.validityEndAt;
 
     if (validityStart && now < validityStart) {
+      if (idemRedisKey && redisClient) {
+        await redisClient.delLockIfMatches(idemRedisKey, lockId).catch(() => {});
+      }
       console.warn(
         `[CheckIn] Rejected TICKET_NOT_YET_VALID: token=${maskedToken}, validityStart=${validityStart.toISOString()}, now=${now.toISOString()}`
       );
@@ -2246,6 +2572,9 @@ export async function checkInTicket(req: Request, res: Response, next: NextFunct
     }
 
     if (validityEnd && now > validityEnd) {
+      if (idemRedisKey && redisClient) {
+        await redisClient.delLockIfMatches(idemRedisKey, lockId).catch(() => {});
+      }
       console.warn(
         `[CheckIn] Rejected TICKET_EXPIRED: token=${maskedToken}, validityEnd=${validityEnd.toISOString()}, now=${now.toISOString()}`
       );
@@ -2294,21 +2623,84 @@ export async function checkInTicket(req: Request, res: Response, next: NextFunct
       return;
     }
 
-    // 8. Atomic Check-in with race condition protection
-    const checkInTime = new Date();
-    const updateResult = await prisma.ticket.updateMany({
-      where: {
-        id: ticket.id,
-        status: 'ISSUED',
-      },
-      data: {
-        status: 'CHECKED_IN',
-        checkedInAt: checkInTime,
-        checkedInByUserId: scannerUserId,
-      },
-    });
+    // 8. Atomic Check-in with race condition protection & staff row lock
+    let checkInTime = new Date();
+    let updateResult: { count: number };
+
+    if (isStaff) {
+      updateResult = await prisma.$transaction(async (tx) => {
+        const staffRows = await tx.$queryRaw<Array<{ status: string }>>`
+          SELECT status FROM "EventStaff"
+          WHERE "eventId" = ${ticket.eventId} AND "userId" = ${scannerUserId}
+          FOR SHARE
+        `;
+
+        if (!staffRows || staffRows.length === 0 || staffRows[0].status !== 'ACTIVE') {
+          throw new ForbiddenError(
+            'Your staff scanning access for this event has been revoked or is inactive.'
+          );
+        }
+
+        checkInTime = new Date();
+        const res = await tx.ticket.updateMany({
+          where: {
+            id: ticket.id,
+            status: 'ISSUED',
+          },
+          data: {
+            status: 'CHECKED_IN',
+            checkedInAt: checkInTime,
+            checkedInByUserId: scannerUserId,
+          },
+        });
+
+        if (res.count > 0) {
+          await tx.checkInLog.create({
+            data: {
+              ticketId: ticket.id,
+              eventId: ticket.eventId,
+              scannedToken: ticket.ticketToken,
+              scannedByUserId: scannerUserId,
+              result: 'SUCCESS',
+              notes: idempotencyKey ? `idem:${idempotencyKey}` : undefined,
+            },
+          });
+        }
+
+        return res;
+      });
+    } else {
+      checkInTime = new Date();
+      updateResult = await prisma.ticket.updateMany({
+        where: {
+          id: ticket.id,
+          status: 'ISSUED',
+        },
+        data: {
+          status: 'CHECKED_IN',
+          checkedInAt: checkInTime,
+          checkedInByUserId: scannerUserId,
+        },
+      });
+
+      if (updateResult.count > 0) {
+        await prisma.checkInLog.create({
+          data: {
+            ticketId: ticket.id,
+            eventId: ticket.eventId,
+            scannedToken: ticket.ticketToken,
+            scannedByUserId: scannerUserId,
+            result: 'SUCCESS',
+            notes: idempotencyKey ? `idem:${idempotencyKey}` : undefined,
+          },
+        });
+      }
+    }
 
     if (updateResult.count === 0) {
+      if (idemRedisKey && redisClient) {
+        await redisClient.delLockIfMatches(idemRedisKey, lockId).catch(() => {});
+      }
       console.warn(`[CheckIn] Concurrent duplicate check-in prevented: token=${maskedToken}`);
       await prisma.checkInLog.create({
         data: {
@@ -2342,16 +2734,6 @@ export async function checkInTicket(req: Request, res: Response, next: NextFunct
       return;
     }
 
-    await prisma.checkInLog.create({
-      data: {
-        ticketId: ticket.id,
-        eventId: ticket.eventId,
-        scannedToken: ticket.ticketToken,
-        scannedByUserId: scannerUserId,
-        result: 'SUCCESS',
-      },
-    });
-
     const totalCheckedIn = await prisma.ticket.count({
       where: {
         eventId: ticket.eventId,
@@ -2361,7 +2743,7 @@ export async function checkInTicket(req: Request, res: Response, next: NextFunct
 
     console.log(`[CheckIn] SUCCESS: token=${maskedToken}, attendee="${ticket.attendeeName}", event="${ticket.event.title}"`);
 
-    res.json({
+    const responsePayload = {
       success: true,
       data: {
         result: 'SUCCESS',
@@ -2379,8 +2761,31 @@ export async function checkInTicket(req: Request, res: Response, next: NextFunct
         },
         totalCheckedIn,
       },
-    });
+    };
+
+    if (idemRedisKey && redisClient) {
+      await redisClient.completeIdempotencyLock(
+        idemRedisKey,
+        lockId,
+        JSON.stringify({
+          scannerUserId,
+          token,
+          eventId: (eventIdOrSlug || '').trim(),
+          ticketId: ticket.id,
+          status: 'COMPLETED',
+          responseStatus: 200,
+          responseBody: responsePayload,
+          createdAt: Date.now(),
+        }),
+        86_400_000
+      );
+    }
+
+    res.json(responsePayload);
   } catch (error) {
+    if (idemRedisKey && redisClient) {
+      await redisClient.delLockIfMatches(idemRedisKey, lockId).catch(() => {});
+    }
     next(error);
   }
 }
@@ -2403,6 +2808,197 @@ export async function getOrganizerEarningsPreview(
     next(error);
   }
 }
+
+export async function getOrganizerOrders(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    if (!req.user) {
+      throw new UnauthorizedError('Authentication required to access organizer orders');
+    }
+
+    if (req.user.role !== Role.ORGANIZER && req.user.role !== Role.ADMIN) {
+      throw new ForbiddenError(
+        `Access denied. Role ${req.user.role} is not permitted for this action.`
+      );
+    }
+
+    const isAdmin = req.user.role === Role.ADMIN;
+    const organizerId = req.user.userId;
+
+    const query = organizerOrdersQuerySchema.parse(req.query);
+    const { status: statuses, eventId, search, page, limit, sortBy, sortOrder } = query;
+
+    let targetEventId: string | undefined = undefined;
+    if (eventId) {
+      const event = await prisma.event.findFirst({
+        where: {
+          OR: [{ id: eventId }, { slug: eventId }],
+        },
+        select: { id: true, organizerId: true },
+      });
+
+      if (!event) {
+        throw new NotFoundError('Event not found');
+      }
+
+      if (!isAdmin && event.organizerId !== organizerId) {
+        throw new ForbiddenError('You do not have permission to view orders for this event');
+      }
+
+      targetEventId = event.id;
+    }
+
+    const andConditions: Prisma.OrderWhereInput[] = [];
+
+    if (!isAdmin) {
+      andConditions.push({ event: { organizerId } });
+    }
+
+    if (targetEventId) {
+      andConditions.push({ eventId: targetEventId });
+    }
+
+    if (statuses && statuses.length > 0) {
+      if (statuses.length === 1) {
+        andConditions.push({ status: statuses[0] });
+      } else {
+        andConditions.push({ status: { in: statuses } });
+      }
+    }
+
+    if (search) {
+      andConditions.push({
+        OR: [
+          { orderNumber: { contains: search, mode: 'insensitive' } },
+          { customerName: { contains: search, mode: 'insensitive' } },
+          { customerEmail: { contains: search, mode: 'insensitive' } },
+          { customerPhone: { contains: search, mode: 'insensitive' } },
+        ],
+      });
+    }
+
+    const where: Prisma.OrderWhereInput = andConditions.length > 0 ? { AND: andConditions } : {};
+    const skip = (page - 1) * limit;
+
+    const [total, orders] = await Promise.all([
+      prisma.order.count({ where }),
+      prisma.order.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy: { [sortBy]: sortOrder },
+        select: {
+          id: true,
+          orderNumber: true,
+          status: true,
+          customerName: true,
+          customerEmail: true,
+          customerPhone: true,
+          totalInCents: true,
+          currency: true,
+          platformFeeInCents: true,
+          organizerNetInCents: true,
+          paymentProvider: true,
+          paymentReference: true,
+          createdAt: true,
+          updatedAt: true,
+          eventId: true,
+          event: {
+            select: {
+              id: true,
+              title: true,
+              slug: true,
+              startAt: true,
+              endAt: true,
+              venueName: true,
+              city: true,
+              country: true,
+            },
+          },
+          items: {
+            select: {
+              id: true,
+              ticketTierId: true,
+              quantity: true,
+              unitPriceInCents: true,
+              subtotalInCents: true,
+              ticketTier: {
+                select: {
+                  id: true,
+                  name: true,
+                },
+              },
+            },
+          },
+          _count: {
+            select: { tickets: true },
+          },
+        },
+      }),
+    ]);
+
+    const formattedOrders = orders.map((order) => {
+      const ticketQuantity = order.items.reduce((sum, item) => sum + item.quantity, 0);
+      const paymentStatus = order.status === OrderStatus.COMPLETED ? 'PAID' : order.status;
+
+      return {
+        id: order.id,
+        orderNumber: order.orderNumber,
+        status: order.status,
+        paymentStatus,
+        customerName: order.customerName,
+        customerEmail: order.customerEmail,
+        customerPhone: order.customerPhone,
+        totalInCents: order.totalInCents,
+        currency: order.currency,
+        platformFeeInCents: order.platformFeeInCents,
+        organizerNetInCents: order.organizerNetInCents,
+        paymentProvider: order.paymentProvider,
+        paymentReference: order.paymentReference,
+        createdAt: order.createdAt,
+        updatedAt: order.updatedAt,
+        eventId: order.eventId,
+        event: order.event,
+        items: order.items.map((item) => ({
+          id: item.id,
+          ticketTierId: item.ticketTierId,
+          tierName: item.ticketTier.name,
+          quantity: item.quantity,
+          unitPriceInCents: item.unitPriceInCents,
+          subtotalInCents: item.subtotalInCents,
+        })),
+        ticketQuantity,
+        ticketsCount: order._count.tickets,
+      };
+    });
+
+    const totalPages = Math.ceil(total / limit);
+    const pagination = {
+      page,
+      limit,
+      total,
+      totalPages,
+      hasNextPage: page < totalPages,
+      hasPreviousPage: page > 1,
+    };
+
+    res.json({
+      success: true,
+      data: {
+        orders: formattedOrders,
+        pagination,
+      },
+      orders: formattedOrders,
+      pagination,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
 
 
 

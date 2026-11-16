@@ -13,6 +13,7 @@ import { ScannerPage } from './pages/ScannerPage';
 import { OrderConfirmationPage } from './pages/OrderConfirmationPage';
 import { FinanceOrganizationPage } from './pages/FinanceOrganizationPage';
 import { AuthPage } from './pages/AuthPage';
+import { StaffInvitationPage } from './pages/StaffInvitationPage';
 
 export const App: React.FC = () => {
   const location = useLocation();
@@ -21,11 +22,8 @@ export const App: React.FC = () => {
     isHome ||
     location.pathname.startsWith('/events') ||
     location.pathname.startsWith('/organizer') ||
-    location.pathname.startsWith('/teams');
-    location.pathname.startsWith('/login') ||
-    location.pathname.startsWith('/signin') ||
-    location.pathname.startsWith('/register') ||
-    location.pathname.startsWith('/forgot-password');
+    location.pathname.startsWith('/teams') ||
+    location.pathname.startsWith('/staff/invitations');
 
   return (
     <div
@@ -44,6 +42,7 @@ export const App: React.FC = () => {
           <Route path="/events" element={<DiscoverPage />} />
           <Route path="/events/:slug" element={<EventDetailPage />} />
           <Route path="/teams" element={<TeamsPage />} />
+          <Route path="/staff/invitations/:token" element={<StaffInvitationPage />} />
           <Route path="/organizer" element={<OrganizerDashboardPage />} />
           <Route path="/organizer/events/new" element={<CreateEventPage />} />
           <Route path="/organizer/events/:id/edit" element={<CreateEventPage />} />
