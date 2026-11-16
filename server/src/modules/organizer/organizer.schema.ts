@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { EventCategory, EventStatus, TicketTierStatus, RecurrenceFrequency, EventFeatureType } from '@prisma/client';
+import { EventCategory, EventStatus, TicketTierStatus, RecurrenceFrequency, EventFeatureType, OrderStatus } from '@prisma/client';
 import { extractYouTubeVideoId } from '../../utils/youtube.js';
 import { calculateGrossPriceFromDisplay } from '../checkout/checkout.financials.js';
 
@@ -301,5 +301,74 @@ export const organizerWorkspaceSchema = z.object({
 });
 
 export type OrganizerWorkspaceInput = z.infer<typeof organizerWorkspaceSchema>;
+
+export const STATUS_ALIAS_MAP: Record<string, OrderStatus> = {
+  PAID: OrderStatus.COMPLETED,
+  COMPLETED: OrderStatus.COMPLETED,
+  PENDING: OrderStatus.PENDING,
+  CANCELLED: OrderStatus.CANCELLED,
+  EXPIRED: OrderStatus.EXPIRED,
+  REFUNDED: OrderStatus.REFUNDED,
+};
+
+export const organizerOrdersQuerySchema = z.object({
+  status: z
+    .union([z.string(), z.array(z.string())])
+    .optional()
+    .transform((val, ctx) => {
+      if (!val) return undefined;
+      const rawList = Array.isArray(val) ? val : val.split(',');
+      const normalized: OrderStatus[] = [];
+      for (const item of rawList) {
+        const trimmed = item.trim().toUpperCase();
+        if (!trimmed) continue;
+        const mapped = STATUS_ALIAS_MAP[trimmed];
+        if (!mapped) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `Invalid order status '${item}'. Allowed statuses are: ${Object.keys(STATUS_ALIAS_MAP).join(', ')}`,
+          });
+          return z.NEVER;
+        }
+        if (!normalized.includes(mapped)) {
+          normalized.push(mapped);
+        }
+      }
+      return normalized.length > 0 ? normalized : undefined;
+    }),
+  eventId: z
+    .string()
+    .trim()
+    .optional()
+    .transform((e) => (e && e.length > 0 ? e : undefined)),
+  search: z
+    .string()
+    .trim()
+    .optional()
+    .transform((s) => (s && s.length > 0 ? s : undefined)),
+  page: z
+    .preprocess((val) => {
+      if (val === undefined || val === null || val === '') return 1;
+      const num = Number(val);
+      return Number.isFinite(num) ? num : NaN;
+    }, z.number().int().min(1, 'Page must be an integer >= 1'))
+    .default(1),
+  limit: z
+    .preprocess((val) => {
+      if (val === undefined || val === null || val === '') return 20;
+      const num = Number(val);
+      return Number.isFinite(num) ? num : NaN;
+    }, z.number().int().min(1, 'Limit must be >= 1').max(100, 'Limit cannot exceed 100'))
+    .default(20),
+  sortBy: z
+    .enum(['createdAt', 'updatedAt', 'totalInCents', 'orderNumber'])
+    .default('createdAt'),
+  sortOrder: z
+    .enum(['asc', 'desc'])
+    .default('desc'),
+});
+
+export type OrganizerOrdersQuery = z.infer<typeof organizerOrdersQuerySchema>;
+
 
 

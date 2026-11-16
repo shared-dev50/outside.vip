@@ -24,6 +24,7 @@ import {
   WithdrawalRequestPayload,
   WithdrawalResponse,
   StripeConnectCountry,
+  OrganizerOrdersResponse,
 } from '../types';
 
 export interface EventStaffMember {
@@ -402,6 +403,26 @@ export const api = {
         body: JSON.stringify(payload),
       }),
     listEvents: () => request<{ events: OrganizerEventItem[] }>('/organizer/events'),
+    getOrders: (params?: {
+      status?: string;
+      eventId?: string;
+      search?: string;
+      page?: number;
+      limit?: number;
+      sortBy?: 'createdAt' | 'updatedAt' | 'totalInCents' | 'orderNumber';
+      sortOrder?: 'asc' | 'desc';
+    }) => {
+      const searchParams = new URLSearchParams();
+      if (params?.status) searchParams.append('status', params.status);
+      if (params?.eventId) searchParams.append('eventId', params.eventId);
+      if (params?.search) searchParams.append('search', params.search);
+      if (params?.page) searchParams.append('page', params.page.toString());
+      if (params?.limit) searchParams.append('limit', params.limit.toString());
+      if (params?.sortBy) searchParams.append('sortBy', params.sortBy);
+      if (params?.sortOrder) searchParams.append('sortOrder', params.sortOrder);
+      const query = searchParams.toString() ? `?${searchParams.toString()}` : '';
+      return request<OrganizerOrdersResponse>(`/organizer/orders${query}`);
+    },
     getEvent: (id: string) => request<{ event: Event }>(`/organizer/events/${id}`),
     getPayoutDetails: () =>
       request<{ payoutDetails: OrganizerPayoutDetails | null }>('/organizer/payout-details'),

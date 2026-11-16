@@ -452,6 +452,59 @@ export interface Order {
   createdAt: string;
 }
 
+export interface OrganizerOrderItem {
+  id: string;
+  orderNumber: string;
+  status: OrderStatus;
+  paymentStatus: string;
+  customerName: string;
+  customerEmail: string;
+  customerPhone?: string | null;
+  totalInCents: number;
+  currency: string;
+  platformFeeInCents: number;
+  organizerNetInCents: number;
+  paymentProvider: string;
+  paymentReference?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  eventId: string;
+  event: {
+    id: string;
+    title: string;
+    slug: string;
+    startAt: string;
+    endAt: string;
+    venueName: string;
+    city: string;
+    country: string;
+  };
+  items: Array<{
+    id: string;
+    ticketTierId: string;
+    tierName: string;
+    quantity: number;
+    unitPriceInCents: number;
+    subtotalInCents: number;
+  }>;
+  ticketQuantity: number;
+  ticketsCount: number;
+}
+
+export interface OrganizerOrdersPagination {
+  page: number;
+  limit: number;
+  total: number;
+  totalPages: number;
+  hasNextPage: boolean;
+  hasPreviousPage: boolean;
+}
+
+export interface OrganizerOrdersResponse {
+  orders: OrganizerOrderItem[];
+  pagination: OrganizerOrdersPagination;
+}
+
 export interface CheckoutSessionInput {
   eventId: string;
   items: Array<{

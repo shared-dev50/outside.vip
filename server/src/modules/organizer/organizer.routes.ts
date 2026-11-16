@@ -3,7 +3,9 @@ import {
   requireAuth,
   requireVerifiedEmail,
   requireFreshUserVerification,
+  requireRole,
 } from '../../middleware/auth.js';
+import { Role } from '@prisma/client';
 import {
   getDashboardStats,
   listOrganizerEvents,
@@ -24,6 +26,7 @@ import {
   getOrganizerEarningsPreview,
   getOrganizerWorkspace,
   upsertOrganizerWorkspace,
+  getOrganizerOrders,
 } from './organizer.controller.js';
 import { handleGetOrganizerWaitlist } from '../waitlist/waitlist.controller.js';
 import { uploadCoverMiddleware } from '../../middleware/upload.js';
@@ -54,6 +57,7 @@ organizerRouter.post('/upload/sign', getUploadSignature);
 organizerRouter.post('/upload', uploadCoverMiddleware.single('image'), handleDirectUpload);
 
 organizerRouter.get('/dashboard', getDashboardStats);
+organizerRouter.get('/orders', requireRole(Role.ORGANIZER, Role.ADMIN), getOrganizerOrders);
 organizerRouter.post('/earnings-preview', getOrganizerEarningsPreview);
 organizerRouter.get('/payout-details', getOrganizerPayoutDetails);
 organizerRouter.put('/payout-details', requireFreshUserVerification, updateOrganizerPayoutDetails);

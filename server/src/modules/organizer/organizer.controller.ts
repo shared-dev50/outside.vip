@@ -1,6 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import { randomUUID } from 'node:crypto';
-import { EventStatus, TicketTierStatus, OrderStatus, TicketStatus, RecurrenceFrequency, Role, EventStaffStatus } from '@prisma/client';
+import { EventStatus, TicketTierStatus, OrderStatus, TicketStatus, RecurrenceFrequency, Role, EventStaffStatus, Prisma } from '@prisma/client';
 import { prisma } from '../../db/prisma.js';
 import {
   createEventSchema,
@@ -9,9 +9,10 @@ import {
   PayoutDetailsInput,
   earningsPreviewInputSchema,
   organizerWorkspaceSchema,
+  organizerOrdersQuerySchema,
 } from './organizer.schema.js';
 import { calculateCombinedEarnings } from '../checkout/checkout.financials.js';
-import { NotFoundError, ForbiddenError, BadRequestError, ConflictError } from '../../utils/errors.js';
+import { NotFoundError, ForbiddenError, BadRequestError, ConflictError, UnauthorizedError } from '../../utils/errors.js';
 import { getRedisClient } from '../../lib/redis.js';
 import { calculateOccurrences, formatOccurrenceSlugSuffix } from '../events/recurrence.service.js';
 import { assertStripeReadyForPaidPublishing } from '../finance/finance.service.js';
@@ -2807,6 +2808,197 @@ export async function getOrganizerEarningsPreview(
     next(error);
   }
 }
+
+export async function getOrganizerOrders(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    if (!req.user) {
+      throw new UnauthorizedError('Authentication required to access organizer orders');
+    }
+
+    if (req.user.role !== Role.ORGANIZER && req.user.role !== Role.ADMIN) {
+      throw new ForbiddenError(
+        `Access denied. Role ${req.user.role} is not permitted for this action.`
+      );
+    }
+
+    const isAdmin = req.user.role === Role.ADMIN;
+    const organizerId = req.user.userId;
+
+    const query = organizerOrdersQuerySchema.parse(req.query);
+    const { status: statuses, eventId, search, page, limit, sortBy, sortOrder } = query;
+
+    let targetEventId: string | undefined = undefined;
+    if (eventId) {
+      const event = await prisma.event.findFirst({
+        where: {
+          OR: [{ id: eventId }, { slug: eventId }],
+        },
+        select: { id: true, organizerId: true },
+      });
+
+      if (!event) {
+        throw new NotFoundError('Event not found');
+      }
+
+      if (!isAdmin && event.organizerId !== organizerId) {
+        throw new ForbiddenError('You do not have permission to view orders for this event');
+      }
+
+      targetEventId = event.id;
+    }
+
+    const andConditions: Prisma.OrderWhereInput[] = [];
+
+    if (!isAdmin) {
+      andConditions.push({ event: { organizerId } });
+    }
+
+    if (targetEventId) {
+      andConditions.push({ eventId: targetEventId });
+    }
+
+    if (statuses && statuses.length > 0) {
+      if (statuses.length === 1) {
+        andConditions.push({ status: statuses[0] });
+      } else {
+        andConditions.push({ status: { in: statuses } });
+      }
+    }
+
+    if (search) {
+      andConditions.push({
+        OR: [
+          { orderNumber: { contains: search, mode: 'insensitive' } },
+          { customerName: { contains: search, mode: 'insensitive' } },
+          { customerEmail: { contains: search, mode: 'insensitive' } },
+          { customerPhone: { contains: search, mode: 'insensitive' } },
+        ],
+      });
+    }
+
+    const where: Prisma.OrderWhereInput = andConditions.length > 0 ? { AND: andConditions } : {};
+    const skip = (page - 1) * limit;
+
+    const [total, orders] = await Promise.all([
+      prisma.order.count({ where }),
+      prisma.order.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy: { [sortBy]: sortOrder },
+        select: {
+          id: true,
+          orderNumber: true,
+          status: true,
+          customerName: true,
+          customerEmail: true,
+          customerPhone: true,
+          totalInCents: true,
+          currency: true,
+          platformFeeInCents: true,
+          organizerNetInCents: true,
+          paymentProvider: true,
+          paymentReference: true,
+          createdAt: true,
+          updatedAt: true,
+          eventId: true,
+          event: {
+            select: {
+              id: true,
+              title: true,
+              slug: true,
+              startAt: true,
+              endAt: true,
+              venueName: true,
+              city: true,
+              country: true,
+            },
+          },
+          items: {
+            select: {
+              id: true,
+              ticketTierId: true,
+              quantity: true,
+              unitPriceInCents: true,
+              subtotalInCents: true,
+              ticketTier: {
+                select: {
+                  id: true,
+                  name: true,
+                },
+              },
+            },
+          },
+          _count: {
+            select: { tickets: true },
+          },
+        },
+      }),
+    ]);
+
+    const formattedOrders = orders.map((order) => {
+      const ticketQuantity = order.items.reduce((sum, item) => sum + item.quantity, 0);
+      const paymentStatus = order.status === OrderStatus.COMPLETED ? 'PAID' : order.status;
+
+      return {
+        id: order.id,
+        orderNumber: order.orderNumber,
+        status: order.status,
+        paymentStatus,
+        customerName: order.customerName,
+        customerEmail: order.customerEmail,
+        customerPhone: order.customerPhone,
+        totalInCents: order.totalInCents,
+        currency: order.currency,
+        platformFeeInCents: order.platformFeeInCents,
+        organizerNetInCents: order.organizerNetInCents,
+        paymentProvider: order.paymentProvider,
+        paymentReference: order.paymentReference,
+        createdAt: order.createdAt,
+        updatedAt: order.updatedAt,
+        eventId: order.eventId,
+        event: order.event,
+        items: order.items.map((item) => ({
+          id: item.id,
+          ticketTierId: item.ticketTierId,
+          tierName: item.ticketTier.name,
+          quantity: item.quantity,
+          unitPriceInCents: item.unitPriceInCents,
+          subtotalInCents: item.subtotalInCents,
+        })),
+        ticketQuantity,
+        ticketsCount: order._count.tickets,
+      };
+    });
+
+    const totalPages = Math.ceil(total / limit);
+    const pagination = {
+      page,
+      limit,
+      total,
+      totalPages,
+      hasNextPage: page < totalPages,
+      hasPreviousPage: page > 1,
+    };
+
+    res.json({
+      success: true,
+      data: {
+        orders: formattedOrders,
+        pagination,
+      },
+      orders: formattedOrders,
+      pagination,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
 
 
 
