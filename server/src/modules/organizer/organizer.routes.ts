@@ -28,6 +28,13 @@ import {
 import { handleGetOrganizerWaitlist } from '../waitlist/waitlist.controller.js';
 import { uploadCoverMiddleware } from '../../middleware/upload.js';
 import { financeRouter } from '../finance/finance.routes.js';
+import {
+  getEventTeam,
+  inviteStaff,
+  resendInvitation,
+  revokeInvitation,
+  revokeStaffMember,
+} from '../staff/staff.controller.js';
 
 export const organizerRouter = Router();
 
@@ -62,3 +69,24 @@ organizerRouter.post('/events/:id/cancel', cancelOrganizerEvent);
 organizerRouter.delete('/events/:id', deleteOrganizerEvent);
 organizerRouter.get('/series/:id', getOrganizerSeries);
 organizerRouter.post('/series/:id/cancel', cancelOrganizerSeries);
+
+organizerRouter.get(['/events/:eventId/team', '/events/:id/team'], getEventTeam);
+organizerRouter.post(['/events/:eventId/team/invitations', '/events/:id/team/invitations'], inviteStaff);
+organizerRouter.post(
+  [
+    '/events/:eventId/team/invitations/:invitationId/resend',
+    '/events/:id/team/invitations/:invitationId/resend',
+  ],
+  resendInvitation
+);
+organizerRouter.delete(
+  [
+    '/events/:eventId/team/invitations/:invitationId',
+    '/events/:id/team/invitations/:invitationId',
+  ],
+  revokeInvitation
+);
+organizerRouter.delete(
+  ['/events/:eventId/team/members/:userId', '/events/:id/team/members/:userId'],
+  revokeStaffMember
+);

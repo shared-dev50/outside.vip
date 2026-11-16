@@ -17,6 +17,18 @@ enum Role {
   ADMIN
 }
 
+enum EventStaffStatus {
+  ACTIVE
+  REVOKED
+}
+
+enum StaffInvitationStatus {
+  PENDING
+  ACCEPTED
+  EXPIRED
+  REVOKED
+}
+
 enum AccountStatus {
   ACTIVE
   SUSPENDED
@@ -170,48 +182,53 @@ enum PayoutStatus {
 }
 
 model User {
-  id           String            @id @default(uuid())
-  email        String            @unique
-  passwordHash String
-  name         String
-  role         Role              @default(ATTENDEE)
-  status       AccountStatus     @default(ACTIVE)
-  emailVerified Boolean          @default(false)
-  emailVerifiedAt DateTime?
-  avatarUrl    String?
-  stripeAccountId String?        @unique
+  id                   String        @id @default(uuid())
+  email                String        @unique
+  passwordHash         String?
+  name                 String
+  role                 Role          @default(ATTENDEE)
+  status               AccountStatus @default(ACTIVE)
+  emailVerified        Boolean       @default(false)
+  emailVerifiedAt      DateTime?
+  avatarUrl            String?
+  stripeAccountId      String?       @unique
   stripeAccountCountry String?
-  createdAt    DateTime          @default(now())
-  updatedAt    DateTime          @updatedAt
+  createdAt            DateTime      @default(now())
+  updatedAt            DateTime      @updatedAt
 
-  organizer    OrganizerProfile?
-  payoutDetails OrganizerPayoutDetails?
-  events       Event[]           @relation("OrganizerEvents")
-  eventSeries  EventSeries[]     @relation("OrganizerSeries")
-  orders       Order[]
-  checkIns     CheckInLog[]      @relation("ScannerLogs")
-  ticketsScanned Ticket[]        @relation("ScannerTickets")
-  balance      OrganizerBalance?
-  ledgerEntries FinancialLedgerEntry[] @relation("OrganizerLedger")
-  transfers    OrganizerTransfer[] @relation("OrganizerTransfers")
-  initiatedTransfers OrganizerTransfer[] @relation("InitiatedTransfers")
-  connectedPayouts ConnectedPayout[] @relation("OrganizerPayouts")
-  verificationCodes EmailVerificationCode[]
-  adminAuditLogs AdminAuditLog[] @relation("AdminActorLogs")
+  organizer          OrganizerProfile?
+  payoutDetails      OrganizerPayoutDetails?
+  events             Event[]                 @relation("OrganizerEvents")
+  eventSeries        EventSeries[]           @relation("OrganizerSeries")
+  orders             Order[]
+  checkIns           CheckInLog[]            @relation("ScannerLogs")
+  ticketsScanned     Ticket[]                @relation("ScannerTickets")
+  balance            OrganizerBalance?
+  ledgerEntries      FinancialLedgerEntry[]  @relation("OrganizerLedger")
+  transfers          OrganizerTransfer[]     @relation("OrganizerTransfers")
+  initiatedTransfers OrganizerTransfer[]     @relation("InitiatedTransfers")
+  connectedPayouts   ConnectedPayout[]       @relation("OrganizerPayouts")
+  verificationCodes  EmailVerificationCode[]
+  adminAuditLogs     AdminAuditLog[]         @relation("AdminActorLogs")
+
+  staffAssignments        EventStaff[]           @relation("StaffMemberAssignments")
+  staffAssignmentsCreated EventStaff[]           @relation("StaffAssignmentsCreated")
+  staffAssignmentsRevoked EventStaff[]           @relation("StaffAssignmentsRevoked")
+  staffInvitationsSent    EventStaffInvitation[] @relation("StaffInvitationsSent")
 
   @@index([email])
 }
 
 model EmailVerificationCode {
-  id         String    @id @default(uuid())
-  userId     String
-  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  email      String
-  codeHash   String
-  expiresAt  DateTime
-  usedAt     DateTime?
-  attempts   Int       @default(0)
-  createdAt  DateTime  @default(now())
+  id        String    @id @default(uuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  email     String
+  codeHash  String
+  expiresAt DateTime
+  usedAt    DateTime?
+  attempts  Int       @default(0)
+  createdAt DateTime  @default(now())
 
   @@index([userId, createdAt])
   @@index([email, createdAt])
@@ -249,53 +266,53 @@ model OrganizerProfile {
 }
 
 model Event {
-  id             String        @id @default(uuid())
-  slug           String        @unique
-  organizerId    String
-  organizer      User          @relation("OrganizerEvents", fields: [organizerId], references: [id], onDelete: Restrict)
-  title          String
-  tagline        String?
-  description    String        @db.Text
-  category       EventCategory @default(MUSIC)
-  status         EventStatus   @default(DRAFT)
-  
-  coverImageUrl  String
+  id          String        @id @default(uuid())
+  slug        String        @unique
+  organizerId String
+  organizer   User          @relation("OrganizerEvents", fields: [organizerId], references: [id], onDelete: Restrict)
+  title       String
+  tagline     String?
+  description String        @db.Text
+  category    EventCategory @default(MUSIC)
+  status      EventStatus   @default(DRAFT)
+
+  coverImageUrl      String
   coverImagePublicId String?
-  thumbnailUrl   String?
-  
-  venueName      String
-  venueAddress   String
-  city           String
-  country        String        @default("Kenya")
-  latitude       Float?
-  longitude      Float?
-  placeId        String?
-  
-  startAt        DateTime
-  endAt          DateTime
-  timezone       String        @default("Africa/Nairobi")
-  
-  ageRestriction String?       @default("18+")
+  thumbnailUrl       String?
+
+  venueName    String
+  venueAddress String
+  city         String
+  country      String  @default("Kenya")
+  latitude     Float?
+  longitude    Float?
+  placeId      String?
+
+  startAt  DateTime
+  endAt    DateTime
+  timezone String   @default("Africa/Nairobi")
+
+  ageRestriction String? @default("18+")
   dressCode      String?
-  isFeatured     Boolean       @default(false)
-  
+  isFeatured     Boolean @default(false)
+
   // Presentation, media & privacy settings
   youtubeVideoId      String?
   youtubeVideoUrl     String?
-  showOnExplore       Boolean       @default(true)
-  hideGuestCount      Boolean       @default(false)
-  isPasswordProtected Boolean       @default(false)
+  showOnExplore       Boolean @default(true)
+  hideGuestCount      Boolean @default(false)
+  isPasswordProtected Boolean @default(false)
   passwordHash        String?
-  
-  createdAt      DateTime      @default(now())
-  updatedAt      DateTime      @updatedAt
 
-  ticketTiers    TicketTier[]
-  orders         Order[]
-  tickets        Ticket[]
-  checkInLogs    CheckInLog[]
-  galleryImages  EventGalleryImage[]
-  features       EventFeature[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  ticketTiers     TicketTier[]
+  orders          Order[]
+  tickets         Ticket[]
+  checkInLogs     CheckInLog[]
+  galleryImages   EventGalleryImage[]
+  features        EventFeature[]
   waitlistEntries TicketWaitlistEntry[]
   waitlistOffers  TicketWaitlistOffer[]
   payoutDetailsId String?
@@ -303,9 +320,12 @@ model Event {
   ledgerEntries   FinancialLedgerEntry[]
 
   seriesId        String?
-  series          EventSeries?  @relation("SeriesEvents", fields: [seriesId], references: [id], onDelete: SetNull)
+  series          EventSeries? @relation("SeriesEvents", fields: [seriesId], references: [id], onDelete: SetNull)
   occurrenceIndex Int?
-  isCustomized    Boolean       @default(false)
+  isCustomized    Boolean      @default(false)
+
+  staffAssignments EventStaff[]           @relation("EventStaffAssignments")
+  staffInvitations EventStaffInvitation[] @relation("EventStaffInvitations")
 
   @@index([slug])
   @@index([category, status])
@@ -338,7 +358,7 @@ model EventSeries {
   createdAt           DateTime            @default(now())
   updatedAt           DateTime            @updatedAt
 
-  events              Event[]             @relation("SeriesEvents")
+  events Event[] @relation("SeriesEvents")
 
   @@index([organizerId])
 }
@@ -390,15 +410,15 @@ model TicketTier {
   validityEndAt    DateTime?
   status           TicketTierStatus @default(ACTIVE)
   waitlistEnabled  Boolean          @default(false)
-  
-  createdAt        DateTime         @default(now())
-  updatedAt        DateTime         @updatedAt
 
-  orderItems       OrderItem[]
-  tickets          Ticket[]
-  reservations     TicketReservation[]
-  waitlistEntries  TicketWaitlistEntry[]
-  waitlistOffers   TicketWaitlistOffer[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  orderItems      OrderItem[]
+  tickets         Ticket[]
+  reservations    TicketReservation[]
+  waitlistEntries TicketWaitlistEntry[]
+  waitlistOffers  TicketWaitlistOffer[]
 
   @@index([eventId])
 }
@@ -419,42 +439,42 @@ model TicketReservation {
 }
 
 model Order {
-  id               String            @id @default(uuid())
-  orderNumber      String            @unique // e.g. "OUT-2026-92813"
-  userId           String?
-  user             User?             @relation(fields: [userId], references: [id], onDelete: SetNull)
-  eventId          String
-  event            Event             @relation(fields: [eventId], references: [id], onDelete: Restrict)
-  status           OrderStatus       @default(PENDING)
-  
-  customerEmail    String
-  customerName     String
-  customerPhone    String?
-  
-  marketingConsent    Boolean       @default(false)
-  marketingConsentAt  DateTime?
-  
-  totalInCents     Int
-  currency         String            @default("USD")
-  
-  platformFeeInCents  Int            @default(0)
-  organizerNetInCents Int            @default(0)
-  orderAccessToken    String?        @unique
-  
-  idempotencyKey   String            @unique
-  paymentProvider  PaymentProvider   @default(STRIPE)
-  paymentReference String?           // e.g. Stripe Checkout Session ID or M-Pesa CheckoutRequestID
-  expiresAt        DateTime          // 15-minute checkout reservation hold
-  
-  createdAt        DateTime          @default(now())
-  updatedAt        DateTime          @updatedAt
+  id          String      @id @default(uuid())
+  orderNumber String      @unique // e.g. "OUT-2026-92813"
+  userId      String?
+  user        User?       @relation(fields: [userId], references: [id], onDelete: SetNull)
+  eventId     String
+  event       Event       @relation(fields: [eventId], references: [id], onDelete: Restrict)
+  status      OrderStatus @default(PENDING)
 
-  items            OrderItem[]
-  tickets          Ticket[]
-  reservations     TicketReservation[]
-  transactions     PaymentTransaction[]
-  waitlistOffers   TicketWaitlistOffer[]
-  ledgerEntries    FinancialLedgerEntry[]
+  customerEmail String
+  customerName  String
+  customerPhone String?
+
+  marketingConsent   Boolean   @default(false)
+  marketingConsentAt DateTime?
+
+  totalInCents Int
+  currency     String @default("USD")
+
+  platformFeeInCents  Int     @default(0)
+  organizerNetInCents Int     @default(0)
+  orderAccessToken    String? @unique
+
+  idempotencyKey   String          @unique
+  paymentProvider  PaymentProvider @default(STRIPE)
+  paymentReference String? // e.g. Stripe Checkout Session ID or M-Pesa CheckoutRequestID
+  expiresAt        DateTime // 15-minute checkout reservation hold
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  items          OrderItem[]
+  tickets        Ticket[]
+  reservations   TicketReservation[]
+  transactions   PaymentTransaction[]
+  waitlistOffers TicketWaitlistOffer[]
+  ledgerEntries  FinancialLedgerEntry[]
 
   @@index([orderNumber])
   @@index([customerEmail])
@@ -477,27 +497,27 @@ model OrderItem {
 }
 
 model Ticket {
-  id                 String       @id @default(uuid())
-  ticketToken        String       @unique // Cryptographically unguessable secure token, e.g. tkt_sec_...
-  orderId            String
-  order              Order        @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  eventId            String
-  event              Event        @relation(fields: [eventId], references: [id], onDelete: Restrict)
-  ticketTierId       String
-  ticketTier         TicketTier   @relation(fields: [ticketTierId], references: [id], onDelete: Restrict)
-  
-  attendeeName       String
-  attendeeEmail      String
-  
-  status             TicketStatus @default(ISSUED)
-  checkedInAt        DateTime?
-  checkedInByUserId  String?
-  checkedInByUser    User?        @relation("ScannerTickets", fields: [checkedInByUserId], references: [id], onDelete: SetNull)
-  
-  createdAt          DateTime     @default(now())
-  updatedAt          DateTime     @updatedAt
+  id           String     @id @default(uuid())
+  ticketToken  String     @unique // Cryptographically unguessable secure token, e.g. tkt_sec_...
+  orderId      String
+  order        Order      @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  eventId      String
+  event        Event      @relation(fields: [eventId], references: [id], onDelete: Restrict)
+  ticketTierId String
+  ticketTier   TicketTier @relation(fields: [ticketTierId], references: [id], onDelete: Restrict)
 
-  checkInLogs        CheckInLog[]
+  attendeeName  String
+  attendeeEmail String
+
+  status            TicketStatus @default(ISSUED)
+  checkedInAt       DateTime?
+  checkedInByUserId String?
+  checkedInByUser   User?        @relation("ScannerTickets", fields: [checkedInByUserId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  checkInLogs CheckInLog[]
 
   @@index([ticketToken])
   @@index([eventId, status])
@@ -522,16 +542,16 @@ model CheckInLog {
 }
 
 model PaymentTransaction {
-  id                   String        @id @default(uuid())
-  orderId              String
-  order                Order         @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  provider             PaymentProvider
+  id                    String          @id @default(uuid())
+  orderId               String
+  order                 Order           @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  provider              PaymentProvider
   providerTransactionId String
-  status               PaymentStatus @default(INITIATED)
-  amountInCents        Int
-  currency             String
-  rawResponse          Json?
-  createdAt            DateTime      @default(now())
+  status                PaymentStatus   @default(INITIATED)
+  amountInCents         Int
+  currency              String
+  rawResponse           Json?
+  createdAt             DateTime        @default(now())
 
   @@index([orderId])
   @@index([providerTransactionId])
@@ -547,36 +567,36 @@ model ProcessedWebhookEvent {
 }
 
 model OrganizerPayoutDetails {
-  id                     String    @id @default(uuid())
-  userId                 String    @unique
-  user                   User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  
+  id     String @id @default(uuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
   // Organisation Details
-  orgType                String    // Company, Partnership, NGO/Non-profit, Other
-  orgTypeOther           String?
-  registeredName         String
-  registrationNumber     String?
-  country                String
-  address                String?   @db.Text
-  contactPersonName      String
-  contactEmail           String
+  orgType            String // Company, Partnership, NGO/Non-profit, Other
+  orgTypeOther       String?
+  registeredName     String
+  registrationNumber String?
+  country            String
+  address            String? @db.Text
+  contactPersonName  String
+  contactEmail       String
 
   // Payout Bank Details
   accountHolderName      String
   bankName               String
   bankCountry            String
-  accountCurrency        String    @default("USD")
-  accountNumberMasked    String    // e.g. "•••• •••• •••• 1234"
-  accountNumberLast4     String    // e.g. "1234"
-  accountNumberEncrypted String?   @db.Text
+  accountCurrency        String  @default("USD")
+  accountNumberMasked    String // e.g. "•••• •••• •••• 1234"
+  accountNumberLast4     String // e.g. "1234"
+  accountNumberEncrypted String? @db.Text
   bankBranch             String?
   swiftBic               String?
-  routingCode            String?   // Routing number, Sort code, or local clearing code
+  routingCode            String? // Routing number, Sort code, or local clearing code
 
-  createdAt              DateTime  @default(now())
-  updatedAt              DateTime  @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  events                 Event[]
+  events Event[]
 
   @@index([userId])
 }
@@ -595,7 +615,7 @@ model TicketWaitlistEntry {
   createdAt     DateTime            @default(now())
   updatedAt     DateTime            @updatedAt
 
-  offers        TicketWaitlistOffer[]
+  offers TicketWaitlistOffer[]
 
   @@index([ticketTierId, status, createdAt])
   @@index([eventId, status])
@@ -630,42 +650,42 @@ model TicketWaitlistOffer {
 }
 
 model OrganizerBalance {
-  id                        String   @id @default(uuid())
-  userId                    String   @unique
-  user                      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  
-  pendingBalanceInCents     Int      @default(0)
-  availableBalanceInCents   Int      @default(0)
-  transferredBalanceInCents Int      @default(0)
-  currency                  String   @default("USD")
-  
-  createdAt                 DateTime @default(now())
-  updatedAt                 DateTime @updatedAt
+  id     String @id @default(uuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  pendingBalanceInCents     Int    @default(0)
+  availableBalanceInCents   Int    @default(0)
+  transferredBalanceInCents Int    @default(0)
+  currency                  String @default("USD")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([userId])
 }
 
 model FinancialLedgerEntry {
-  id                 String            @id @default(uuid())
-  organizerId        String
-  organizer          User              @relation("OrganizerLedger", fields: [organizerId], references: [id], onDelete: Restrict)
-  eventId            String?
-  event              Event?            @relation(fields: [eventId], references: [id], onDelete: SetNull)
-  orderId            String?
-  order              Order?            @relation(fields: [orderId], references: [id], onDelete: SetNull)
-  transferId         String?
-  transfer           OrganizerTransfer? @relation(fields: [transferId], references: [id], onDelete: SetNull)
-  
-  type               LedgerEntryType
-  amountInCents      Int
-  currency           String            @default("USD")
-  balanceType        LedgerBalanceType
-  
-  stripeReferenceId  String?
-  description        String
-  metadata           Json?
-  
-  createdAt          DateTime          @default(now())
+  id          String             @id @default(uuid())
+  organizerId String
+  organizer   User               @relation("OrganizerLedger", fields: [organizerId], references: [id], onDelete: Restrict)
+  eventId     String?
+  event       Event?             @relation(fields: [eventId], references: [id], onDelete: SetNull)
+  orderId     String?
+  order       Order?             @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  transferId  String?
+  transfer    OrganizerTransfer? @relation(fields: [transferId], references: [id], onDelete: SetNull)
+
+  type          LedgerEntryType
+  amountInCents Int
+  currency      String            @default("USD")
+  balanceType   LedgerBalanceType
+
+  stripeReferenceId String?
+  description       String
+  metadata          Json?
+
+  createdAt DateTime @default(now())
 
   @@index([organizerId, createdAt])
   @@index([eventId])
@@ -676,29 +696,29 @@ model FinancialLedgerEntry {
 }
 
 model OrganizerTransfer {
-  id                 String             @id @default(uuid())
-  transferNumber     String             @unique // e.g. "TRF-2026-92813"
-  organizerId        String
-  organizer          User               @relation("OrganizerTransfers", fields: [organizerId], references: [id], onDelete: Restrict)
-  stripeAccountId    String
-  
-  amountInCents      Int
-  currency           String             @default("USD")
-  status             TransferStatus     @default(PENDING)
-  stripeTransferId   String?            @unique // tr_...
-  
-  sourceType         TransferSourceType @default(MANUAL_ORGANIZER_REQUEST)
-  initiatedByUserId  String
-  initiatedByUser    User               @relation("InitiatedTransfers", fields: [initiatedByUserId], references: [id], onDelete: Restrict)
-  
-  failureCode        String?
-  failureMessage     String?
-  idempotencyKey     String             @unique
-  
-  createdAt          DateTime           @default(now())
-  updatedAt          DateTime           @updatedAt
+  id              String @id @default(uuid())
+  transferNumber  String @unique // e.g. "TRF-2026-92813"
+  organizerId     String
+  organizer       User   @relation("OrganizerTransfers", fields: [organizerId], references: [id], onDelete: Restrict)
+  stripeAccountId String
 
-  ledgerEntries      FinancialLedgerEntry[]
+  amountInCents    Int
+  currency         String         @default("USD")
+  status           TransferStatus @default(PENDING)
+  stripeTransferId String?        @unique // tr_...
+
+  sourceType        TransferSourceType @default(MANUAL_ORGANIZER_REQUEST)
+  initiatedByUserId String
+  initiatedByUser   User               @relation("InitiatedTransfers", fields: [initiatedByUserId], references: [id], onDelete: Restrict)
+
+  failureCode    String?
+  failureMessage String?
+  idempotencyKey String  @unique
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  ledgerEntries FinancialLedgerEntry[]
 
   @@index([organizerId, createdAt])
   @@index([status])
@@ -707,12 +727,12 @@ model OrganizerTransfer {
 }
 
 model ConnectedPayout {
-  id                    String       @id @default(uuid())
-  organizerId           String
-  organizer             User         @relation("OrganizerPayouts", fields: [organizerId], references: [id], onDelete: Restrict)
-  stripeAccountId       String
-  stripePayoutId        String       @unique // po_...
-  
+  id              String @id @default(uuid())
+  organizerId     String
+  organizer       User   @relation("OrganizerPayouts", fields: [organizerId], references: [id], onDelete: Restrict)
+  stripeAccountId String
+  stripePayoutId  String @unique // po_...
+
   amountInCents         Int
   currency              String       @default("USD")
   status                PayoutStatus @default(PENDING)
@@ -720,9 +740,9 @@ model ConnectedPayout {
   destinationBankMasked String?
   failureCode           String?
   failureMessage        String?
-  
-  createdAt             DateTime     @default(now())
-  updatedAt             DateTime     @updatedAt
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([organizerId, createdAt])
   @@index([stripeAccountId])
@@ -730,3 +750,51 @@ model ConnectedPayout {
   @@index([status])
 }
 
+model EventStaff {
+  id               String           @id @default(uuid())
+  eventId          String
+  userId           String
+  email            String
+  status           EventStaffStatus @default(ACTIVE)
+  assignedByUserId String
+  assignedAt       DateTime         @default(now())
+  revokedAt        DateTime?
+  revokedByUserId  String?
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+
+  event          Event @relation("EventStaffAssignments", fields: [eventId], references: [id], onDelete: Cascade)
+  user           User  @relation("StaffMemberAssignments", fields: [userId], references: [id], onDelete: Restrict)
+  assignedByUser User  @relation("StaffAssignmentsCreated", fields: [assignedByUserId], references: [id], onDelete: Restrict)
+  revokedByUser  User? @relation("StaffAssignmentsRevoked", fields: [revokedByUserId], references: [id], onDelete: SetNull)
+
+  @@unique([eventId, userId])
+  @@index([userId, status])
+  @@index([eventId, status])
+}
+
+model EventStaffInvitation {
+  id              String                @id @default(uuid())
+  eventId         String
+  email           String
+  invitedByUserId String
+  tokenHash       String                @unique
+  status          StaffInvitationStatus @default(PENDING)
+  expiresAt       DateTime
+  acceptedAt      DateTime?
+  revokedAt       DateTime?
+
+  codeHash     String?
+  otpSentAt    DateTime?
+  otpExpiresAt DateTime?
+  attempts     Int       @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  event         Event @relation("EventStaffInvitations", fields: [eventId], references: [id], onDelete: Cascade)
+  invitedByUser User  @relation("StaffInvitationsSent", fields: [invitedByUserId], references: [id], onDelete: Restrict)
+
+  @@index([eventId, email])
+  @@index([email, status])
+}

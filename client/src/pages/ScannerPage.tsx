@@ -11,6 +11,7 @@ import {
   RefreshCw,
   Loader2,
   Lock,
+  WifiOff,
 } from 'lucide-react';
 import { api } from '../lib/api';
 import { 
@@ -31,7 +32,8 @@ type ScanStatus =
   | 'unpaid'
   | 'forbidden'
   | 'not_yet_valid'
-  | 'expired';
+  | 'expired'
+  | 'network_error';
 
 interface EventOption {
   id: string;
@@ -39,10 +41,7 @@ interface EventOption {
   slug: string;
 }
 
-const DEFAULT_EVENTS: EventOption[] = [
-  { id: 'sol-fest-baobab-edition-2026', title: 'SOL FEST: Under The Baobab Tree', slug: 'sol-fest-baobab-edition-2026' },
-  { id: 'sub-terrain-industrial-warehouse-004', title: 'SUB-TERRAIN: Warehouse Rave', slug: 'sub-terrain-industrial-warehouse-004' },
-];
+const DEFAULT_EVENTS: EventOption[] = [];
 
 export const ScannerPage: React.FC = () => {
   const [selectedEventId, setSelectedEventId] = useState('');
@@ -51,7 +50,7 @@ export const ScannerPage: React.FC = () => {
   const [ticketInput, setTicketInput] = useState('');
   const [scanStatus, setScanStatus] = useState<ScanStatus>('idle');
   const [ticketMeta, setTicketMeta] = useState<any>(null);
-  const [checkInCount, setCheckInCount] = useState(342);
+  const [checkInCount, setCheckInCount] = useState(0);
   const [isValidating, setIsValidating] = useState(false);
 
   const [cameraStatus, setCameraStatus] = useState<CameraStatus>('idle');
@@ -66,6 +65,11 @@ export const ScannerPage: React.FC = () => {
   const isValidatingRef = useRef(false);
   const isScanningPausedRef = useRef(false);
   const scanStatusRef = useRef<ScanStatus>('idle');
+  const pendingScanRef = useRef<{
+    token: string;
+    gateId?: string;
+    idempotencyKey: string;
+  } | null>(null);
 
   // Keep refs in sync with state for access in frame loop
   useEffect(() => {
@@ -81,24 +85,19 @@ export const ScannerPage: React.FC = () => {
     const fetchEvents = async () => {
       setIsLoadingEvents(true);
       try {
-        const publicRes = await api.events.list({ limit: 100 });
-        if (isMounted && publicRes.events && publicRes.events.length > 0) {
-          const list: EventOption[] = publicRes.events.map((e) => ({
+        const gatesRes = await api.scanner.getGates();
+        if (isMounted && gatesRes.events && gatesRes.events.length > 0) {
+          const list: EventOption[] = gatesRes.events.map((e) => ({
             id: e.id,
             title: e.title,
             slug: e.slug,
           }));
-          setEventsList((prev) => {
-            const map = new Map<string, EventOption>();
-            [...prev, ...list].forEach((item) => {
-              map.set(item.id, item);
-              if (item.slug) map.set(item.slug, item);
-            });
-            return Array.from(new Set(Array.from(map.values())));
-          });
+          setEventsList(list);
+          setIsLoadingEvents(false);
+          return;
         }
       } catch (err) {
-        console.warn('Could not load public events for scanner:', err);
+        console.warn('Could not load scanner gates directly:', err);
       }
 
       try {
@@ -118,8 +117,28 @@ export const ScannerPage: React.FC = () => {
             return Array.from(new Set(Array.from(map.values())));
           });
         }
-      } catch {
-            } finally {
+      } catch {}
+
+      try {
+        const publicRes = await api.events.list({ limit: 100 });
+        if (isMounted && publicRes.events && publicRes.events.length > 0) {
+          const list: EventOption[] = publicRes.events.map((e) => ({
+            id: e.id,
+            title: e.title,
+            slug: e.slug,
+          }));
+          setEventsList((prev) => {
+            const map = new Map<string, EventOption>();
+            [...prev, ...list].forEach((item) => {
+              map.set(item.id, item);
+              if (item.slug) map.set(item.slug, item);
+            });
+            return Array.from(new Set(Array.from(map.values())));
+          });
+        }
+      } catch (err) {
+        console.warn('Could not load public events for scanner:', err);
+      } finally {
         if (isMounted) setIsLoadingEvents(false);
       }
     };
@@ -260,45 +279,46 @@ export const ScannerPage: React.FC = () => {
     }
   }, [scanStatus, cameraStatus]);
 
-  const handleLocalFallback = (trimmed: string) => {
-    if (trimmed === 'tkt_sec_7a9f2e3b8c1d4e5f') {
-      setScanStatus('valid');
-      setTicketMeta({
-        attendee: 'Alex Mwangi [Demo Simulation]',
-        tier: 'VIP Creek Terrace',
-        orderNumber: 'OUT-2026-89412',
-        checkedInAt: 'Demo Pass (Unauthenticated Gate)',
-      });
-      setCheckInCount((prev) => prev + 1);
-    } else if (trimmed === 'tkt_sec_1d8c4e5f7a9f2e3b') {
-      setScanStatus('already_used');
-      setTicketMeta({
-        attendee: 'Zainab Wanjiru [Demo Simulation]',
-        tier: 'VIP Creek Terrace',
-        checkedInAt: '45 mins ago by Outside Admin',
-      });
-    } else if (trimmed.startsWith('wrong_') || trimmed.includes('wrong')) {
-      setScanStatus('wrong_event');
-      setTicketMeta({ note: 'This ticket belongs to another event gate.' });
-    } else {
-      setScanStatus('invalid');
-      setTicketMeta({ note: 'The ticket token could not be verified against the check-in service.' });
-    }
-  };
-
-  const handleValidateToken = async (token: string, overrideGateId?: string) => {
+  const handleValidateToken = async (
+    token: string,
+    overrideGateId?: string,
+    isRetry = false
+  ) => {
     const trimmed = extractTicketToken(token);
     if (!trimmed || isValidatingRef.current) return;
 
+    // Synchronous guard against rapid clicks / enter key / camera frames
+    isValidatingRef.current = true;
     setIsValidating(true);
     const gateId = overrideGateId !== undefined ? overrideGateId : selectedEventId;
+
+    let idempotencyKey: string;
+    if (
+      isRetry &&
+      pendingScanRef.current &&
+      pendingScanRef.current.token === trimmed &&
+      pendingScanRef.current.gateId === (gateId || undefined)
+    ) {
+      idempotencyKey = pendingScanRef.current.idempotencyKey;
+    } else {
+      idempotencyKey = `scan_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+      pendingScanRef.current = {
+        token: trimmed,
+        gateId: gateId || undefined,
+        idempotencyKey,
+      };
+    }
+
     try {
-      const res = await api.organizer.checkInTicket({
+      const res = await api.scanner.checkIn({
         token: trimmed,
         eventId: gateId || undefined,
+        idempotencyKey,
       });
 
       if (res.result === 'SUCCESS') {
+        // Confirmed successful admission clears pending retry state
+        pendingScanRef.current = null;
         setScanStatus('valid');
         setTicketMeta({
           attendee: res.ticket?.attendeeName || 'Verified Attendee',
@@ -317,6 +337,24 @@ export const ScannerPage: React.FC = () => {
       const code = err.code || err.data?.result;
       const status = err.statusCode;
       const message = err.message || '';
+
+      // On definitive server rejection, clear the pending scan operation
+      const isDefinitiveServerRejection =
+        code === 'WRONG_EVENT' ||
+        code === 'ALREADY_CHECKED_IN' ||
+        status === 409 ||
+        code === 'CANCELLED_TICKET' ||
+        code === 'UNPAID_ORDER' ||
+        code === 'INVALID_TOKEN' ||
+        status === 404 ||
+        code === 'TICKET_NOT_YET_VALID' ||
+        code === 'TICKET_EXPIRED' ||
+        status === 401 ||
+        status === 403;
+
+      if (isDefinitiveServerRejection) {
+        pendingScanRef.current = null;
+      }
 
       if (code === 'WRONG_EVENT' || message.toLowerCase().includes('belongs to')) {
         setScanStatus('wrong_event');
@@ -365,11 +403,26 @@ export const ScannerPage: React.FC = () => {
           note: message || 'You do not have permission to check in tickets at this gate. Please sign in with an organizer account.',
         });
       } else {
-              handleLocalFallback(trimmed);
+        // Uncertain outcome (network dropout, dropped socket, timeout)
+        // Keep pendingScanRef.current so Retry Check-In sends the EXACT same idempotencyKey!
+        setScanStatus('network_error');
+        setTicketMeta({
+          note: message || 'Unable to connect to the check-in service. Please check your network connection and retry.',
+        });
       }
     } finally {
+      isValidatingRef.current = false;
       setIsValidating(false);
     }
+  };
+
+  const handleRetry = () => {
+    if (!pendingScanRef.current || isValidatingRef.current) return;
+    handleValidateToken(
+      pendingScanRef.current.token,
+      pendingScanRef.current.gateId,
+      true
+    );
   };
 
   useEffect(() => {
@@ -429,6 +482,7 @@ export const ScannerPage: React.FC = () => {
     setTicketInput('');
     lastScannedRef.current = null;
     isScanningPausedRef.current = false;
+    pendingScanRef.current = null;
   };
 
   return (
@@ -684,7 +738,7 @@ export const ScannerPage: React.FC = () => {
               <div className="flex gap-2">
                 <input
                   type="text"
-                  placeholder="e.g. tkt_sec_7a9f2e3b8c1d4e5f"
+                  placeholder="e.g. tkt_sec_..."
                   value={ticketInput}
                   onChange={(e) => setTicketInput(e.target.value)}
                   onKeyDown={(e) => {
@@ -704,35 +758,6 @@ export const ScannerPage: React.FC = () => {
                   {isValidating && <Loader2 className="w-4 h-4 animate-spin" />}
                   Verify
                 </button>
-              </div>
-
-              <div className="p-4 rounded-xl bg-gray-50 border border-gray-200 space-y-2">
-                <span className="text-[11px] font-mono uppercase text-gray-500 block font-semibold">
-                  Test Pass Credentials:
-                </span>
-                <div className="flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    onClick={() => handleValidateToken('tkt_sec_7a9f2e3b8c1d4e5f')}
-                    className="px-3 py-1.5 rounded-lg bg-emerald-50 text-emerald-700 border border-emerald-200 text-xs font-mono hover:bg-emerald-100 transition-colors"
-                  >
-                    Demo Valid (Alex)
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleValidateToken('tkt_sec_1d8c4e5f7a9f2e3b')}
-                    className="px-3 py-1.5 rounded-lg bg-rose-50 text-rose-700 border border-rose-200 text-xs font-mono hover:bg-rose-100 transition-colors"
-                  >
-                    Demo Duplicate (Zainab)
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleValidateToken('bogus_invalid_token')}
-                    className="px-3 py-1.5 rounded-lg bg-gray-100 text-gray-600 border border-gray-200 text-xs font-mono hover:bg-gray-200 transition-colors"
-                  >
-                    Test Invalid
-                  </button>
-                </div>
               </div>
             </div>
           </div>
@@ -957,16 +982,55 @@ export const ScannerPage: React.FC = () => {
               </div>
             )}
 
-            <div className="pt-4">
-              <button
-                type="button"
-                onClick={resetScanner}
-                className="inline-flex items-center gap-2 px-6 py-2.5 rounded-xl bg-gray-900 text-white font-medium text-sm hover:bg-black transition-colors"
-              >
-                <RefreshCw className="w-4 h-4" />
-                Scan Next Ticket
-              </button>
-            </div>
+            {scanStatus === 'network_error' && (
+              <div className="space-y-4">
+                <div className="w-20 h-20 rounded-full bg-amber-50 text-amber-600 mx-auto flex items-center justify-center border border-amber-200">
+                  <WifiOff className="w-10 h-10" />
+                </div>
+                <div>
+                  <span className="px-3.5 py-1 rounded-full bg-amber-100 text-amber-800 font-mono font-semibold text-xs uppercase tracking-wider border border-amber-300 inline-block mb-3">
+                    Connection Error · Unverified
+                  </span>
+                  <h2 className="text-xl sm:text-2xl font-display font-bold text-gray-900">
+                    Network Connection Failed
+                  </h2>
+                  <p className="text-xs text-gray-600 mt-2 max-w-md mx-auto">
+                    {ticketMeta?.note || 'Unable to reach the check-in server. Admission cannot be confirmed offline.'}
+                  </p>
+                </div>
+                <div className="pt-2 flex flex-col sm:flex-row items-center justify-center gap-3">
+                  <button
+                    type="button"
+                    onClick={handleRetry}
+                    disabled={isValidating}
+                    className="inline-flex items-center gap-2 px-6 py-2.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-medium text-sm transition-colors shadow-sm disabled:opacity-50"
+                  >
+                    {isValidating ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+                    Retry Check-In
+                  </button>
+                  <button
+                    type="button"
+                    onClick={resetScanner}
+                    className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-gray-100 text-gray-700 font-medium text-sm hover:bg-gray-200 transition-colors"
+                  >
+                    Abandon / Scan Next
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {scanStatus !== 'network_error' && (
+              <div className="pt-4">
+                <button
+                  type="button"
+                  onClick={resetScanner}
+                  className="inline-flex items-center gap-2 px-6 py-2.5 rounded-xl bg-gray-900 text-white font-medium text-sm hover:bg-black transition-colors"
+                >
+                  <RefreshCw className="w-4 h-4" />
+                  Scan Next Ticket
+                </button>
+              </div>
+            )}
           </div>
         )}
       </div>

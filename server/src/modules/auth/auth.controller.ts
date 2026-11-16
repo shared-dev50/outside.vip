@@ -666,6 +666,10 @@ export async function login(req: Request, res: Response, next: NextFunction): Pr
       throw new UnauthorizedError('Invalid email or password.');
     }
 
+    if (!user.passwordHash) {
+      throw new UnauthorizedError('Invalid email or password.');
+    }
+
     const isValidPassword = await bcrypt.compare(input.password, user.passwordHash);
     if (!isValidPassword) {
       throw new UnauthorizedError('Invalid email or password.');
@@ -856,6 +860,10 @@ export async function changePassword(
 
     if (!dbUser) {
       throw new UnauthorizedError('User account not found');
+    }
+
+    if (!dbUser.passwordHash) {
+      throw new BadRequestError('This account does not have a password set.', 'NO_PASSWORD_SET');
     }
 
     const isCurrentValid = await bcrypt.compare(input.currentPassword, dbUser.passwordHash);

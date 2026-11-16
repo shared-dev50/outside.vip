@@ -79,6 +79,33 @@ export function resetEmailServiceTestOptions(): void {
 
 // Test-only in-memory recorder. Never populated outside NODE_ENV=test.
 export const sentVerificationEmails: VerificationEmailMessage[] = [];
+export const sentStaffInvitationEmails: StaffInvitationEmailMessage[] = [];
+export const sentStaffOtpEmails: StaffOtpEmailMessage[] = [];
+
+export interface StaffOtpEmailMessage {
+  to: string;
+  from: string;
+  subject: string;
+  text: string;
+  html: string;
+  code: string;
+  eventTitle: string;
+  expiresInMinutes: number;
+  sentAt: Date;
+}
+
+export interface StaffInvitationEmailMessage {
+  to: string;
+  from: string;
+  subject: string;
+  text: string;
+  html: string;
+  inviteUrl: string;
+  eventTitle: string;
+  organizerName: string;
+  expiresInDays: number;
+  sentAt: Date;
+}
 
 function getActiveNodeEnv(): string {
   return (process.env.NODE_ENV || env.NODE_ENV || 'development').trim().toLowerCase();
@@ -86,6 +113,14 @@ function getActiveNodeEnv(): string {
 
 export function resetSentVerificationEmails(): void {
   sentVerificationEmails.length = 0;
+}
+
+export function resetSentStaffInvitationEmails(): void {
+  sentStaffInvitationEmails.length = 0;
+}
+
+export function resetSentStaffOtpEmails(): void {
+  sentStaffOtpEmails.length = 0;
 }
 
 export function getLatestVerificationEmail(email: string): VerificationEmailMessage | undefined {
@@ -96,6 +131,32 @@ export function getLatestVerificationEmail(email: string): VerificationEmailMess
   for (let i = sentVerificationEmails.length - 1; i >= 0; i--) {
     if (normalizeEmail(sentVerificationEmails[i].to) === normalized) {
       return sentVerificationEmails[i];
+    }
+  }
+  return undefined;
+}
+
+export function getLatestStaffInvitationEmail(email: string): StaffInvitationEmailMessage | undefined {
+  if (getActiveNodeEnv() !== 'test') {
+    return undefined;
+  }
+  const normalized = normalizeEmail(email);
+  for (let i = sentStaffInvitationEmails.length - 1; i >= 0; i--) {
+    if (normalizeEmail(sentStaffInvitationEmails[i].to) === normalized) {
+      return sentStaffInvitationEmails[i];
+    }
+  }
+  return undefined;
+}
+
+export function getLatestStaffOtpEmail(email: string): StaffOtpEmailMessage | undefined {
+  if (getActiveNodeEnv() !== 'test') {
+    return undefined;
+  }
+  const normalized = normalizeEmail(email);
+  for (let i = sentStaffOtpEmails.length - 1; i >= 0; i--) {
+    if (normalizeEmail(sentStaffOtpEmails[i].to) === normalized) {
+      return sentStaffOtpEmails[i];
     }
   }
   return undefined;
@@ -497,6 +558,317 @@ export async function sendVerificationOtpEmail(params: {
 
       console.error(
         `[EmailService] Verification email delivery failed for ${maskEmailForLog(to)} after ${attempt} attempt(s) (code=${deliveryError.code}, status=${deliveryError.providerStatusCode ?? 'network'}): ${safeDetail}`
+      );
+      throw deliveryError;
+    }
+  }
+
+  throw lastError!;
+}
+
+export async function sendStaffInvitationEmail(params: {
+  to: string;
+  eventTitle: string;
+  organizerName: string;
+  inviteUrl: string;
+  expiresInDays?: number;
+  idempotencyKey?: string;
+}): Promise<EmailDeliveryResult> {
+  const expiresInDays = params.expiresInDays ?? 7;
+  const from = resolveEmailFrom();
+  const to = sanitizeHeaderField(normalizeEmail(params.to));
+  const cleanTitle = sanitizeHeaderField(params.eventTitle);
+  const cleanOrganizer = sanitizeHeaderField(params.organizerName || 'An event organizer');
+  const subject = `You're invited to scan tickets for ${cleanTitle} on Outside.vip`;
+
+  const text = [
+    `Hi,`,
+    '',
+    `${cleanOrganizer} has invited you to join the door check-in staff for "${cleanTitle}" on Outside.vip.`,
+    '',
+    `Accept your invitation and access the ticket scanner here:`,
+    params.inviteUrl,
+    '',
+    `This invitation link expires in ${expiresInDays} days.`,
+    'You will need to verify your email and authenticate appropriately before receiving scanner access.',
+    '',
+    'If you were not expecting this invitation, you can safely ignore this email.',
+  ].join('\n');
+
+  const escapedTitle = escapeHtml(cleanTitle);
+  const escapedOrganizer = escapeHtml(cleanOrganizer);
+  const escapedUrl = escapeHtml(params.inviteUrl);
+  const escapedDays = escapeHtml(String(expiresInDays));
+
+  const html = `
+    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0A0A0C; color: #F5F5F7; padding: 32px; border-radius: 16px; max-width: 520px; margin: 0 auto;">
+      <p style="font-size: 12px; text-transform: uppercase; letter-spacing: 0.14em; color: #FF5500; margin: 0 0 8px;">Outside.vip Event Staff</p>
+      <h1 style="font-size: 24px; margin: 0 0 16px; color: #FFFFFF;">You're invited to scan tickets</h1>
+      <p style="font-size: 15px; line-height: 1.6; color: #B8B8C2;">
+        <strong>${escapedOrganizer}</strong> has invited you to join the door staff team for <strong>${escapedTitle}</strong> on Outside.vip.
+      </p>
+      <p style="font-size: 15px; line-height: 1.6; color: #B8B8C2;">
+        As a scanner staff member, you will be able to scan attendee tickets and admit guests at the door.
+      </p>
+      <div style="margin: 28px 0; text-align: center;">
+        <a href="${escapedUrl}" style="background: #FF5500; color: #FFFFFF; padding: 14px 28px; text-decoration: none; border-radius: 8px; font-weight: 600; display: inline-block; font-size: 15px;">Accept Staff Invitation</a>
+      </div>
+      <p style="font-size: 13px; line-height: 1.5; color: #8E8E99; margin-top: 24px; border-top: 1px solid #1E1E24; padding-top: 16px;">
+        This invitation link is valid for <strong>${escapedDays} days</strong>. You will need to verify your email and authenticate appropriately before receiving scanner access.
+      </p>
+      <p style="font-size: 12px; color: #6E6E78; margin-top: 12px;">
+        If the button does not work, copy and paste this link in your browser:<br/>
+        <a href="${escapedUrl}" style="color: #FF5500; word-break: break-all;">${escapedUrl}</a>
+      </p>
+    </div>
+  `.trim();
+
+  const sentAt = new Date();
+  const activeNodeEnv = getActiveNodeEnv();
+  const shouldUseResendInTest = env.NODE_ENV === 'test' && Boolean(testOptions.useResendInTest);
+
+  if (activeNodeEnv === 'test' && !shouldUseResendInTest) {
+    const message: StaffInvitationEmailMessage = {
+      to,
+      from,
+      subject,
+      text,
+      html,
+      inviteUrl: params.inviteUrl,
+      eventTitle: cleanTitle,
+      organizerName: cleanOrganizer,
+      expiresInDays,
+      sentAt,
+    };
+    sentStaffInvitationEmails.push(message);
+    return {
+      sent: true,
+      status: 'recorded',
+      provider: 'test-recorder',
+      messageId: `test_rec_${crypto.randomUUID()}`,
+      from,
+      to,
+      expiresInMinutes: expiresInDays * 24 * 60,
+      sentAt,
+    };
+  }
+
+  const resendApiKey = resolveResendApiKey();
+  if (!resendApiKey) {
+    console.error(
+      `[EmailService] Staff invitation email aborted for ${maskEmailForLog(to)}: RESEND_API_KEY is not configured.`
+    );
+    throw new EmailDeliveryError(
+      'Email delivery service is not configured. Please try again later.',
+      {
+        code: 'EMAIL_SERVICE_UNCONFIGURED',
+        providerStatusCode: null,
+        retryable: false,
+      }
+    );
+  }
+
+  const resend = new Resend(resendApiKey);
+  const timeoutMs = getEffectiveTimeoutMs();
+  const retryDelayMs = getEffectiveRetryDelayMs();
+  const maxRetries = getEffectiveMaxRetries();
+  const sensitiveValues = [resendApiKey, params.inviteUrl];
+
+  let lastError: EmailDeliveryError | null = null;
+  for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
+    try {
+      const { messageId } = await sendSingleResendAttempt({
+        resend,
+        from,
+        to,
+        subject,
+        text,
+        html,
+        idempotencyKey: params.idempotencyKey,
+        timeoutMs,
+      });
+
+      return {
+        sent: true,
+        status: 'sent',
+        provider: 'resend',
+        messageId,
+        from,
+        to,
+        expiresInMinutes: expiresInDays * 24 * 60,
+        sentAt,
+      };
+    } catch (err) {
+      const deliveryError =
+        err instanceof EmailDeliveryError
+          ? err
+          : classifyProviderError({ message: err instanceof Error ? err.message : undefined });
+      lastError = deliveryError;
+
+      const canRetry = deliveryError.retryable && attempt <= maxRetries;
+      const safeDetail = sanitizeEmailLogMessage(
+        deliveryError.providerDetail || deliveryError.message,
+        sensitiveValues
+      );
+
+      if (canRetry) {
+        console.warn(
+          `[EmailService] Transient Resend failure on attempt ${attempt} for ${maskEmailForLog(to)}: ${safeDetail}. Retrying.`
+        );
+        await sleep(retryDelayMs);
+        continue;
+      }
+
+      console.error(
+        `[EmailService] Staff invitation email delivery failed for ${maskEmailForLog(to)} after ${attempt} attempt(s): ${safeDetail}`
+      );
+      throw deliveryError;
+    }
+  }
+
+  throw lastError!;
+}
+
+export async function sendStaffOtpEmail(params: {
+  to: string;
+  code: string;
+  eventTitle: string;
+  expiresInMinutes?: number;
+  idempotencyKey?: string;
+}): Promise<EmailDeliveryResult> {
+  const expiresInMinutes = params.expiresInMinutes ?? 10;
+  const from = resolveEmailFrom();
+  const to = sanitizeHeaderField(normalizeEmail(params.to));
+  const cleanTitle = sanitizeHeaderField(params.eventTitle);
+  const cleanCode = sanitizeHeaderField(params.code);
+  const subject = `${cleanCode} is your Outside.vip scanner staff access code`;
+
+  const text = [
+    `Hi,`,
+    '',
+    `Your verification code to access ticket scanning for "${cleanTitle}" on Outside.vip is: ${cleanCode}`,
+    '',
+    `This single-use code expires in ${expiresInMinutes} minutes.`,
+    'If you did not request this code, you can safely ignore this email.',
+  ].join('\n');
+
+  const escapedTitle = escapeHtml(cleanTitle);
+  const escapedCode = escapeHtml(cleanCode);
+  const escapedExpiry = escapeHtml(String(expiresInMinutes));
+
+  const html = `
+    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0A0A0C; color: #F5F5F7; padding: 32px; border-radius: 16px; max-width: 520px; margin: 0 auto;">
+      <p style="font-size: 12px; text-transform: uppercase; letter-spacing: 0.14em; color: #FF5500; margin: 0 0 8px;">Outside.vip Staff Security</p>
+      <h1 style="font-size: 24px; margin: 0 0 16px; color: #FFFFFF;">Scanner Verification Code</h1>
+      <p style="font-size: 15px; line-height: 1.6; color: #B8B8C2;">
+        Enter the 6-digit verification code below to verify your email and access ticket scanning for <strong>${escapedTitle}</strong>:
+      </p>
+      <div style="margin: 24px 0; padding: 18px 24px; background: #141418; border: 1px solid #2A2A32; border-radius: 12px; text-align: center;">
+        <span style="font-family: monospace; font-size: 32px; font-weight: 700; letter-spacing: 0.25em; color: #FF5500;">${escapedCode}</span>
+      </div>
+      <p style="font-size: 13px; color: #8E8E99; margin-top: 16px;">
+        This code is single-use and expires in <strong>${escapedExpiry} minutes</strong>.
+      </p>
+    </div>
+  `.trim();
+
+  const sentAt = new Date();
+  const activeNodeEnv = getActiveNodeEnv();
+  const shouldUseResendInTest = env.NODE_ENV === 'test' && Boolean(testOptions.useResendInTest);
+
+  if (activeNodeEnv === 'test' && !shouldUseResendInTest) {
+    const message: StaffOtpEmailMessage = {
+      to,
+      from,
+      subject,
+      text,
+      html,
+      code: cleanCode,
+      eventTitle: cleanTitle,
+      expiresInMinutes,
+      sentAt,
+    };
+    sentStaffOtpEmails.push(message);
+    return {
+      sent: true,
+      status: 'recorded',
+      provider: 'test-recorder',
+      messageId: `test_rec_${crypto.randomUUID()}`,
+      from,
+      to,
+      expiresInMinutes,
+      sentAt,
+    };
+  }
+
+  const resendApiKey = resolveResendApiKey();
+  if (!resendApiKey) {
+    console.error(
+      `[EmailService] Staff OTP email aborted for ${maskEmailForLog(to)}: RESEND_API_KEY is not configured.`
+    );
+    throw new EmailDeliveryError(
+      'Email delivery service is not configured. Please try again later.',
+      {
+        code: 'EMAIL_SERVICE_UNCONFIGURED',
+        providerStatusCode: null,
+        retryable: false,
+      }
+    );
+  }
+
+  const resend = new Resend(resendApiKey);
+  const timeoutMs = getEffectiveTimeoutMs();
+  const retryDelayMs = getEffectiveRetryDelayMs();
+  const maxRetries = getEffectiveMaxRetries();
+  const sensitiveValues = [resendApiKey, cleanCode, params.code];
+
+  let lastError: EmailDeliveryError | null = null;
+  for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
+    try {
+      const { messageId } = await sendSingleResendAttempt({
+        resend,
+        from,
+        to,
+        subject,
+        text,
+        html,
+        idempotencyKey: params.idempotencyKey,
+        timeoutMs,
+      });
+
+      return {
+        sent: true,
+        status: 'sent',
+        provider: 'resend',
+        messageId,
+        from,
+        to,
+        expiresInMinutes,
+        sentAt,
+      };
+    } catch (err) {
+      const deliveryError =
+        err instanceof EmailDeliveryError
+          ? err
+          : classifyProviderError({ message: err instanceof Error ? err.message : undefined });
+      lastError = deliveryError;
+
+      const canRetry = deliveryError.retryable && attempt <= maxRetries;
+      const safeDetail = sanitizeEmailLogMessage(
+        deliveryError.providerDetail || deliveryError.message,
+        sensitiveValues
+      );
+
+      if (canRetry) {
+        console.warn(
+          `[EmailService] Transient Resend failure on attempt ${attempt} for ${maskEmailForLog(to)}: ${safeDetail}. Retrying.`
+        );
+        await sleep(retryDelayMs);
+        continue;
+      }
+
+      console.error(
+        `[EmailService] Staff OTP email delivery failed for ${maskEmailForLog(to)} after ${attempt} attempt(s): ${safeDetail}`
       );
       throw deliveryError;
     }
