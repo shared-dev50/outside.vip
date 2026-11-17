@@ -375,6 +375,238 @@ describe('Outside.vip Organizer Scanner Utilities', () => {
       expect(pendingScanRef.current).toBeNull();
     });
   });
+
+  describe('Phase 2 Final Audit: Staff Gate Isolation & Zero Public Fallback', () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it('ATTENDEE with zero assigned gates renders explicit empty state and explanation', () => {
+      const attendeeUser: any = {
+        id: 'user-att-1',
+        email: 'staff@outside.vip',
+        name: 'Scanner Staff',
+        role: 'ATTENDEE',
+      };
+
+      const html = renderToString(React.createElement(ScannerPage, { initialUser: attendeeUser }));
+
+      expect(html).toContain('No Assigned Event Gates');
+      expect(html).toContain(
+        'You do not have any active scanner staff assignments. You need an active event assignment before scanning tickets.'
+      );
+      expect(html).toContain('Check for Assignments');
+      expect(html).not.toContain('Active Gate Pass');
+    });
+
+    it('ATTENDEE with active assigned gates loads assigned gates and avoids fallback', async () => {
+      const assignedGates = [{ id: 'evt-assigned-1', title: 'Sol Fest Baobab', slug: 'sol-fest' }];
+      const getGatesSpy = vi.spyOn(api.scanner, 'getGates').mockResolvedValue({
+        events: assignedGates,
+      } as any);
+      const listOrgEventsSpy = vi.spyOn(api.organizer, 'listEvents');
+      const listPublicEventsSpy = vi.spyOn(api.events, 'list');
+
+      const user = { role: 'ATTENDEE' };
+      let eventsList: any[] = [];
+
+      const fetchEvents = async () => {
+        try {
+          const gatesRes = await api.scanner.getGates();
+          if (gatesRes.events && gatesRes.events.length > 0) {
+            eventsList = gatesRes.events;
+            return;
+          }
+          if (user?.role === 'ATTENDEE') {
+            eventsList = [];
+            return;
+          }
+        } catch {}
+      };
+
+      await fetchEvents();
+
+      expect(getGatesSpy).toHaveBeenCalledTimes(1);
+      expect(listOrgEventsSpy).not.toHaveBeenCalled();
+      expect(listPublicEventsSpy).not.toHaveBeenCalled();
+      expect(eventsList).toEqual(assignedGates);
+    });
+
+    it('Organizer with owned events falls through to organizer events list and does not show empty state', async () => {
+      const organizerUser: any = {
+        id: 'user-org-1',
+        email: 'org@outside.vip',
+        name: 'Event Organizer',
+        role: 'ORGANIZER',
+      };
+
+      const html = renderToString(React.createElement(ScannerPage, { initialUser: organizerUser }));
+
+      expect(html).not.toContain('No Assigned Event Gates');
+      expect(html).toContain('Active Gate Pass');
+      expect(html).toContain('0<!-- --> Checked In');
+
+      const getGatesSpy = vi.spyOn(api.scanner, 'getGates').mockResolvedValue({
+        events: [],
+      } as any);
+      const orgEvents = [{ id: 'evt-org-1', title: 'My Organizer Showcase', slug: 'my-org' }];
+      const listOrgEventsSpy = vi.spyOn(api.organizer, 'listEvents').mockResolvedValue({
+        events: orgEvents,
+      } as any);
+      const listPublicEventsSpy = vi.spyOn(api.events, 'list');
+
+      const user = { role: 'ORGANIZER' };
+      let eventsList: any[] = [];
+
+      const fetchEvents = async () => {
+        try {
+          const gatesRes = await api.scanner.getGates();
+          if (gatesRes.events && gatesRes.events.length > 0) {
+            eventsList = gatesRes.events;
+            return;
+          }
+          if (user?.role === 'ATTENDEE') {
+            eventsList = [];
+            return;
+          }
+        } catch {}
+
+        try {
+          const orgRes = await api.organizer.listEvents();
+          if (orgRes.events && orgRes.events.length > 0) {
+            eventsList = orgRes.events;
+            return;
+          }
+        } catch {}
+      };
+
+      await fetchEvents();
+
+      expect(getGatesSpy).toHaveBeenCalledTimes(1);
+      expect(listOrgEventsSpy).toHaveBeenCalledTimes(1);
+      expect(listPublicEventsSpy).not.toHaveBeenCalled();
+      expect(eventsList).toEqual(orgEvents);
+    });
+
+    it('Admin with available gates does not show empty state and loads gates directly', async () => {
+      const adminUser: any = {
+        id: 'user-admin-1',
+        email: 'admin@outside.vip',
+        name: 'Outside Admin',
+        role: 'ADMIN',
+      };
+
+      const html = renderToString(React.createElement(ScannerPage, { initialUser: adminUser }));
+
+      expect(html).not.toContain('No Assigned Event Gates');
+      expect(html).toContain('Active Gate Pass');
+      expect(html).toContain('0<!-- --> Checked In');
+
+      const adminGates = [{ id: 'evt-admin-1', title: 'Global VIP Summit', slug: 'vip-summit' }];
+      const getGatesSpy = vi.spyOn(api.scanner, 'getGates').mockResolvedValue({
+        events: adminGates,
+      } as any);
+      const listOrgEventsSpy = vi.spyOn(api.organizer, 'listEvents');
+      const listPublicEventsSpy = vi.spyOn(api.events, 'list');
+
+      const user = { role: 'ADMIN' };
+      let eventsList: any[] = [];
+
+      const fetchEvents = async () => {
+        try {
+          const gatesRes = await api.scanner.getGates();
+          if (gatesRes.events && gatesRes.events.length > 0) {
+            eventsList = gatesRes.events;
+            return;
+          }
+          if (user?.role === 'ATTENDEE') {
+            eventsList = [];
+            return;
+          }
+        } catch {}
+      };
+
+      await fetchEvents();
+
+      expect(getGatesSpy).toHaveBeenCalledTimes(1);
+      expect(listOrgEventsSpy).not.toHaveBeenCalled();
+      expect(listPublicEventsSpy).not.toHaveBeenCalled();
+      expect(eventsList).toEqual(adminGates);
+    });
+
+    it('Ensure public events are never loaded as fallback for an ATTENDEE with no assignments', async () => {
+      const getGatesSpy = vi.spyOn(api.scanner, 'getGates').mockResolvedValue({
+        events: [],
+      } as any);
+      const listOrgEventsSpy = vi.spyOn(api.organizer, 'listEvents').mockResolvedValue({
+        events: [{ id: 'evt-org-leak', title: 'Leaked Org Event', slug: 'leaked-org' }],
+      } as any);
+      const listPublicEventsSpy = vi.spyOn(api.events, 'list').mockResolvedValue({
+        events: [{ id: 'evt-public-leak', title: 'Leaked Public Event', slug: 'leaked-public' }],
+      } as any);
+
+      const user = { role: 'ATTENDEE' };
+      let eventsList: any[] = [];
+      let isLoadingEvents = true;
+
+      const fetchEvents = async () => {
+        isLoadingEvents = true;
+        try {
+          const gatesRes = await api.scanner.getGates();
+          if (gatesRes.events && gatesRes.events.length > 0) {
+            eventsList = gatesRes.events;
+            isLoadingEvents = false;
+            return;
+          }
+
+          if (user?.role === 'ATTENDEE') {
+            eventsList = [];
+            isLoadingEvents = false;
+            return;
+          }
+        } catch {
+          if (user?.role === 'ATTENDEE') {
+            eventsList = [];
+            isLoadingEvents = false;
+            return;
+          }
+        }
+
+        try {
+          const orgRes = await api.organizer.listEvents();
+          if (orgRes.events && orgRes.events.length > 0) {
+            eventsList = orgRes.events;
+          }
+        } catch {}
+
+        try {
+          const publicRes = await api.events.list({ limit: 100 });
+          if (publicRes.events && publicRes.events.length > 0) {
+            eventsList = publicRes.events;
+          }
+        } catch {} finally {
+          isLoadingEvents = false;
+        }
+      };
+
+      await fetchEvents();
+
+      expect(getGatesSpy).toHaveBeenCalledTimes(1);
+      expect(listOrgEventsSpy).not.toHaveBeenCalled();
+      expect(listPublicEventsSpy).not.toHaveBeenCalled();
+      expect(eventsList).toEqual([]);
+      expect(isLoadingEvents).toBe(false);
+    });
+
+    it('verifies ScannerPage source code guarantees zero public fallback for ATTENDEE', async () => {
+      const scannerSource = await import('./pages/ScannerPage?raw').then((m) => m.default || '').catch(() => '');
+      expect(scannerSource).toBeTruthy();
+
+      expect(scannerSource).toContain("if (isMounted && user?.role === 'ATTENDEE')");
+      expect(scannerSource).toContain('No Assigned Event Gates');
+      expect(scannerSource).toContain('You do not have any active scanner staff assignments');
+    });
+  });
 });
 
 

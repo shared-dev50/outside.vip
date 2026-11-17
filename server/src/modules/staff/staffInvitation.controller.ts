@@ -315,6 +315,19 @@ export async function requestInvitationOtp(
         idempotencyKey: `staff-otp-${freshInvite.id}-${now}`,
       });
     } catch {
+      await prisma.eventStaffInvitation.updateMany({
+        where: {
+          id: freshInvite.id,
+          codeHash,
+        },
+        data: {
+          codeHash: freshInvite.codeHash,
+          otpSentAt: freshInvite.otpSentAt,
+          otpExpiresAt: freshInvite.otpExpiresAt,
+          attempts: freshInvite.attempts,
+        },
+      }).catch(() => {});
+
       throw new ServiceUnavailableError(
         'Unable to deliver verification code email. Please try again.',
         'EMAIL_DELIVERY_FAILED'

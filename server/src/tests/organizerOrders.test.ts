@@ -191,6 +191,8 @@ describe('Organizer Orders Listing API (GET /api/organizer/orders)', () => {
 
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
+      expect(res.body.orders).toBeUndefined();
+      expect(res.body.pagination).toBeUndefined();
 
       const data = res.body.data;
       expect(data.orders).toHaveLength(3);
@@ -222,6 +224,7 @@ describe('Organizer Orders Listing API (GET /api/organizer/orders)', () => {
         subtotalInCents: 15000,
       });
 
+      expect(firstOrder.paymentReference).toBeUndefined();
       expect(firstOrder.orderAccessToken).toBeUndefined();
       expect(firstOrder.idempotencyKey).toBeUndefined();
     });
@@ -364,6 +367,7 @@ describe('Organizer Orders Listing API (GET /api/organizer/orders)', () => {
       expect(res.body.success).toBe(true);
       expect(countSpy).toHaveBeenCalledWith({ where: {} });
       expect(findManySpy).toHaveBeenCalledWith(expect.objectContaining({ where: {} }));
+      expect(res.body.data.orders[0].paymentReference).toBe('pi_test_101');
     });
 
     it('allows admin to view orders for an event owned by any organizer', async () => {
@@ -505,7 +509,7 @@ describe('Organizer Orders Listing API (GET /api/organizer/orders)', () => {
       });
     });
 
-    it('applies custom sorting options', async () => {
+    it('applies custom sorting options with deterministic secondary tie-breaker', async () => {
       vi.spyOn(prisma.order, 'count').mockResolvedValue(3);
       const findManySpy = vi.spyOn(prisma.order, 'findMany').mockResolvedValue(mockOrdersList as any);
 
@@ -516,7 +520,23 @@ describe('Organizer Orders Listing API (GET /api/organizer/orders)', () => {
       expect(res.status).toBe(200);
       expect(findManySpy).toHaveBeenCalledWith(
         expect.objectContaining({
-          orderBy: { totalInCents: 'asc' },
+          orderBy: [{ totalInCents: 'asc' }, { id: 'desc' }],
+        })
+      );
+    });
+
+    it('ensures default sorting applies createdAt desc with id desc tie-breaker', async () => {
+      vi.spyOn(prisma.order, 'count').mockResolvedValue(3);
+      const findManySpy = vi.spyOn(prisma.order, 'findMany').mockResolvedValue(mockOrdersList as any);
+
+      const res = await request(app)
+        .get('/api/organizer/orders')
+        .set('Authorization', `Bearer ${organizerToken}`);
+
+      expect(res.status).toBe(200);
+      expect(findManySpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         })
       );
     });

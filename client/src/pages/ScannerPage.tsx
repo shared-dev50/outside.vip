@@ -14,6 +14,8 @@ import {
   WifiOff,
 } from 'lucide-react';
 import { api } from '../lib/api';
+import { useOptionalAuth } from '../context/AuthContext';
+import { User } from '../types';
 import { 
   CameraStatus, 
   getCameraErrorDetails, 
@@ -43,10 +45,18 @@ interface EventOption {
 
 const DEFAULT_EVENTS: EventOption[] = [];
 
-export const ScannerPage: React.FC = () => {
+interface ScannerPageProps {
+  initialUser?: User | null;
+}
+
+export const ScannerPage: React.FC<ScannerPageProps> = ({ initialUser }) => {
+  const auth = useOptionalAuth();
+  const user = initialUser !== undefined ? initialUser : auth?.user;
+
   const [selectedEventId, setSelectedEventId] = useState('');
   const [eventsList, setEventsList] = useState<EventOption[]>(DEFAULT_EVENTS);
   const [isLoadingEvents, setIsLoadingEvents] = useState(false);
+  const [refreshTrigger, setRefreshTrigger] = useState(0);
   const [ticketInput, setTicketInput] = useState('');
   const [scanStatus, setScanStatus] = useState<ScanStatus>('idle');
   const [ticketMeta, setTicketMeta] = useState<any>(null);
@@ -96,8 +106,19 @@ export const ScannerPage: React.FC = () => {
           setIsLoadingEvents(false);
           return;
         }
+
+        if (isMounted && user?.role === 'ATTENDEE') {
+          setEventsList([]);
+          setIsLoadingEvents(false);
+          return;
+        }
       } catch (err) {
         console.warn('Could not load scanner gates directly:', err);
+        if (isMounted && user?.role === 'ATTENDEE') {
+          setEventsList([]);
+          setIsLoadingEvents(false);
+          return;
+        }
       }
 
       try {
@@ -156,7 +177,7 @@ export const ScannerPage: React.FC = () => {
     return () => {
       isMounted = false;
     };
-  }, []);
+  }, [user?.role, refreshTrigger]);
 
   const stopCamera = useCallback(() => {
     if (animationFrameRef.current) {
@@ -485,6 +506,8 @@ export const ScannerPage: React.FC = () => {
     pendingScanRef.current = null;
   };
 
+  const hasNoAssignedGates = user?.role === 'ATTENDEE' && !isLoadingEvents && eventsList.length === 0;
+
   return (
     <div className="max-w-3xl mx-auto px-4 py-10 space-y-8">
       <canvas ref={canvasRef} className="hidden" aria-hidden="true" />
@@ -502,7 +525,33 @@ export const ScannerPage: React.FC = () => {
         </p>
       </div>
 
-      <div className="p-4 rounded-2xl bg-white border border-gray-200 shadow-sm flex flex-col sm:flex-row items-center justify-between gap-4">
+      {hasNoAssignedGates ? (
+        <div className="bg-white rounded-2xl p-8 sm:p-12 text-center border border-gray-200 shadow-sm space-y-4">
+          <div className="w-14 h-14 rounded-2xl bg-amber-50 text-amber-600 flex items-center justify-center mx-auto border border-amber-200/60">
+            <Lock className="w-7 h-7" />
+          </div>
+          <div className="space-y-1.5">
+            <h2 className="font-display font-bold text-xl text-gray-900 tracking-tight">
+              No Assigned Event Gates
+            </h2>
+            <p className="text-sm text-gray-500 max-w-md mx-auto leading-relaxed">
+              You do not have any active scanner staff assignments. You need an active event assignment before scanning tickets.
+            </p>
+          </div>
+          <div className="pt-2">
+            <button
+              type="button"
+              onClick={() => setRefreshTrigger((prev) => prev + 1)}
+              className="px-4 py-2 rounded-xl bg-gray-900 text-white text-xs font-semibold hover:bg-gray-800 transition-colors inline-flex items-center gap-1.5"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              Check for Assignments
+            </button>
+          </div>
+        </div>
+      ) : (
+        <>
+          <div className="p-4 rounded-2xl bg-white border border-gray-200 shadow-sm flex flex-col sm:flex-row items-center justify-between gap-4">
         <div className="w-full sm:w-auto flex-1">
           <div className="flex items-center justify-between sm:justify-start gap-2 mb-1">
             <label className="text-[11px] font-mono text-gray-500 uppercase font-semibold">
@@ -1034,6 +1083,8 @@ export const ScannerPage: React.FC = () => {
           </div>
         )}
       </div>
+        </>
+      )}
     </div>
   );
 };
