@@ -20,7 +20,9 @@ export const Navbar: React.FC = () => {
   const isHome = location.pathname === '/';
   const isDiscover = location.pathname.startsWith('/events');
   const isOrganizer = location.pathname.startsWith('/organizer');
-  const isTeams = location.pathname.startsWith('/teams');
+  const isAtendee = location.pathname.startsWith('/atendee');
+  const isOrder = location.pathname.startsWith('/order');
+  const isTeam = location.pathname.startsWith('/team');
 
   const isAuthPage =
     location.pathname.startsWith('/login') ||
@@ -53,7 +55,7 @@ export const Navbar: React.FC = () => {
         <div className="flex items-center gap-8">
           <Link to="/" className="flex items-center gap-1.5 group focus:outline-none focus-visible:ring-2 focus-visible:ring-stone-900 rounded">
             <span className="font-display font-black text-lg tracking-tight text-stone-900 group-hover:opacity-85 transition-opacity">
-              Out-side<span className="text-stone-400 font-normal">.Vip</span>
+              out-side<span className="text-stone-400 font-normal font-black">.Vip</span>
             </span>
           </Link>
 
@@ -77,13 +79,31 @@ export const Navbar: React.FC = () => {
               Discover
             </Link>
             <Link
-              to="/teams"
-              className={`transition-colors py-1 ${isTeams
+              to="orders"
+              className={`transition-colors py-1 ${isOrder
                 ? 'text-stone-900 font-bold border-b-2 border-stone-900'
                 : 'text-stone-500 hover:text-stone-900 font-medium'
                 }`}
             >
-              Teams
+              Orders
+            </Link>
+             <Link
+              to="atendees"
+              className={`transition-colors py-1 ${isAtendee
+                ? 'text-stone-900 font-bold border-b-2 border-stone-900'
+                : 'text-stone-500 hover:text-stone-900 font-medium'
+                }`}
+            >
+              Atendee
+            </Link>
+             <Link
+              to="/teams"
+              className={`transition-colors py-1 ${isTeam
+                ? 'text-stone-900 font-bold border-b-2 border-stone-900'
+                : 'text-stone-500 hover:text-stone-900 font-medium'
+                }`}
+            >
+              Team
             </Link>
           </nav>
         </div>
