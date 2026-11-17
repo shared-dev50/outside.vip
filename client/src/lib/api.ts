@@ -24,7 +24,69 @@ import {
   WithdrawalRequestPayload,
   WithdrawalResponse,
   StripeConnectCountry,
+  OrganizerOrdersResponse,
 } from '../types';
+
+export interface EventStaffMember {
+  id: string;
+  userId: string;
+  email: string;
+  name: string;
+  status: 'ACTIVE' | 'REVOKED';
+  assignedAt: string;
+  assignedByName: string;
+}
+
+export interface EventStaffInvitationItem {
+  id: string;
+  email: string;
+  status: 'PENDING' | 'ACCEPTED' | 'EXPIRED' | 'REVOKED';
+  expiresAt: string;
+  createdAt: string;
+  invitedByName: string;
+  canResend: boolean;
+  resendCooldownSeconds: number;
+}
+
+export interface EventTeamResponse {
+  staff: EventStaffMember[];
+  invitations: EventStaffInvitationItem[];
+}
+
+export interface ScannerGateItem {
+  id: string;
+  title: string;
+  slug: string;
+  startAt: string;
+  endAt: string;
+  venueName?: string | null;
+  city?: string | null;
+  country?: string | null;
+  role: 'ADMIN' | 'ORGANIZER' | 'STAFF';
+}
+
+export interface StaffInvitationMetadataResponse {
+  invitation: {
+    id: string;
+    status: 'PENDING' | 'ACCEPTED' | 'EXPIRED' | 'REVOKED';
+    expiresAt: string;
+    maskedEmail: string;
+    hasPassword: boolean;
+    requiresLogin: boolean;
+    isCurrentAccount: boolean;
+  };
+  event: {
+    id: string;
+    title: string;
+    slug: string;
+    startAt: string;
+    endAt: string;
+    venueName: string;
+    city: string;
+    country: string;
+    organizerName: string;
+  };
+}
 
 const PROXIED_API_HOSTS = new Set([
   'outside-vip.onrender.com',
@@ -341,6 +403,26 @@ export const api = {
         body: JSON.stringify(payload),
       }),
     listEvents: () => request<{ events: OrganizerEventItem[] }>('/organizer/events'),
+    getOrders: (params?: {
+      status?: string;
+      eventId?: string;
+      search?: string;
+      page?: number;
+      limit?: number;
+      sortBy?: 'createdAt' | 'updatedAt' | 'totalInCents' | 'orderNumber';
+      sortOrder?: 'asc' | 'desc';
+    }) => {
+      const searchParams = new URLSearchParams();
+      if (params?.status) searchParams.append('status', params.status);
+      if (params?.eventId) searchParams.append('eventId', params.eventId);
+      if (params?.search) searchParams.append('search', params.search);
+      if (params?.page) searchParams.append('page', params.page.toString());
+      if (params?.limit) searchParams.append('limit', params.limit.toString());
+      if (params?.sortBy) searchParams.append('sortBy', params.sortBy);
+      if (params?.sortOrder) searchParams.append('sortOrder', params.sortOrder);
+      const query = searchParams.toString() ? `?${searchParams.toString()}` : '';
+      return request<OrganizerOrdersResponse>(`/organizer/orders${query}`);
+    },
     getEvent: (id: string) => request<{ event: Event }>(`/organizer/events/${id}`),
     getPayoutDetails: () =>
       request<{ payoutDetails: OrganizerPayoutDetails | null }>('/organizer/payout-details'),
@@ -394,7 +476,7 @@ export const api = {
       }),
     getWaitlist: (eventId: string) =>
       request<OrganizerWaitlistResponse>(`/organizer/events/${eventId}/waitlist`),
-    checkInTicket: (payload: { token: string; eventId?: string }) =>
+    checkInTicket: (payload: { token: string; eventId?: string; idempotencyKey?: string }) =>
       request<{
         result: 'SUCCESS' | 'ALREADY_CHECKED_IN' | 'INVALID_TOKEN' | 'WRONG_EVENT' | 'CANCELLED_TICKET' | 'UNPAID_ORDER' | 'TICKET_NOT_YET_VALID' | 'TICKET_EXPIRED';
         message: string;
@@ -402,6 +484,7 @@ export const api = {
         totalCheckedIn?: number;
       }>('/organizer/check-in', {
         method: 'POST',
+        headers: payload.idempotencyKey ? { 'Idempotency-Key': payload.idempotencyKey } : undefined,
         body: JSON.stringify(payload),
       }),
       uploadCoverImage: async (
@@ -807,6 +890,94 @@ export const api = {
         } | null;
       }>(`/places/details/${encodeURIComponent(placeId)}${query}`);
     },
+  },
+  staff: {
+    getTeam: (eventId: string) =>
+      request<EventTeamResponse>(`/organizer/events/${eventId}/team`),
+    invite: (eventId: string, email: string) =>
+      request<{
+        invitation: EventStaffInvitationItem;
+        emailDeliveryFailed?: boolean;
+        message?: string;
+      }>(`/organizer/events/${eventId}/invitations`, {
+        method: 'POST',
+        body: JSON.stringify({ email }),
+      }),
+    resendInvitation: (eventId: string, invitationId: string) =>
+      request<{
+        success: boolean;
+        message: string;
+        cooldownSeconds: number;
+      }>(`/organizer/events/${eventId}/invitations/${invitationId}/resend`, {
+        method: 'POST',
+      }),
+    revokeInvitation: (eventId: string, invitationId: string) =>
+      request<{ success: boolean; message: string }>(
+        `/organizer/events/${eventId}/invitations/${invitationId}`,
+        { method: 'DELETE' }
+      ),
+    revokeMember: (eventId: string, userId: string) =>
+      request<{ success: boolean; message: string }>(
+        `/organizer/events/${eventId}/members/${userId}`,
+        { method: 'DELETE' }
+      ),
+  },
+  staffInvitation: {
+    getMetadata: (token: string) =>
+      request<StaffInvitationMetadataResponse>(`/staff/invitations/${token}`),
+    requestOtp: (token: string) =>
+      request<{
+        message: string;
+        cooldownSeconds: number;
+        expiresInMinutes: number;
+      }>(`/staff/invitations/${token}/request-otp`, {
+        method: 'POST',
+      }),
+    verifyOtp: (token: string, code: string) =>
+      request<{
+        user: any;
+        csrfToken?: string;
+        token?: string;
+        eventId: string;
+        status: string;
+      }>(`/staff/invitations/${token}/verify-otp`, {
+        method: 'POST',
+        body: JSON.stringify({ code }),
+      }),
+    acceptWithSession: (token: string) =>
+      request<{
+        success: boolean;
+        user: any;
+        eventId: string;
+        status: string;
+      }>(`/staff/invitations/${token}/accept`, {
+        method: 'POST',
+      }),
+  },
+  scanner: {
+    getGates: () =>
+      request<{
+        events: ScannerGateItem[];
+      }>('/scanner/gates'),
+    checkIn: (payload: { token: string; eventId?: string; idempotencyKey?: string }) =>
+      request<{
+        result:
+          | 'SUCCESS'
+          | 'ALREADY_CHECKED_IN'
+          | 'INVALID_TOKEN'
+          | 'WRONG_EVENT'
+          | 'CANCELLED_TICKET'
+          | 'UNPAID_ORDER'
+          | 'TICKET_NOT_YET_VALID'
+          | 'TICKET_EXPIRED';
+        message: string;
+        ticket?: any;
+        totalCheckedIn?: number;
+      }>('/scanner/check-in', {
+        method: 'POST',
+        headers: payload.idempotencyKey ? { 'Idempotency-Key': payload.idempotencyKey } : undefined,
+        body: JSON.stringify(payload),
+      }),
   },
 };
 

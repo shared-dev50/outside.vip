@@ -224,6 +224,14 @@ describe('Outside.vip Client Library', () => {
       })
     );
 
+    await api.organizer.getOrders({ status: 'PAID,CANCELLED', page: 2, limit: 10 });
+    expect(fetchSpy).toHaveBeenCalledWith(
+      '/api/organizer/orders?status=PAID%2CCANCELLED&page=2&limit=10',
+      expect.objectContaining({
+        headers: expect.any(Object),
+      })
+    );
+
     fetchSpy.mockRestore();
   });
 

@@ -17,6 +17,8 @@ import { webhookRouter } from './modules/webhooks/webhook.routes.js';
 import { ordersRouter } from './modules/orders/orders.routes.js';
 import { waitlistRouter } from './modules/waitlist/waitlist.routes.js';
 import { placesRouter } from './modules/places/places.routes.js';
+import { staffInvitationRouter } from './modules/staff/staffInvitation.routes.js';
+import { scannerRouter } from './modules/scanner/scanner.routes.js';
 
 export const app = express();
 app.set('trust proxy', 1);
@@ -52,6 +54,8 @@ app.use('/api/webhooks', webhookRouter);
 app.use('/api/orders', ordersRouter);
 app.use('/api/waitlist', waitlistRouter);
 app.use('/api/places', placesRouter);
+app.use('/api/staff/invitations', staffInvitationRouter);
+app.use('/api/scanner', scannerRouter);
 
 app.use('/api/*', (_req, res) => {
   res.status(404).json({

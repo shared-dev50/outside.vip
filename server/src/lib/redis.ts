@@ -31,9 +31,57 @@ redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[2]))
 return 1
 `;
 
+export const DEL_LOCK_IF_MATCHES_LUA = `
+local current = redis.call('GET', KEYS[1])
+if not current then
+  return 0
+end
+if string.find(current, ARGV[1], 1, true) then
+  return redis.call('DEL', KEYS[1])
+else
+  return 0
+end
+`;
+
+export const COMPLETE_LOCK_IF_MATCHES_LUA = `
+local current = redis.call('GET', KEYS[1])
+if not current then
+  redis.call('SET', KEYS[1], ARGV[2], 'PX', tonumber(ARGV[3]))
+  return 1
+end
+if string.find(current, ARGV[1], 1, true) then
+  redis.call('SET', KEYS[1], ARGV[2], 'PX', tonumber(ARGV[3]))
+  return 1
+else
+  return 0
+end
+`;
+
+export const EXTEND_LOCK_IF_MATCHES_LUA = `
+local current = redis.call('GET', KEYS[1])
+if not current then
+  return 0
+end
+if string.find(current, ARGV[1], 1, true) then
+  redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[2]))
+  return 1
+else
+  return 0
+end
+`;
+
 export interface RedisStoreClient {
   get(key: string): Promise<string | null>;
   setPx(key: string, value: string, ttlMs: number): Promise<void>;
+  setNxPx(key: string, value: string, ttlMs: number): Promise<boolean>;
+  delLockIfMatches(key: string, lockId: string): Promise<boolean>;
+  completeIdempotencyLock(
+    key: string,
+    lockId: string,
+    completedJson: string,
+    ttlMs: number
+  ): Promise<boolean>;
+  extendLockIfMatches(key: string, lockId: string, ttlMs: number): Promise<boolean>;
   del(...keys: string[]): Promise<number>;
   pttl(key: string): Promise<number>;
   pexpire(key: string, ttlMs: number): Promise<number>;
@@ -104,6 +152,54 @@ class IoRedisStoreAdapter implements RedisStoreClient {
   async setPx(key: string, value: string, ttlMs: number): Promise<void> {
     assertRedisAvailable();
     await this.client.set(key, value, 'PX', Math.max(1, Math.floor(ttlMs)));
+  }
+
+  async setNxPx(key: string, value: string, ttlMs: number): Promise<boolean> {
+    assertRedisAvailable();
+    const res = await this.client.set(
+      key,
+      value,
+      'PX',
+      Math.max(1, Math.floor(ttlMs)),
+      'NX'
+    );
+    return res === 'OK';
+  }
+
+  async delLockIfMatches(key: string, lockId: string): Promise<boolean> {
+    assertRedisAvailable();
+    const res = await this.client.eval(DEL_LOCK_IF_MATCHES_LUA, 1, key, lockId);
+    return Number(res) === 1;
+  }
+
+  async completeIdempotencyLock(
+    key: string,
+    lockId: string,
+    completedJson: string,
+    ttlMs: number
+  ): Promise<boolean> {
+    assertRedisAvailable();
+    const res = await this.client.eval(
+      COMPLETE_LOCK_IF_MATCHES_LUA,
+      1,
+      key,
+      lockId,
+      completedJson,
+      Math.max(1, Math.floor(ttlMs)).toString()
+    );
+    return Number(res) === 1;
+  }
+
+  async extendLockIfMatches(key: string, lockId: string, ttlMs: number): Promise<boolean> {
+    assertRedisAvailable();
+    const res = await this.client.eval(
+      EXTEND_LOCK_IF_MATCHES_LUA,
+      1,
+      key,
+      lockId,
+      Math.max(1, Math.floor(ttlMs)).toString()
+    );
+    return Number(res) === 1;
   }
 
   async del(...keys: string[]): Promise<number> {
@@ -252,6 +348,61 @@ class AtomicMemoryRedisAdapter implements RedisStoreClient {
       value,
       expiresAt: Date.now() + Math.max(1, Math.floor(ttlMs)),
     });
+  }
+
+  async setNxPx(key: string, value: string, ttlMs: number): Promise<boolean> {
+    assertRedisAvailable();
+    const existing = this.getValidStringEntry(key);
+    if (existing) {
+      return false;
+    }
+    this.kv.set(key, {
+      value,
+      expiresAt: Date.now() + Math.max(1, Math.floor(ttlMs)),
+    });
+    return true;
+  }
+
+  async delLockIfMatches(key: string, lockId: string): Promise<boolean> {
+    assertRedisAvailable();
+    const entry = this.getValidStringEntry(key);
+    if (!entry) return false;
+    if (entry.value.includes(lockId)) {
+      this.kv.delete(key);
+      return true;
+    }
+    return false;
+  }
+
+  async completeIdempotencyLock(
+    key: string,
+    lockId: string,
+    completedJson: string,
+    ttlMs: number
+  ): Promise<boolean> {
+    assertRedisAvailable();
+    const entry = this.getValidStringEntry(key);
+    if (!entry || entry.value.includes(lockId)) {
+      this.kv.set(key, {
+        value: completedJson,
+        expiresAt: Date.now() + Math.max(1, Math.floor(ttlMs)),
+      });
+      return true;
+    }
+    return false;
+  }
+
+  async extendLockIfMatches(key: string, lockId: string, ttlMs: number): Promise<boolean> {
+    assertRedisAvailable();
+    const entry = this.getValidStringEntry(key);
+    if (entry && entry.value.includes(lockId)) {
+      this.kv.set(key, {
+        value: entry.value,
+        expiresAt: Date.now() + Math.max(1, Math.floor(ttlMs)),
+      });
+      return true;
+    }
+    return false;
   }
 
   async del(...keys: string[]): Promise<number> {
