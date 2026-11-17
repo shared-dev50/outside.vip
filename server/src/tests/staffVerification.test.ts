@@ -253,6 +253,91 @@ describe('Passwordless Staff Acceptance & Session Issuance API', () => {
       expect(res.status).toBe(409);
       expect(res.body.error.code).toBe('INVITATION_MUTEX_LOCKED');
     });
+
+    it('restores previous OTP state if email delivery fails, preventing false cooldown lockout', async () => {
+      const priorSentAt = new Date(Date.now() - 120000);
+      const priorExpiresAt = new Date(Date.now() - 60000);
+      const mockInvite = createMockInvitation({
+        codeHash: 'prior-hmac-hash-1234567890',
+        otpSentAt: priorSentAt,
+        otpExpiresAt: priorExpiresAt,
+        attempts: 2,
+      });
+
+      vi.spyOn(prisma.eventStaffInvitation, 'findUnique').mockResolvedValue(mockInvite as any);
+      vi.spyOn(prisma.user, 'findUnique').mockResolvedValue(null);
+      const updateSpy = vi.spyOn(prisma.eventStaffInvitation, 'update').mockResolvedValue({} as any);
+      const updateManySpy = vi.spyOn(prisma.eventStaffInvitation, 'updateMany').mockResolvedValue({ count: 1 } as any);
+      vi.spyOn(emailService, 'sendStaffOtpEmail').mockRejectedValue(new Error('Resend network timeout'));
+
+      const res = await request(app).post(`/api/staff/invitations/${rawToken}/request-otp`);
+
+      expect(res.status).toBe(503);
+      expect(res.body.error.code).toBe('EMAIL_DELIVERY_FAILED');
+      expect(updateSpy).toHaveBeenCalledTimes(1);
+
+      expect(updateManySpy).toHaveBeenCalledWith({
+        where: {
+          id: mockInvite.id,
+          codeHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+        },
+        data: {
+          codeHash: 'prior-hmac-hash-1234567890',
+          otpSentAt: priorSentAt,
+          otpExpiresAt: priorExpiresAt,
+          attempts: 2,
+        },
+      });
+    });
+
+    it('does not overwrite concurrent or newer OTP if rollback condition codeHash does not match', async () => {
+      const mockInvite = createMockInvitation({
+        codeHash: null,
+        otpSentAt: null,
+        otpExpiresAt: null,
+        attempts: 0,
+      });
+
+      vi.spyOn(prisma.eventStaffInvitation, 'findUnique').mockResolvedValue(mockInvite as any);
+      vi.spyOn(prisma.user, 'findUnique').mockResolvedValue(null);
+      vi.spyOn(prisma.eventStaffInvitation, 'update').mockResolvedValue({} as any);
+      const updateManySpy = vi.spyOn(prisma.eventStaffInvitation, 'updateMany').mockResolvedValue({ count: 0 } as any);
+      vi.spyOn(emailService, 'sendStaffOtpEmail').mockRejectedValue(new Error('SMTP unreachable'));
+
+      const res = await request(app).post(`/api/staff/invitations/${rawToken}/request-otp`);
+
+      expect(res.status).toBe(503);
+      expect(res.body.error.code).toBe('EMAIL_DELIVERY_FAILED');
+
+      const updateManyCall = updateManySpy.mock.calls[0][0];
+      expect(updateManyCall.where.id).toBe(mockInvite.id);
+      expect(updateManyCall.where.codeHash).toMatch(/^[a-f0-9]{64}$/);
+    });
+
+    it('releases Redis distributed lock safely via delLockIfMatches even on email delivery failure', async () => {
+      const mockInvite = createMockInvitation();
+      vi.spyOn(prisma.eventStaffInvitation, 'findUnique').mockResolvedValue(mockInvite as any);
+      vi.spyOn(prisma.user, 'findUnique').mockResolvedValue(null);
+      vi.spyOn(prisma.eventStaffInvitation, 'update').mockResolvedValue({} as any);
+      vi.spyOn(prisma.eventStaffInvitation, 'updateMany').mockResolvedValue({ count: 1 } as any);
+      vi.spyOn(emailService, 'sendStaffOtpEmail').mockRejectedValue(new Error('Service Unavailable'));
+
+      const mockRedisClient = {
+        setNxPx: vi.fn().mockResolvedValue(true),
+        delLockIfMatches: vi.fn().mockResolvedValue(true),
+      };
+      vi.spyOn(redisModule, 'getRedisClient' as any).mockReturnValue(mockRedisClient as any);
+
+      const res = await request(app).post(`/api/staff/invitations/${rawToken}/request-otp`);
+
+      expect(res.status).toBe(503);
+      expect(res.body.error.code).toBe('EMAIL_DELIVERY_FAILED');
+      expect(mockRedisClient.setNxPx).toHaveBeenCalledTimes(1);
+      expect(mockRedisClient.delLockIfMatches).toHaveBeenCalledTimes(1);
+      const [lockKey, lockId] = mockRedisClient.delLockIfMatches.mock.calls[0];
+      expect(lockKey).toBe(`lock:invitation_otp:${mockInvite.id}`);
+      expect(lockId).toMatch(/^[0-9a-f-]{36}$/);
+    });
   });
 
   describe('3. OTP Verification & Passwordless Session Issuance (POST /api/staff/invitations/:token/verify-otp)', () => {

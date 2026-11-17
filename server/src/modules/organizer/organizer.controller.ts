@@ -2889,7 +2889,7 @@ export async function getOrganizerOrders(
         where,
         skip,
         take: limit,
-        orderBy: { [sortBy]: sortOrder },
+        orderBy: [{ [sortBy]: sortOrder }, { id: 'desc' }],
         select: {
           id: true,
           orderNumber: true,
@@ -2957,7 +2957,7 @@ export async function getOrganizerOrders(
         platformFeeInCents: order.platformFeeInCents,
         organizerNetInCents: order.organizerNetInCents,
         paymentProvider: order.paymentProvider,
-        paymentReference: order.paymentReference,
+        paymentReference: isAdmin ? order.paymentReference : undefined,
         createdAt: order.createdAt,
         updatedAt: order.updatedAt,
         eventId: order.eventId,
@@ -2991,8 +2991,6 @@ export async function getOrganizerOrders(
         orders: formattedOrders,
         pagination,
       },
-      orders: formattedOrders,
-      pagination,
     });
   } catch (error) {
     next(error);
