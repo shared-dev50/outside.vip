@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   api,
   resolveApiBaseUrl,
@@ -28,6 +28,12 @@ describe('Outside.vip Client Library', () => {
     expect(typeof api.auth.resendVerification).toBe('function');
     expect(typeof api.organizer.getWorkspace).toBe('function');
     expect(typeof api.organizer.upsertWorkspace).toBe('function');
+    expect(api.staff).toBeDefined();
+    expect(typeof api.staff.getTeam).toBe('function');
+    expect(typeof api.staff.invite).toBe('function');
+    expect(typeof api.staff.resendInvitation).toBe('function');
+    expect(typeof api.staff.revokeInvitation).toBe('function');
+    expect(typeof api.staff.revokeMember).toBe('function');
   });
 
   it('sends credentials: include and attaches X-CSRF-Token on state-changing requests without storing tokens in localStorage', async () => {
@@ -604,6 +610,199 @@ describe('Outside.vip Client Library', () => {
         destination: 'https://outside-vip.onrender.com/api/:path*',
         type: 'api',
       });
+    });
+  });
+
+  describe('api.staff Organizer Staff Management Routes', () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it('api.staff.invite dispatches POST /api/organizer/events/:eventId/team/invitations with JSON payload', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+        ok: true,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({
+          success: true,
+          data: {
+            invitation: { id: 'inv-123', email: 'scanner@outside.vip', status: 'PENDING' },
+          },
+        }),
+      } as any);
+
+      const eventId = 'evt-fest-1';
+      const email = 'scanner@outside.vip';
+      const res = await api.staff.invite(eventId, email);
+
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      const [url, options] = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('/api/organizer/events/evt-fest-1/team/invitations');
+      expect(options.method).toBe('POST');
+      expect(options.credentials).toBe('include');
+      expect(JSON.parse(options.body as string)).toEqual({ email: 'scanner@outside.vip' });
+      expect(res.invitation.email).toBe('scanner@outside.vip');
+    });
+
+    it('api.staff.getTeam dispatches GET /api/organizer/events/:eventId/team', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+        ok: true,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({
+          success: true,
+          data: { staff: [], invitations: [] },
+        }),
+      } as any);
+
+      await api.staff.getTeam('evt-fest-1');
+
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      const [url, options] = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('/api/organizer/events/evt-fest-1/team');
+      expect(options.method ?? 'GET').toBe('GET');
+      expect(options.credentials).toBe('include');
+    });
+
+    it('api.staff.resendInvitation dispatches POST /api/organizer/events/:eventId/team/invitations/:invitationId/resend', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+        ok: true,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({
+          success: true,
+          data: { success: true, message: 'Resent' },
+        }),
+      } as any);
+
+      await api.staff.resendInvitation('evt-fest-1', 'inv-789');
+
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      const [url, options] = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('/api/organizer/events/evt-fest-1/team/invitations/inv-789/resend');
+      expect(options.method).toBe('POST');
+      expect(options.credentials).toBe('include');
+    });
+
+    it('api.staff.revokeInvitation dispatches DELETE /api/organizer/events/:eventId/team/invitations/:invitationId', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+        ok: true,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({
+          success: true,
+          data: { success: true, message: 'Revoked' },
+        }),
+      } as any);
+
+      await api.staff.revokeInvitation('evt-fest-1', 'inv-789');
+
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      const [url, options] = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('/api/organizer/events/evt-fest-1/team/invitations/inv-789');
+      expect(options.method).toBe('DELETE');
+      expect(options.credentials).toBe('include');
+    });
+
+    it('api.staff.revokeMember dispatches DELETE /api/organizer/events/:eventId/team/members/:userId', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+        ok: true,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({
+          success: true,
+          data: { success: true, message: 'Staff member revoked' },
+        }),
+      } as any);
+
+      await api.staff.revokeMember('evt-fest-1', 'usr-staff-456');
+
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      const [url, options] = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('/api/organizer/events/evt-fest-1/team/members/usr-staff-456');
+      expect(options.method).toBe('DELETE');
+      expect(options.credentials).toBe('include');
+    });
+
+    it('api.staff.invite throws ApiError with code EMAIL_DELIVERY_FAILED on 503 response', async () => {
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+        ok: false,
+        status: 503,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({
+          success: false,
+          error: {
+            code: 'EMAIL_DELIVERY_FAILED',
+            message: 'Staff invitation created, but the invitation email could not be delivered. Please use the resend option to try again.',
+            statusCode: 503,
+          },
+        }),
+      } as any);
+
+      await expect(api.staff.invite('evt-fest-1', 'scanner@outside.vip')).rejects.toMatchObject({
+        code: 'EMAIL_DELIVERY_FAILED',
+        statusCode: 503,
+        message: 'Staff invitation created, but the invitation email could not be delivered. Please use the resend option to try again.',
+      });
+    });
+
+    it('api.staffInvitation.getMetadata resolves accepted invitation with returning staff properties', async () => {
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+        ok: true,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({
+          success: true,
+          data: {
+            invitation: {
+              id: 'inv-accepted-1',
+              status: 'ACCEPTED',
+              expiresAt: new Date(Date.now() + 600000).toISOString(),
+              maskedEmail: 'sc***@outside.vip',
+              hasPassword: false,
+              requiresLogin: false,
+              isCurrentAccount: true,
+              isAssignmentActive: true,
+              canResumeSession: false,
+            },
+            event: {
+              id: 'evt-1',
+              title: 'Sol Fest',
+              slug: 'sol-fest',
+              startAt: new Date().toISOString(),
+              endAt: new Date().toISOString(),
+              venueName: 'Park',
+              city: 'Nairobi',
+              country: 'Kenya',
+              organizerName: 'Sol Org',
+            },
+          },
+        }),
+      } as any);
+
+      const metadata = await api.staffInvitation.getMetadata('test-token-xyz');
+
+      expect(metadata.invitation.status).toBe('ACCEPTED');
+      expect(metadata.invitation.isCurrentAccount).toBe(true);
+      expect(metadata.invitation.isAssignmentActive).toBe(true);
+      expect(metadata.event.title).toBe('Sol Fest');
+    });
+
+    it('api.staffInvitation.verifyOtp successfully dispatches verify-otp request and receives session csrfToken', async () => {
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+        ok: true,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({
+          success: true,
+          data: {
+            user: { id: 'user-returning-1', email: 'doorperson@outside.vip', role: 'ATTENDEE' },
+            csrfToken: 'csrf-session-token-abc',
+            eventId: 'evt-1',
+            status: 'ACTIVE',
+            isReturningStaff: true,
+          },
+        }),
+      } as any);
+
+      const res = await api.staffInvitation.verifyOtp('test-token-xyz', '123456');
+
+      expect(res.csrfToken).toBe('csrf-session-token-abc');
+      expect(res.user.email).toBe('doorperson@outside.vip');
+      expect(res.status).toBe('ACTIVE');
     });
   });
 });

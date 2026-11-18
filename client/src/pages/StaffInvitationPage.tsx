@@ -21,7 +21,7 @@ import { useAuth } from '../context/AuthContext';
 export const StaffInvitationPage: React.FC = () => {
   const { token } = useParams<{ token: string }>();
   const navigate = useNavigate();
-  const { user, refreshUser } = useAuth();
+  const { user, refreshUser, logout } = useAuth();
 
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
@@ -265,31 +265,6 @@ export const StaffInvitationPage: React.FC = () => {
         </div>
       )}
 
-      {/* Status: Already Accepted */}
-      {invitation.status === 'ACCEPTED' && (
-        <div className="bg-white rounded-2xl p-6 border border-stone-200 shadow-sm text-center space-y-4">
-          <div className="w-12 h-12 rounded-full bg-emerald-50 text-emerald-600 mx-auto flex items-center justify-center border border-emerald-200">
-            <CheckCircle2 className="w-6 h-6" />
-          </div>
-          <div>
-            <h3 className="font-display font-bold text-stone-900 text-base">
-              Invitation Already Accepted
-            </h3>
-            <p className="text-xs text-stone-600 mt-1">
-              You are already registered as active staff for this event.
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={() => navigate(`/scanner?event=${event.slug || event.id}`)}
-            className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-stone-900 hover:bg-black text-white font-medium text-xs uppercase tracking-wider transition-colors shadow-sm"
-          >
-            <QrCode className="w-4 h-4" />
-            Open Scanner Viewfinder
-          </button>
-        </div>
-      )}
-
       {/* Status: Expired */}
       {invitation.status === 'EXPIRED' && (
         <div className="bg-white rounded-2xl p-6 border border-amber-200 bg-amber-50/30 shadow-sm text-center space-y-4">
@@ -305,23 +280,94 @@ export const StaffInvitationPage: React.FC = () => {
         </div>
       )}
 
-      {/* Status: Revoked */}
-      {invitation.status === 'REVOKED' && (
+      {/* Status: Revoked or Assignment Revoked */}
+      {(invitation.status === 'REVOKED' || invitation.isAssignmentActive === false) && (
         <div className="bg-white rounded-2xl p-6 border border-rose-200 bg-rose-50/30 shadow-sm text-center space-y-4">
           <div className="w-12 h-12 rounded-full bg-rose-50 text-rose-600 mx-auto flex items-center justify-center border border-rose-200">
             <AlertTriangle className="w-6 h-6" />
           </div>
           <div>
-            <h3 className="font-display font-bold text-stone-900 text-base">Invitation Revoked</h3>
+            <h3 className="font-display font-bold text-stone-900 text-base">
+              {invitation.isAssignmentActive === false ? 'Staff Assignment Revoked' : 'Invitation Revoked'}
+            </h3>
             <p className="text-xs text-stone-600 mt-1">
-              This staff invitation was revoked by the event organizer.
+              Your staff assignment for this event has been revoked by the event organizer.
             </p>
           </div>
         </div>
       )}
 
+      {/* Account Mismatch: Visitor authenticated with a different email */}
+      {user && !invitation.isCurrentAccount && (
+        <div className="bg-white rounded-2xl p-6 sm:p-8 border border-amber-200 bg-amber-50/20 shadow-sm space-y-5">
+          <div className="flex items-start gap-3">
+            <div className="p-2.5 rounded-xl bg-amber-100 text-amber-800 shrink-0">
+              <AlertTriangle className="w-5 h-5" />
+            </div>
+            <div>
+              <h3 className="font-display font-bold text-stone-900 text-base">
+                Account Mismatch Detected
+              </h3>
+              <p className="text-xs text-stone-600 mt-1 leading-relaxed">
+                You are currently signed in as <strong>{user.email}</strong>, but this door staff invitation is assigned to <strong>{invitation.maskedEmail}</strong>.
+              </p>
+              <p className="text-xs text-stone-600 mt-1.5">
+                To access the scanner for this event, please switch to the invited account.
+              </p>
+            </div>
+          </div>
+
+          <div className="pt-2 flex flex-col sm:flex-row gap-2">
+            <button
+              type="button"
+              onClick={async () => {
+                await logout();
+                window.location.reload();
+              }}
+              className="py-2.5 px-4 rounded-xl bg-stone-900 hover:bg-black text-white font-semibold text-xs uppercase tracking-wider transition-colors inline-flex items-center justify-center gap-2 shadow-sm"
+            >
+              Sign Out to Switch Accounts
+            </button>
+            <Link
+              to="/events"
+              className="py-2.5 px-4 rounded-xl bg-stone-100 hover:bg-stone-200 text-stone-700 font-semibold text-xs uppercase tracking-wider transition-colors inline-flex items-center justify-center"
+            >
+              Browse Events
+            </Link>
+          </div>
+        </div>
+      )}
+
+      {/* Status: Already Accepted & Matching Current Account */}
+      {invitation.status === 'ACCEPTED' && invitation.isCurrentAccount && invitation.isAssignmentActive !== false && (
+        <div className="bg-white rounded-2xl p-6 sm:p-8 border border-emerald-200 bg-emerald-50/20 shadow-sm text-center space-y-5">
+          <div className="w-14 h-14 rounded-full bg-emerald-100 text-emerald-700 mx-auto flex items-center justify-center border border-emerald-300">
+            <CheckCircle2 className="w-7 h-7" />
+          </div>
+          <div>
+            <h3 className="font-display font-bold text-stone-900 text-lg">
+              Staff Access Active
+            </h3>
+            <p className="text-xs text-stone-600 mt-1.5 max-w-sm mx-auto">
+              You are registered and verified as scanner staff for <strong>{event.title}</strong>.
+            </p>
+          </div>
+          <div className="pt-2">
+            <button
+              type="button"
+              onClick={() => navigate(`/scanner?event=${event.slug || event.id}`)}
+              className="w-full sm:w-auto px-6 py-3 rounded-xl bg-stone-900 hover:bg-black text-white font-semibold text-xs uppercase tracking-wider transition-colors inline-flex items-center justify-center gap-2 shadow-sm"
+            >
+              <QrCode className="w-4 h-4" />
+              Open Scanner Viewfinder
+              <ArrowRight className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Action Case 1: Existing Account with Password Required */}
-      {invitation.status === 'PENDING' && invitation.requiresLogin && (
+      {invitation.requiresLogin && (
         <div className="bg-white rounded-2xl p-6 sm:p-8 border border-stone-200 shadow-sm space-y-5">
           <div className="flex items-start gap-3">
             <div className="p-2.5 rounded-xl bg-stone-100 text-stone-800 shrink-0">
@@ -332,7 +378,7 @@ export const StaffInvitationPage: React.FC = () => {
                 Existing Account Detected
               </h3>
               <p className="text-xs text-stone-600 mt-1 leading-relaxed">
-                An Outside.vip account exists for <strong>{invitation.maskedEmail}</strong> with a password set. To preserve security, please log in with your password to activate your staff access.
+                An Outside.vip account exists for <strong>{invitation.maskedEmail}</strong> with a password set. To preserve security, please log in with your password to access the scanner.
               </p>
             </div>
           </div>
@@ -342,14 +388,14 @@ export const StaffInvitationPage: React.FC = () => {
               to={`/login?redirect=${encodeURIComponent(`/staff/invitations/${token}`)}`}
               className="w-full py-3 px-4 rounded-xl bg-stone-900 hover:bg-black text-white font-semibold text-xs uppercase tracking-wider transition-colors inline-flex items-center justify-center gap-2 shadow-sm"
             >
-              Log In to Accept Invitation
+              Log In with Password
               <ArrowRight className="w-4 h-4" />
             </Link>
           </div>
         </div>
       )}
 
-      {/* Action Case 2: Visitor Authenticated with Matching Session */}
+      {/* Action Case 2: Visitor Authenticated with Matching Session on PENDING Invitation */}
       {invitation.status === 'PENDING' && invitation.isCurrentAccount && (
         <div className="bg-white rounded-2xl p-6 sm:p-8 border border-stone-200 shadow-sm space-y-5">
           <div className="flex items-start gap-3">
@@ -389,102 +435,106 @@ export const StaffInvitationPage: React.FC = () => {
         </div>
       )}
 
-      {/* Action Case 3: Passwordless OTP Flow (New User or Passwordless Staff) */}
-      {invitation.status === 'PENDING' && !invitation.hasPassword && !invitation.isCurrentAccount && (
-        <div className="bg-white rounded-2xl p-6 sm:p-8 border border-stone-200 shadow-sm space-y-6">
-          <div>
-            <span className="text-[10px] font-mono uppercase tracking-wider text-stone-500 font-semibold block mb-1">
-              Step 1 · Passwordless Verification
-            </span>
-            <h3 className="font-display font-bold text-stone-900 text-lg">
-              Verify Email Address
-            </h3>
-            <p className="text-xs text-stone-600 mt-1 leading-relaxed">
-              We'll send a 6-digit confirmation code to <strong>{invitation.maskedEmail}</strong> to grant access to the scanner. No password required.
-            </p>
-          </div>
-
-          {otpError && (
-            <div className="p-3.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs flex items-center gap-2">
-              <AlertTriangle className="w-4 h-4 shrink-0" />
-              <span>{otpError}</span>
+      {/* Action Case 3: Passwordless OTP Flow (Initial Acceptance or Returning Staff Resumption) */}
+      {!invitation.hasPassword &&
+        !user &&
+        (invitation.status === 'PENDING' || (invitation.status === 'ACCEPTED' && invitation.isAssignmentActive !== false)) && (
+          <div className="bg-white rounded-2xl p-6 sm:p-8 border border-stone-200 shadow-sm space-y-6">
+            <div>
+              <span className="text-[10px] font-mono uppercase tracking-wider text-stone-500 font-semibold block mb-1">
+                {invitation.status === 'ACCEPTED' ? 'Staff Session Resumption' : 'Step 1 · Passwordless Verification'}
+              </span>
+              <h3 className="font-display font-bold text-stone-900 text-lg">
+                {invitation.status === 'ACCEPTED' ? 'Resume Scanner Session' : 'Verify Email Address'}
+              </h3>
+              <p className="text-xs text-stone-600 mt-1 leading-relaxed">
+                {invitation.status === 'ACCEPTED'
+                  ? `Welcome back! We'll send a 6-digit confirmation code to ${invitation.maskedEmail} to reactivate your scanner session on this device. No password required.`
+                  : `We'll send a 6-digit confirmation code to ${invitation.maskedEmail} to grant access to the scanner. No password required.`}
+              </p>
             </div>
-          )}
 
-          {!otpRequested ? (
-            <button
-              type="button"
-              onClick={handleRequestOtp}
-              disabled={isSendingOtp}
-              className="w-full py-3 px-4 rounded-xl bg-stone-900 hover:bg-black text-white font-semibold text-xs uppercase tracking-wider transition-colors inline-flex items-center justify-center gap-2 shadow-sm disabled:opacity-50"
-            >
-              {isSendingOtp ? (
-                <>
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                  Sending Code...
-                </>
-              ) : (
-                <>
-                  <Mail className="w-4 h-4" />
-                  Send Verification Code
-                </>
-              )}
-            </button>
-          ) : (
-            <form onSubmit={handleVerifyOtp} className="space-y-4">
-              <div className="space-y-1.5">
-                <label className="text-xs font-mono font-semibold uppercase text-stone-700 block">
-                  Enter 6-Digit Code
-                </label>
-                <input
-                  type="text"
-                  maxLength={6}
-                  placeholder="123456"
-                  value={otpCode}
-                  onChange={(e) => setOtpCode(e.target.value.replace(/\D/g, ''))}
-                  className="w-full px-4 py-3 text-center tracking-[0.4em] font-mono text-xl font-bold rounded-xl bg-stone-50 border border-stone-200 text-stone-900 focus:outline-none focus:border-stone-900"
-                  autoFocus
-                />
-                <p className="text-[11px] text-stone-500 font-mono">
-                  Code expires in 10 minutes · Maximum 5 attempts
-                </p>
+            {otpError && (
+              <div className="p-3.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+                <span>{otpError}</span>
               </div>
+            )}
 
+            {!otpRequested ? (
               <button
-                type="submit"
-                disabled={isVerifyingOtp || otpCode.length !== 6}
-                className="w-full py-3 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs uppercase tracking-wider transition-colors inline-flex items-center justify-center gap-2 shadow-sm disabled:opacity-50"
+                type="button"
+                onClick={handleRequestOtp}
+                disabled={isSendingOtp}
+                className="w-full py-3 px-4 rounded-xl bg-stone-900 hover:bg-black text-white font-semibold text-xs uppercase tracking-wider transition-colors inline-flex items-center justify-center gap-2 shadow-sm disabled:opacity-50"
               >
-                {isVerifyingOtp ? (
+                {isSendingOtp ? (
                   <>
                     <Loader2 className="w-4 h-4 animate-spin" />
-                    Verifying...
+                    Sending Code...
                   </>
                 ) : (
                   <>
-                    <KeyRound className="w-4 h-4" />
-                    Verify & Launch Scanner
+                    <Mail className="w-4 h-4" />
+                    Send Verification Code
                   </>
                 )}
               </button>
+            ) : (
+              <form onSubmit={handleVerifyOtp} className="space-y-4">
+                <div className="space-y-1.5">
+                  <label className="text-xs font-mono font-semibold uppercase text-stone-700 block">
+                    Enter 6-Digit Code
+                  </label>
+                  <input
+                    type="text"
+                    maxLength={6}
+                    placeholder="123456"
+                    value={otpCode}
+                    onChange={(e) => setOtpCode(e.target.value.replace(/\D/g, ''))}
+                    className="w-full px-4 py-3 text-center tracking-[0.4em] font-mono text-xl font-bold rounded-xl bg-stone-50 border border-stone-200 text-stone-900 focus:outline-none focus:border-stone-900"
+                    autoFocus
+                  />
+                  <p className="text-[11px] text-stone-500 font-mono">
+                    Code expires in 10 minutes · Maximum 5 attempts
+                  </p>
+                </div>
 
-              <div className="text-center pt-2">
                 <button
-                  type="button"
-                  onClick={handleRequestOtp}
-                  disabled={cooldownSeconds > 0 || isSendingOtp}
-                  className="text-xs font-mono text-stone-600 hover:text-stone-900 disabled:opacity-50 inline-flex items-center gap-1.5"
+                  type="submit"
+                  disabled={isVerifyingOtp || otpCode.length !== 6}
+                  className="w-full py-3 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs uppercase tracking-wider transition-colors inline-flex items-center justify-center gap-2 shadow-sm disabled:opacity-50"
                 >
-                  <RotateCw className="w-3.5 h-3.5" />
-                  {cooldownSeconds > 0
-                    ? `Resend code in ${cooldownSeconds}s`
-                    : 'Resend verification code'}
+                  {isVerifyingOtp ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      Verifying...
+                    </>
+                  ) : (
+                    <>
+                      <KeyRound className="w-4 h-4" />
+                      Verify & Launch Scanner
+                    </>
+                  )}
                 </button>
-              </div>
-            </form>
-          )}
-        </div>
-      )}
+
+                <div className="text-center pt-2">
+                  <button
+                    type="button"
+                    onClick={handleRequestOtp}
+                    disabled={cooldownSeconds > 0 || isSendingOtp}
+                    className="text-xs font-mono text-stone-600 hover:text-stone-900 disabled:opacity-50 inline-flex items-center gap-1.5"
+                  >
+                    <RotateCw className="w-3.5 h-3.5" />
+                    {cooldownSeconds > 0
+                      ? `Resend code in ${cooldownSeconds}s`
+                      : 'Resend verification code'}
+                  </button>
+                </div>
+              </form>
+            )}
+          </div>
+        )}
     </div>
   );
 };

@@ -579,6 +579,7 @@ export async function sendStaffInvitationEmail(params: {
   const to = sanitizeHeaderField(normalizeEmail(params.to));
   const cleanTitle = sanitizeHeaderField(params.eventTitle);
   const cleanOrganizer = sanitizeHeaderField(params.organizerName || 'An event organizer');
+  const cleanUrl = params.inviteUrl.trim();
   const subject = `You're invited to scan tickets for ${cleanTitle} on Outside.vip`;
 
   const text = [
@@ -587,7 +588,7 @@ export async function sendStaffInvitationEmail(params: {
     `${cleanOrganizer} has invited you to join the door check-in staff for "${cleanTitle}" on Outside.vip.`,
     '',
     `Accept your invitation and access the ticket scanner here:`,
-    params.inviteUrl,
+    cleanUrl,
     '',
     `This invitation link expires in ${expiresInDays} days.`,
     'You will need to verify your email and authenticate appropriately before receiving scanner access.',
@@ -597,31 +598,54 @@ export async function sendStaffInvitationEmail(params: {
 
   const escapedTitle = escapeHtml(cleanTitle);
   const escapedOrganizer = escapeHtml(cleanOrganizer);
-  const escapedUrl = escapeHtml(params.inviteUrl);
+  const escapedUrl = escapeHtml(cleanUrl);
   const escapedDays = escapeHtml(String(expiresInDays));
 
-  const html = `
-    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0A0A0C; color: #F5F5F7; padding: 32px; border-radius: 16px; max-width: 520px; margin: 0 auto;">
-      <p style="font-size: 12px; text-transform: uppercase; letter-spacing: 0.14em; color: #FF5500; margin: 0 0 8px;">Outside.vip Event Staff</p>
-      <h1 style="font-size: 24px; margin: 0 0 16px; color: #FFFFFF;">You're invited to scan tickets</h1>
-      <p style="font-size: 15px; line-height: 1.6; color: #B8B8C2;">
-        <strong>${escapedOrganizer}</strong> has invited you to join the door staff team for <strong>${escapedTitle}</strong> on Outside.vip.
-      </p>
-      <p style="font-size: 15px; line-height: 1.6; color: #B8B8C2;">
-        As a scanner staff member, you will be able to scan attendee tickets and admit guests at the door.
-      </p>
-      <div style="margin: 28px 0; text-align: center;">
-        <a href="${escapedUrl}" style="background: #FF5500; color: #FFFFFF; padding: 14px 28px; text-decoration: none; border-radius: 8px; font-weight: 600; display: inline-block; font-size: 15px;">Accept Staff Invitation</a>
-      </div>
-      <p style="font-size: 13px; line-height: 1.5; color: #8E8E99; margin-top: 24px; border-top: 1px solid #1E1E24; padding-top: 16px;">
-        This invitation link is valid for <strong>${escapedDays} days</strong>. You will need to verify your email and authenticate appropriately before receiving scanner access.
-      </p>
-      <p style="font-size: 12px; color: #6E6E78; margin-top: 12px;">
-        If the button does not work, copy and paste this link in your browser:<br/>
-        <a href="${escapedUrl}" style="color: #FF5500; word-break: break-all;">${escapedUrl}</a>
-      </p>
-    </div>
-  `.trim();
+  const html = `<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en">
+  <head>
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>${escapedTitle} - Staff Invitation</title>
+  </head>
+  <body style="margin: 0; padding: 24px; background-color: #0A0A0C; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #F5F5F7;">
+    <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="max-width: 540px; margin: 0 auto; background: #121216; border: 1px solid #22222A; border-radius: 16px; overflow: hidden;">
+      <tr>
+        <td style="padding: 32px;">
+          <p style="font-size: 11px; text-transform: uppercase; letter-spacing: 0.14em; color: #FF5500; font-weight: 700; margin: 0 0 12px 0;">Outside.vip Event Staff</p>
+          <h1 style="font-size: 24px; font-weight: 700; margin: 0 0 16px 0; color: #FFFFFF; line-height: 1.3;">You're invited to scan tickets</h1>
+          <p style="font-size: 15px; line-height: 1.6; color: #B8B8C2; margin: 0 0 14px 0;">
+            <strong style="color: #FFFFFF;">${escapedOrganizer}</strong> has invited you to join the door staff team for <strong style="color: #FFFFFF;">${escapedTitle}</strong> on Outside.vip.
+          </p>
+          <p style="font-size: 15px; line-height: 1.6; color: #B8B8C2; margin: 0 0 28px 0;">
+            As a scanner staff member, you will be able to scan attendee tickets and admit guests at the door.
+          </p>
+          
+          <!-- Bulletproof Email CTA Button -->
+          <table role="presentation" border="0" cellpadding="0" cellspacing="0" style="margin: 0 auto 28px auto;">
+            <tr>
+              <td align="center" bgcolor="#FF5500" style="border-radius: 10px;">
+                <a href="${escapedUrl}" target="_blank" rel="noopener noreferrer" style="font-size: 15px; font-weight: 600; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: #FFFFFF; text-decoration: none; padding: 14px 32px; border-radius: 10px; border: 1px solid #FF5500; display: inline-block; mso-padding-alt: 0;">
+                  <!--[if mso]><i style="letter-spacing: 32px; mso-font-width: -100%; mso-text-raise: 20pt">&nbsp;</i><![endif]-->
+                  <span style="mso-text-raise: 10pt; font-weight: 600; color: #FFFFFF;">Accept Staff Invitation</span>
+                  <!--[if mso]><i style="letter-spacing: 32px; mso-font-width: -100%">&nbsp;</i><![endif]-->
+                </a>
+              </td>
+            </tr>
+          </table>
+
+          <p style="font-size: 13px; line-height: 1.5; color: #8E8E99; margin: 0 0 16px 0; border-top: 1px solid #22222A; padding-top: 20px;">
+            This invitation link is valid for <strong style="color: #FFFFFF;">${escapedDays} days</strong>. You will need to verify your email and authenticate appropriately before receiving scanner access.
+          </p>
+          <p style="font-size: 12px; line-height: 1.5; color: #6E6E78; margin: 0;">
+            If the button above does not work, click or copy and paste this link in your browser:<br/>
+            <a href="${escapedUrl}" target="_blank" rel="noopener noreferrer" style="color: #FF5500; text-decoration: underline; word-break: break-all; font-size: 12px; display: inline-block; margin-top: 4px;">${escapedUrl}</a>
+          </p>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>`.trim();
 
   const sentAt = new Date();
   const activeNodeEnv = getActiveNodeEnv();

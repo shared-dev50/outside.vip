@@ -152,14 +152,102 @@ describe('Passwordless Staff Acceptance & Session Issuance API', () => {
       expect(res.body.error.code).toBe('INVITATION_REVOKED');
     });
 
-    it('returns 400 INVITATION_ALREADY_ACCEPTED when invitation was already accepted', async () => {
+    it('returns safe metadata with accepted status when invitation was already accepted', async () => {
       const mockInvite = createMockInvitation({ status: 'ACCEPTED' });
       vi.spyOn(prisma.eventStaffInvitation, 'findUnique').mockResolvedValue(mockInvite as any);
+      vi.spyOn(prisma.user, 'findUnique').mockResolvedValue({
+        id: 'staff-user-1',
+        email: mockInvite.email,
+        passwordHash: null,
+      } as any);
+      vi.spyOn(prisma.eventStaff, 'findUnique').mockResolvedValue({
+        id: 'staff-assignment-1',
+        status: 'ACTIVE',
+      } as any);
 
       const res = await request(app).get(`/api/staff/invitations/${rawToken}`);
 
-      expect(res.status).toBe(400);
-      expect(res.body.error.code).toBe('INVITATION_ALREADY_ACCEPTED');
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.data.invitation.status).toBe('ACCEPTED');
+      expect(res.body.data.invitation.isAssignmentActive).toBe(true);
+      expect(res.body.data.invitation.hasPassword).toBe(false);
+      expect(res.body.data.invitation.canResumeSession).toBe(true);
+      expect(res.body.data.event.title).toBe(mockEvent.title);
+    });
+
+    it('returns isCurrentAccount: true when matching authenticated staff member reopens accepted link', async () => {
+      const mockInvite = createMockInvitation({ status: 'ACCEPTED' });
+      vi.spyOn(prisma.eventStaffInvitation, 'findUnique').mockResolvedValue(mockInvite as any);
+      vi.spyOn(prisma.user, 'findUnique').mockResolvedValue({
+        id: 'staff-user-1',
+        email: mockInvite.email,
+        passwordHash: null,
+      } as any);
+      vi.spyOn(prisma.eventStaff, 'findUnique').mockResolvedValue({
+        id: 'staff-assignment-1',
+        status: 'ACTIVE',
+      } as any);
+
+      const staffToken = jwt.sign(
+        { userId: 'staff-user-1', email: mockInvite.email, role: Role.ATTENDEE },
+        env.JWT_SECRET
+      );
+
+      const res = await request(app)
+        .get(`/api/staff/invitations/${rawToken}`)
+        .set('Authorization', `Bearer ${staffToken}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.data.invitation.status).toBe('ACCEPTED');
+      expect(res.body.data.invitation.isCurrentAccount).toBe(true);
+      expect(res.body.data.invitation.canResumeSession).toBe(false);
+    });
+
+    it('returns isCurrentAccount: false when mismatched authenticated account reopens accepted link', async () => {
+      const mockInvite = createMockInvitation({ status: 'ACCEPTED' });
+      vi.spyOn(prisma.eventStaffInvitation, 'findUnique').mockResolvedValue(mockInvite as any);
+      vi.spyOn(prisma.user, 'findUnique').mockResolvedValue({
+        id: 'staff-user-1',
+        email: mockInvite.email,
+        passwordHash: null,
+      } as any);
+      vi.spyOn(prisma.eventStaff, 'findUnique').mockResolvedValue({
+        id: 'staff-assignment-1',
+        status: 'ACTIVE',
+      } as any);
+
+      const foreignToken = jwt.sign(
+        { userId: 'foreign-user-2', email: 'other@outside.vip', role: Role.ATTENDEE },
+        env.JWT_SECRET
+      );
+
+      const res = await request(app)
+        .get(`/api/staff/invitations/${rawToken}`)
+        .set('Authorization', `Bearer ${foreignToken}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.data.invitation.isCurrentAccount).toBe(false);
+    });
+
+    it('returns isAssignmentActive: false when accepted staff assignment has been revoked', async () => {
+      const mockInvite = createMockInvitation({ status: 'ACCEPTED' });
+      vi.spyOn(prisma.eventStaffInvitation, 'findUnique').mockResolvedValue(mockInvite as any);
+      vi.spyOn(prisma.user, 'findUnique').mockResolvedValue({
+        id: 'staff-user-1',
+        email: mockInvite.email,
+        passwordHash: null,
+      } as any);
+      vi.spyOn(prisma.eventStaff, 'findUnique').mockResolvedValue({
+        id: 'staff-assignment-1',
+        status: 'REVOKED',
+      } as any);
+
+      const res = await request(app).get(`/api/staff/invitations/${rawToken}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.data.invitation.isAssignmentActive).toBe(false);
+      expect(res.body.data.invitation.canResumeSession).toBe(false);
     });
 
     it('returns 404 INVITATION_NOT_FOUND when token hash does not exist', async () => {
@@ -337,6 +425,66 @@ describe('Passwordless Staff Acceptance & Session Issuance API', () => {
       const [lockKey, lockId] = mockRedisClient.delLockIfMatches.mock.calls[0];
       expect(lockKey).toBe(`lock:invitation_otp:${mockInvite.id}`);
       expect(lockId).toMatch(/^[0-9a-f-]{36}$/);
+    });
+
+    it('allows passwordless returning staff to request OTP on already accepted invitation with active assignment', async () => {
+      const mockInvite = createMockInvitation({ status: 'ACCEPTED' });
+      vi.spyOn(prisma.eventStaffInvitation, 'findUnique').mockResolvedValue(mockInvite as any);
+      vi.spyOn(prisma.user, 'findUnique').mockResolvedValue({
+        id: 'staff-returning-1',
+        email: mockInvite.email,
+        passwordHash: null,
+      } as any);
+      vi.spyOn(prisma.eventStaff, 'findUnique').mockResolvedValue({
+        id: 'staff-assignment-1',
+        status: 'ACTIVE',
+      } as any);
+
+      const updateSpy = vi.spyOn(prisma.eventStaffInvitation, 'update').mockResolvedValue({} as any);
+
+      const res = await request(app).post(`/api/staff/invitations/${rawToken}/request-otp`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(updateSpy).toHaveBeenCalledTimes(1);
+      expect(emailService.sentStaffOtpEmails.length).toBe(1);
+      expect(emailService.sentStaffOtpEmails[0].to).toBe(mockInvite.email);
+    });
+
+    it('blocks OTP request on accepted invitation if EventStaff assignment was revoked', async () => {
+      const mockInvite = createMockInvitation({ status: 'ACCEPTED' });
+      vi.spyOn(prisma.eventStaffInvitation, 'findUnique').mockResolvedValue(mockInvite as any);
+      vi.spyOn(prisma.user, 'findUnique').mockResolvedValue({
+        id: 'staff-returning-1',
+        email: mockInvite.email,
+        passwordHash: null,
+      } as any);
+      vi.spyOn(prisma.eventStaff, 'findUnique').mockResolvedValue({
+        id: 'staff-assignment-1',
+        status: 'REVOKED',
+      } as any);
+
+      const res = await request(app).post(`/api/staff/invitations/${rawToken}/request-otp`);
+
+      expect(res.status).toBe(403);
+      expect(res.body.error.code).toBe('STAFF_ASSIGNMENT_NOT_ACTIVE');
+      expect(emailService.sentStaffOtpEmails.length).toBe(0);
+    });
+
+    it('blocks OTP request on accepted invitation if account has a password set', async () => {
+      const mockInvite = createMockInvitation({ status: 'ACCEPTED' });
+      vi.spyOn(prisma.eventStaffInvitation, 'findUnique').mockResolvedValue(mockInvite as any);
+      vi.spyOn(prisma.user, 'findUnique').mockResolvedValue({
+        id: 'staff-returning-1',
+        email: mockInvite.email,
+        passwordHash: '$2a$10$hashedpasswordvalue',
+      } as any);
+
+      const res = await request(app).post(`/api/staff/invitations/${rawToken}/request-otp`);
+
+      expect(res.status).toBe(400);
+      expect(res.body.error.code).toBe('PASSWORD_LOGIN_REQUIRED');
+      expect(emailService.sentStaffOtpEmails.length).toBe(0);
     });
   });
 
@@ -603,9 +751,152 @@ describe('Passwordless Staff Acceptance & Session Issuance API', () => {
         })
       );
     });
+
+    it('verifies valid OTP for returning passwordless staff, resumes session without creating duplicate user or staff', async () => {
+      const validCode = '778899';
+      const secret = env.SESSION_SECRET || env.JWT_SECRET;
+      const validHmac = crypto.createHmac('sha256', secret).update(`${invitationId}:${validCode}`).digest('hex');
+
+      const mockInvite = createMockInvitation({
+        status: 'ACCEPTED',
+        codeHash: validHmac,
+        otpSentAt: new Date(Date.now() - 30000),
+        otpExpiresAt: new Date(Date.now() + 500000),
+      });
+
+      const existingStaffUser = {
+        id: 'user-returning-staff-uuid',
+        email: mockInvite.email,
+        name: 'returningstaff',
+        passwordHash: null,
+        role: Role.ATTENDEE,
+        status: AccountStatus.ACTIVE,
+        emailVerified: true,
+      };
+
+      const existingStaffRecord = {
+        id: 'staff-assignment-uuid-existing',
+        eventId,
+        userId: existingStaffUser.id,
+        status: 'ACTIVE',
+      };
+
+      vi.spyOn(prisma.eventStaffInvitation, 'findUnique').mockResolvedValue(mockInvite as any);
+      vi.spyOn(prisma.user, 'findUnique').mockResolvedValue(existingStaffUser as any);
+      vi.spyOn(prisma.eventStaff, 'findUnique').mockResolvedValue(existingStaffRecord as any);
+
+      const mockTx = {
+        eventStaffInvitation: {
+          findUnique: vi.fn().mockResolvedValue(mockInvite),
+          update: vi.fn().mockResolvedValue(mockInvite),
+        },
+        user: {
+          findUnique: vi.fn().mockResolvedValue(existingStaffUser),
+          create: vi.fn(),
+          update: vi.fn(),
+        },
+        eventStaff: {
+          findUnique: vi.fn().mockResolvedValue(existingStaffRecord),
+          create: vi.fn(),
+          update: vi.fn(),
+        },
+      };
+
+      vi.spyOn(prisma, '$transaction').mockImplementation(async (callback: any) => {
+        return callback(mockTx);
+      });
+
+      vi.spyOn(sessionService, 'rotateSession').mockResolvedValue({
+        sessionId: 'sess-resumed-id',
+        rawCookieValue: 'sess-resumed-id.cookie-val',
+        csrfToken: 'csrf-resumed-val',
+        record: {} as any,
+      });
+
+      const res = await request(app)
+        .post(`/api/staff/invitations/${rawToken}/verify-otp`)
+        .send({ code: validCode });
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.data.user.id).toBe(existingStaffUser.id);
+      expect(res.body.data.status).toBe('ACTIVE');
+
+      // Crucial invariants: no duplicate creation and no role/password modification
+      expect(mockTx.user.create).not.toHaveBeenCalled();
+      expect(mockTx.eventStaff.create).not.toHaveBeenCalled();
+      expect(mockTx.user.update).not.toHaveBeenCalled();
+
+      // Clears OTP state on the invitation
+      expect(mockTx.eventStaffInvitation.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: mockInvite.id },
+          data: expect.objectContaining({
+            codeHash: null,
+            otpExpiresAt: null,
+            otpSentAt: null,
+            attempts: 0,
+          }),
+        })
+      );
+    });
+
+    it('blocks OTP verification on accepted invitation if EventStaff assignment was revoked', async () => {
+      const validCode = '778899';
+      const secret = env.SESSION_SECRET || env.JWT_SECRET;
+      const validHmac = crypto.createHmac('sha256', secret).update(`${invitationId}:${validCode}`).digest('hex');
+
+      const mockInvite = createMockInvitation({
+        status: 'ACCEPTED',
+        codeHash: validHmac,
+        otpSentAt: new Date(Date.now() - 30000),
+        otpExpiresAt: new Date(Date.now() + 500000),
+      });
+
+      const existingStaffUser = {
+        id: 'user-returning-staff-uuid',
+        email: mockInvite.email,
+        passwordHash: null,
+      };
+
+      vi.spyOn(prisma.eventStaffInvitation, 'findUnique').mockResolvedValue(mockInvite as any);
+      vi.spyOn(prisma.user, 'findUnique').mockResolvedValue(existingStaffUser as any);
+      vi.spyOn(prisma.eventStaff, 'findUnique').mockResolvedValue({
+        id: 'assignment-1',
+        status: 'REVOKED',
+      } as any);
+
+      const res = await request(app)
+        .post(`/api/staff/invitations/${rawToken}/verify-otp`)
+        .send({ code: validCode });
+
+      expect(res.status).toBe(403);
+      expect(res.body.error.code).toBe('STAFF_ASSIGNMENT_NOT_ACTIVE');
+    });
   });
 
   describe('4. Existing Account Acceptance (POST /api/staff/invitations/:token/accept)', () => {
+    it('accepts already-accepted invitation idempotently for matching authenticated user', async () => {
+      const mockInvite = createMockInvitation({ status: 'ACCEPTED' });
+      vi.spyOn(prisma.eventStaffInvitation, 'findUnique').mockResolvedValue(mockInvite as any);
+      vi.spyOn(prisma.eventStaff, 'findUnique').mockResolvedValue({
+        id: 'staff-assignment-1',
+        status: 'ACTIVE',
+      } as any);
+
+      const matchingToken = jwt.sign(
+        { userId: 'matching-user-id', email: mockInvite.email, role: Role.ATTENDEE },
+        env.JWT_SECRET
+      );
+
+      const res = await request(app)
+        .post(`/api/staff/invitations/${rawToken}/accept`)
+        .set('Authorization', `Bearer ${matchingToken}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.data.status).toBe('ACTIVE');
+    });
     it('accepts invitation for authenticated matching user, preserves role and password, and activates staff', async () => {
       const inviteEmail = 'organizer.invitee@outside.vip';
       const mockInvite = createMockInvitation({ email: inviteEmail });

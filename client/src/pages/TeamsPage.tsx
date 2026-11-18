@@ -90,8 +90,12 @@ export const TeamsPage: React.FC = () => {
     setTeamError(null);
     try {
       const res = await api.staff.getTeam(eventId);
-      setStaff(res.staff || []);
-      setInvitations(res.invitations || []);
+      const staffList = (res.staff || (res as any).team || []) as EventStaffMember[];
+      const pendingInvites = (res.invitations || []).filter(
+        (inv) => inv.status === 'PENDING'
+      );
+      setStaff(staffList);
+      setInvitations(pendingInvites);
     } catch (err: any) {
       setTeamError(
         err?.message ||
@@ -112,6 +116,19 @@ export const TeamsPage: React.FC = () => {
     }
   }, [selectedEventId]);
 
+  // Automatically refresh team list when organizer switches back to this tab
+  useEffect(() => {
+    const handleWindowFocus = () => {
+      if (selectedEventId) {
+        fetchTeam(selectedEventId);
+      }
+    };
+    window.addEventListener('focus', handleWindowFocus);
+    return () => {
+      window.removeEventListener('focus', handleWindowFocus);
+    };
+  }, [selectedEventId]);
+
   // Invite new staff
   const handleInviteStaff = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -125,13 +142,7 @@ export const TeamsPage: React.FC = () => {
     try {
       const res = await api.staff.invite(selectedEventId, inviteEmail.trim());
       setInviteEmail('');
-      if (res.emailDeliveryFailed) {
-        setInviteSuccess(
-          'Invitation record created, but email dispatch failed. You can resend shortly.'
-        );
-      } else {
-        setInviteSuccess(`Invitation link dispatched to ${res.invitation.email}.`);
-      }
+      setInviteSuccess(`Invitation link dispatched to ${res.invitation.email}.`);
       await fetchTeam(selectedEventId);
     } catch (err: any) {
       setInviteError(
@@ -139,6 +150,10 @@ export const TeamsPage: React.FC = () => {
           err?.error?.message ||
           'Failed to dispatch invitation. Please check the email and try again.'
       );
+      if (err?.code === 'EMAIL_DELIVERY_FAILED' || err?.statusCode === 503) {
+        setInviteEmail('');
+        await fetchTeam(selectedEventId).catch(() => {});
+      }
     } finally {
       setIsSubmittingInvite(false);
     }

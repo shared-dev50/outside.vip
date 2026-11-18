@@ -74,6 +74,8 @@ export interface StaffInvitationMetadataResponse {
     hasPassword: boolean;
     requiresLogin: boolean;
     isCurrentAccount: boolean;
+    isAssignmentActive?: boolean;
+    canResumeSession?: boolean;
   };
   event: {
     id: string;
@@ -899,7 +901,7 @@ export const api = {
         invitation: EventStaffInvitationItem;
         emailDeliveryFailed?: boolean;
         message?: string;
-      }>(`/organizer/events/${eventId}/invitations`, {
+      }>(`/organizer/events/${eventId}/team/invitations`, {
         method: 'POST',
         body: JSON.stringify({ email }),
       }),
@@ -908,17 +910,17 @@ export const api = {
         success: boolean;
         message: string;
         cooldownSeconds: number;
-      }>(`/organizer/events/${eventId}/invitations/${invitationId}/resend`, {
+      }>(`/organizer/events/${eventId}/team/invitations/${invitationId}/resend`, {
         method: 'POST',
       }),
     revokeInvitation: (eventId: string, invitationId: string) =>
       request<{ success: boolean; message: string }>(
-        `/organizer/events/${eventId}/invitations/${invitationId}`,
+        `/organizer/events/${eventId}/team/invitations/${invitationId}`,
         { method: 'DELETE' }
       ),
     revokeMember: (eventId: string, userId: string) =>
       request<{ success: boolean; message: string }>(
-        `/organizer/events/${eventId}/members/${userId}`,
+        `/organizer/events/${eventId}/team/members/${userId}`,
         { method: 'DELETE' }
       ),
   },

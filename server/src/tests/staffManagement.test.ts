@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
+import { Prisma } from '@prisma/client';
 import { app } from '../app.js';
 import { prisma } from '../db/prisma.js';
 import { env } from '../config/env.js';
@@ -279,6 +280,75 @@ describe('Organizer Event Staff Management API', () => {
       expect(res.body.error.code).toBe('EMAIL_DELIVERY_FAILED');
       expect(deleteSpy).not.toHaveBeenCalled();
     });
+
+    it('returns 404 Event not found when event ID does not exist', async () => {
+      vi.spyOn(prisma.event, 'findFirst').mockResolvedValue(null);
+
+      const res = await request(app)
+        .post('/api/organizer/events/nonexistent-event-id/team/invitations')
+        .set('Authorization', `Bearer ${organizerToken}`)
+        .send({ email: 'valid@example.com' });
+
+      expect(res.status).toBe(404);
+      expect(res.body.success).toBe(false);
+      expect(res.body.error.message).toBe('Event not found');
+    });
+
+    it('returns 500 without leaking database details when unapplied migration causes P2021 table missing error', async () => {
+      vi.spyOn(prisma.event, 'findFirst').mockResolvedValue(mockEvent as any);
+      vi.spyOn(prisma.eventStaff, 'findFirst').mockRejectedValue(
+        new Prisma.PrismaClientKnownRequestError(
+          'The table `public.EventStaff` does not exist in the current database.',
+          { code: 'P2021', clientVersion: '5.22.0' }
+        )
+      );
+
+      const res = await request(app)
+        .post(`/api/organizer/events/${mockEvent.id}/team/invitations`)
+        .set('Authorization', `Bearer ${organizerToken}`)
+        .send({ email: 'newstaff@example.com' });
+
+      expect(res.status).toBe(500);
+      expect(res.body.success).toBe(false);
+      expect(res.body.error.message).toBe('Internal server error');
+      expect(res.body.error.details).toBeUndefined();
+      expect(JSON.stringify(res.body)).not.toContain('EventStaff');
+    });
+
+    it('rejects an organizer attempting to invite staff to another organizer’s event with 403 Forbidden', async () => {
+      vi.spyOn(prisma.event, 'findFirst').mockResolvedValue(mockEvent as any);
+
+      const res = await request(app)
+        .post(`/api/organizer/events/${mockEvent.id}/team/invitations`)
+        .set('Authorization', `Bearer ${otherOrganizerToken}`)
+        .send({ email: 'another.staff@example.com' });
+
+      expect(res.status).toBe(403);
+      expect(res.body.success).toBe(false);
+      expect(res.body.error.message).toContain('You do not have permission to manage staff');
+    });
+
+    it('rejects invalid or malformed email address with 400 Validation failed', async () => {
+      const res = await request(app)
+        .post(`/api/organizer/events/${mockEvent.id}/team/invitations`)
+        .set('Authorization', `Bearer ${organizerToken}`)
+        .send({ email: 'not-an-email' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+      expect(res.body.error.message).toBe('Validation failed');
+    });
+
+    it('rejects missing or empty email address with 400 Validation failed', async () => {
+      const res = await request(app)
+        .post(`/api/organizer/events/${mockEvent.id}/team/invitations`)
+        .set('Authorization', `Bearer ${organizerToken}`)
+        .send({ email: '   ' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+      expect(res.body.error.message).toBe('Validation failed');
+    });
   });
 
   describe('3. Team & Invitation Listing', () => {
@@ -330,6 +400,88 @@ describe('Organizer Event Staff Management API', () => {
       expect(jsonStr).not.toContain('tokenHash');
       expect(jsonStr).not.toContain('codeHash');
       expect(jsonStr).not.toContain('otp');
+    });
+
+    it('returns accepted staff under active staff collection and excludes accepted invitations from pending', async () => {
+      vi.spyOn(prisma.event, 'findFirst').mockResolvedValue(mockEvent as any);
+
+      const staffFindManySpy = vi.spyOn(prisma.eventStaff, 'findMany').mockResolvedValue([
+        {
+          id: 'staff-accepted-1',
+          eventId: mockEvent.id,
+          userId: 'user-accepted-1',
+          email: 'accepted.staff@example.com',
+          status: 'ACTIVE',
+          assignedAt: new Date(),
+          revokedAt: null,
+          user: { id: 'user-accepted-1', name: 'Accepted Staff', email: 'accepted.staff@example.com', avatarUrl: null },
+          assignedByUser: { id: organizerId, name: 'Organizer Name', email: 'organizer@outside.vip' },
+          revokedByUser: null,
+        },
+      ] as any);
+
+      const inviteFindManySpy = vi.spyOn(prisma.eventStaffInvitation, 'findMany').mockResolvedValue([] as any);
+
+      const res = await request(app)
+        .get(`/api/organizer/events/${mockEvent.id}/team`)
+        .set('Authorization', `Bearer ${organizerToken}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+
+      expect(staffFindManySpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            eventId: mockEvent.id,
+            status: 'ACTIVE',
+          }),
+        })
+      );
+      expect(inviteFindManySpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            eventId: mockEvent.id,
+            status: 'PENDING',
+          }),
+        })
+      );
+
+      expect(res.body.data.staff.length).toBe(1);
+      expect(res.body.data.staff[0].name).toBe('Accepted Staff');
+      expect(res.body.data.staff[0].status).toBe('ACTIVE');
+      expect(res.body.data.staff[0].assignedByName).toBe('Organizer Name');
+      expect(res.body.data.invitations.length).toBe(0);
+    });
+
+    it('retains unaccepted invitations under pending invitations list with canResend capability', async () => {
+      vi.spyOn(prisma.event, 'findFirst').mockResolvedValue(mockEvent as any);
+      vi.spyOn(prisma.eventStaff, 'findMany').mockResolvedValue([] as any);
+
+      vi.spyOn(prisma.eventStaffInvitation, 'findMany').mockResolvedValue([
+        {
+          id: 'inv-unaccepted-1',
+          eventId: mockEvent.id,
+          email: 'unaccepted@example.com',
+          status: 'PENDING',
+          expiresAt: new Date(Date.now() + 600000),
+          acceptedAt: null,
+          revokedAt: null,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          invitedByUser: { id: organizerId, name: 'Organizer', email: 'organizer@outside.vip' },
+        },
+      ] as any);
+
+      const res = await request(app)
+        .get(`/api/organizer/events/${mockEvent.id}/team`)
+        .set('Authorization', `Bearer ${organizerToken}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.data.staff.length).toBe(0);
+      expect(res.body.data.invitations.length).toBe(1);
+      expect(res.body.data.invitations[0].email).toBe('unaccepted@example.com');
+      expect(res.body.data.invitations[0].status).toBe('PENDING');
+      expect(res.body.data.invitations[0].canResend).toBe(true);
     });
   });
 
@@ -551,6 +703,18 @@ describe('Organizer Event Staff Management API', () => {
 
       expect(res.status).toBe(404);
       expect(res.body.error.code).toBe('STAFF_NOT_FOUND');
+    });
+  });
+
+  describe('6. Database Schema & Migration Invariant Verification', () => {
+    it('verifies EventStaff and EventStaffInvitation tables exist in the database and are queryable without P2021', async () => {
+      const [staffCount, invitationCount] = await Promise.all([
+        prisma.eventStaff.count(),
+        prisma.eventStaffInvitation.count(),
+      ]);
+
+      expect(typeof staffCount).toBe('number');
+      expect(typeof invitationCount).toBe('number');
     });
   });
 });
