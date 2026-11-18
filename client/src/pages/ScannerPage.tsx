@@ -154,6 +154,28 @@ export const ScannerPage: React.FC<ScannerPageProps> = ({ initialUser }) => {
             slug: e.slug,
           }));
           setEventsList(list);
+
+          if (typeof window !== 'undefined') {
+            const params = new URLSearchParams(window.location.search);
+            const eventParam = params.get('event') || params.get('slug');
+            if (eventParam) {
+              const matched = list.find((e) => e.id === eventParam || e.slug === eventParam);
+              if (matched) {
+                setSelectedEventId(matched.id);
+              } else {
+                setSelectedEventId(eventParam);
+                scanStatusRef.current = 'forbidden';
+                setScanStatus('forbidden');
+                setTicketMeta({
+                  note: 'You do not have permission to check in tickets for this event. You are not assigned to this event gate.',
+                });
+                setIsLoadingEvents(false);
+                return;
+              }
+            } else {
+              setSelectedEventId(list[0].id);
+            }
+          }
           setIsLoadingEvents(false);
           return;
         }
@@ -163,55 +185,59 @@ export const ScannerPage: React.FC<ScannerPageProps> = ({ initialUser }) => {
           setIsLoadingEvents(false);
           return;
         }
-      } catch (err) {
-        console.warn('Could not load scanner gates directly:', err);
-        if (isMounted && user?.role === 'ATTENDEE') {
+
+        if (isMounted) {
           setEventsList([]);
           setIsLoadingEvents(false);
           return;
         }
-      }
-
-      try {
-        const orgRes = await api.organizer.listEvents();
-        if (isMounted && orgRes.events && orgRes.events.length > 0) {
-          const list: EventOption[] = orgRes.events.map((e) => ({
-            id: e.id,
-            title: e.title,
-            slug: e.slug,
-          }));
-          setEventsList((prev) => {
-            const map = new Map<string, EventOption>();
-            [...prev, ...list].forEach((item) => {
-              map.set(item.id, item);
-              if (item.slug) map.set(item.slug, item);
+      } catch (err: any) {
+        console.warn('Could not load scanner gates:', err);
+        const status = err?.statusCode || err?.status;
+        if (isMounted && user?.role === 'ATTENDEE') {
+          setEventsList([]);
+          setIsLoadingEvents(false);
+          if (status === 401) {
+            scanStatusRef.current = 'session_expired';
+            stopCamera();
+            setScanStatus('session_expired');
+            setTicketMeta({
+              note: 'Your scanner session has expired due to inactivity. Please resume your session.',
             });
-            return Array.from(new Set(Array.from(map.values())));
-          });
-        }
-      } catch {}
-
-      try {
-        const publicRes = await api.events.list({ limit: 100 });
-        if (isMounted && publicRes.events && publicRes.events.length > 0) {
-          const list: EventOption[] = publicRes.events.map((e) => ({
-            id: e.id,
-            title: e.title,
-            slug: e.slug,
-          }));
-          setEventsList((prev) => {
-            const map = new Map<string, EventOption>();
-            [...prev, ...list].forEach((item) => {
-              map.set(item.id, item);
-              if (item.slug) map.set(item.slug, item);
+            return;
+          }
+          if (status === 403) {
+            scanStatusRef.current = 'forbidden';
+            stopCamera();
+            setScanStatus('forbidden');
+            setTicketMeta({
+              note: err?.message || 'You do not have permission to check in tickets at this gate. Your staff assignment may have been revoked.',
             });
-            return Array.from(new Set(Array.from(map.values())));
-          });
+            return;
+          }
         }
-      } catch (err) {
-        console.warn('Could not load public events for scanner:', err);
-      } finally {
-        if (isMounted) setIsLoadingEvents(false);
+        if (isMounted) {
+          setEventsList([]);
+          setIsLoadingEvents(false);
+          if (status === 401) {
+            scanStatusRef.current = 'session_expired';
+            stopCamera();
+            setScanStatus('session_expired');
+            setTicketMeta({
+              note: 'Your scanner session has expired due to inactivity. Please resume your session.',
+            });
+            return;
+          }
+          if (status === 403) {
+            scanStatusRef.current = 'forbidden';
+            stopCamera();
+            setScanStatus('forbidden');
+            setTicketMeta({
+              note: err?.message || 'You do not have permission to check in tickets at this gate. Your staff assignment may have been revoked.',
+            });
+            return;
+          }
+        }
       }
     };
 
@@ -352,7 +378,11 @@ export const ScannerPage: React.FC<ScannerPageProps> = ({ initialUser }) => {
   }, [cameraStatus, stopCamera, stopHeartbeat]);
 
   const startCamera = useCallback(async (preferredFacing: 'environment' | 'user' = facingMode) => {
-    if (scanStatusRef.current === 'forbidden' || scanStatusRef.current === 'session_expired') {
+    if (
+      scanStatusRef.current === 'forbidden' ||
+      scanStatusRef.current === 'session_expired' ||
+      (user?.role === 'ATTENDEE' && eventsList.length === 0)
+    ) {
       return;
     }
     if (streamRef.current) {
