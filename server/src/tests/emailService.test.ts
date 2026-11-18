@@ -6,12 +6,15 @@ import {
   DEFAULT_EMAIL_FROM,
   EmailDeliveryError,
   getLatestVerificationEmail,
+  getLatestStaffInvitationEmail,
   resetEmailServiceTestOptions,
   resetSentVerificationEmails,
+  resetSentStaffInvitationEmails,
   resolveEmailFrom,
   sanitizeEmailLogMessage,
   sentVerificationEmails,
   sendVerificationOtpEmail,
+  sendStaffInvitationEmail,
   setEmailServiceTestOptions,
 } from '../lib/email.service.js';
 import { resetVerificationRateLimits } from '../modules/auth/auth.controller.js';
@@ -26,6 +29,7 @@ describe('Resend Email Service Hardening & Delivery Reliability', () => {
 
   beforeEach(() => {
     resetSentVerificationEmails();
+    resetSentStaffInvitationEmails();
     resetEmailServiceTestOptions();
     resetVerificationRateLimits();
     vi.restoreAllMocks();
@@ -45,6 +49,7 @@ describe('Resend Email Service Hardening & Delivery Reliability', () => {
     }
     resetEmailServiceTestOptions();
     resetSentVerificationEmails();
+    resetSentStaffInvitationEmails();
     vi.restoreAllMocks();
   });
 
@@ -89,6 +94,43 @@ describe('Resend Email Service Hardening & Delivery Reliability', () => {
       expect(recorded).toBeDefined();
       expect(recorded!.html).not.toContain('<script>');
       expect(recorded!.html).toContain('&lt;script&gt;alert(&quot;xss&quot;)&lt;/script&gt; &amp; &#39;Co&#39;');
+    });
+
+    it('generates staff invitation email with clickable CTA button, clickable fallback URL matching exactly, and plain-text URL', async () => {
+      const inviteUrl = 'https://out-side.vip/staff/invitations/inv_test_token_12345';
+      const eventTitle = 'Nairobi Nights Live & Lounge';
+      const organizerName = 'Kulture Group';
+
+      const result = await sendStaffInvitationEmail({
+        to: 'staff_invitee@example.com',
+        eventTitle,
+        organizerName,
+        inviteUrl,
+        expiresInDays: 7,
+      });
+
+      expect(result.sent).toBe(true);
+      expect(result.provider).toBe('test-recorder');
+
+      const recorded = getLatestStaffInvitationEmail('staff_invitee@example.com');
+      expect(recorded).toBeDefined();
+
+      // CTA is a clickable anchor with the correct URL
+      expect(recorded!.html).toContain(`<a href="${inviteUrl}"`);
+      expect(recorded!.html).toContain('Accept Staff Invitation</span>');
+
+      // Fallback URL is a clickable anchor
+      expect(recorded!.html).toContain(`<a href="${inviteUrl}" target="_blank" rel="noopener noreferrer" style="color: #FF5500; text-decoration: underline; word-break: break-all; font-size: 12px; display: inline-block; margin-top: 4px;">${inviteUrl}</a>`);
+
+      // Both URLs match exactly
+      const hrefMatches = [...recorded!.html.matchAll(/href="([^"]+)"/g)].map((m) => m[1]);
+      expect(hrefMatches.length).toBeGreaterThanOrEqual(2);
+      expect(hrefMatches[0]).toBe(inviteUrl);
+      expect(hrefMatches[1]).toBe(inviteUrl);
+
+      // Plain-text email contains the full URL
+      expect(recorded!.text).toContain(inviteUrl);
+      expect(recorded!.text).toContain('Accept your invitation and access the ticket scanner here:');
     });
   });
 

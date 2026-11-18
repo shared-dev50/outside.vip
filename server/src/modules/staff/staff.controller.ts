@@ -75,7 +75,10 @@ export async function getEventTeam(req: Request, res: Response, next: NextFuncti
 
     const [staff, invitations] = await Promise.all([
       prisma.eventStaff.findMany({
-        where: { eventId: event.id },
+        where: {
+          eventId: event.id,
+          status: 'ACTIVE',
+        },
         select: {
           id: true,
           eventId: true,
@@ -110,7 +113,10 @@ export async function getEventTeam(req: Request, res: Response, next: NextFuncti
         orderBy: { createdAt: 'desc' },
       }),
       prisma.eventStaffInvitation.findMany({
-        where: { eventId: event.id },
+        where: {
+          eventId: event.id,
+          status: 'PENDING',
+        },
         select: {
           id: true,
           eventId: true,
@@ -133,11 +139,46 @@ export async function getEventTeam(req: Request, res: Response, next: NextFuncti
       }),
     ]);
 
+    const formattedStaff = staff.map((member) => ({
+      id: member.id,
+      eventId: member.eventId,
+      userId: member.userId,
+      email: member.email,
+      name: member.user?.name || member.email.split('@')[0],
+      avatarUrl: member.user?.avatarUrl || null,
+      status: member.status,
+      assignedAt: member.assignedAt instanceof Date ? member.assignedAt.toISOString() : String(member.assignedAt),
+      assignedByName: member.assignedByUser?.name || 'Organizer',
+      assignedByUser: member.assignedByUser,
+      revokedByUser: member.revokedByUser,
+      user: member.user,
+    }));
+
+    const formattedInvitations = invitations.map((inv) => {
+      const isExpired = new Date(inv.expiresAt).getTime() <= Date.now();
+      const canResend = inv.status === 'PENDING' && !isExpired;
+      return {
+        id: inv.id,
+        eventId: inv.eventId,
+        email: inv.email,
+        status: inv.status,
+        expiresAt: inv.expiresAt instanceof Date ? inv.expiresAt.toISOString() : String(inv.expiresAt),
+        createdAt: inv.createdAt instanceof Date ? inv.createdAt.toISOString() : String(inv.createdAt),
+        acceptedAt: inv.acceptedAt ? (inv.acceptedAt instanceof Date ? inv.acceptedAt.toISOString() : String(inv.acceptedAt)) : null,
+        revokedAt: inv.revokedAt ? (inv.revokedAt instanceof Date ? inv.revokedAt.toISOString() : String(inv.revokedAt)) : null,
+        invitedByName: inv.invitedByUser?.name || 'Organizer',
+        invitedByUser: inv.invitedByUser,
+        canResend,
+        resendCooldownSeconds: 0,
+      };
+    });
+
     res.json({
       success: true,
       data: {
-        team: staff,
-        invitations,
+        staff: formattedStaff,
+        team: formattedStaff,
+        invitations: formattedInvitations,
       },
     });
   } catch (error) {
