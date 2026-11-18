@@ -3,6 +3,7 @@ import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { AuthFormCard, AuthViewMode } from '../components/auth/AuthFormCard';
 import { EmailVerificationGate } from '../components/auth/EmailVerificationGate';
+import { sanitizeRedirectUrl } from '../lib/utils';
 
 export const AuthPage: React.FC = () => {
   const { user, isLoading } = useAuth();
@@ -10,7 +11,8 @@ export const AuthPage: React.FC = () => {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
 
-  const redirectPath = searchParams.get('redirect') || '/organizer';
+  const rawRedirect = searchParams.get('redirect');
+  const redirectPath = sanitizeRedirectUrl(rawRedirect, '/organizer');
 
   const initialMode: AuthViewMode = location.pathname.startsWith('/register')
     ? 'register'

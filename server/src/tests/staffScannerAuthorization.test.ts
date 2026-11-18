@@ -5,6 +5,8 @@ import { Role, AccountStatus, EventStaffStatus, OrderStatus, TicketStatus, Event
 import { app } from '../app.js';
 import { prisma } from '../db/prisma.js';
 import { env } from '../config/env.js';
+import { createSession, SESSION_COOKIE_NAME, SESSION_PREFIX } from '../lib/session.service.js';
+import { getRedisClient } from '../lib/redis.js';
 
 describe('Staff Scanner Authorization & Dedicated Scanner Router API', () => {
   const adminId = 'usr-admin-scanner-auth';
@@ -368,5 +370,128 @@ describe('Staff Scanner Authorization & Dedicated Scanner Router API', () => {
       expect(res.body.data.result).toBe('SUCCESS');
     });
   });
+
+  describe('3. GET /api/scanner/ping & Session Continuity Heartbeat', () => {
+    it('returns 401 Unauthorized when request lacks authentication session or token', async () => {
+      const res = await request(app).get('/api/scanner/ping');
+      expect(res.status).toBe(401);
+      expect(res.body.success).toBe(false);
+      expect(res.body.error.message).toContain('Authentication required');
+    });
+
+    it('returns 200 OK with server timestamp and performs zero database queries when authenticated', async () => {
+      const findFirstSpy = vi.spyOn(prisma.eventStaff, 'findFirst');
+
+      const beforeTime = Date.now();
+      const res = await request(app)
+        .get('/api/scanner/ping')
+        .set('Authorization', `Bearer ${staffToken}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(typeof res.body.data.timestamp).toBe('number');
+      expect(res.body.data.timestamp).toBeGreaterThanOrEqual(beforeTime);
+      expect(res.body.data.timestamp).toBeLessThanOrEqual(Date.now());
+
+      // Heartbeat ping must be lightweight with no unnecessary database queries
+      expect(findFirstSpy).not.toHaveBeenCalled();
+    });
+
+    it('successfully touches the server session in Redis on authenticated ping', async () => {
+      const testUserId = 'usr-ping-touch-session-test';
+      vi.spyOn(prisma.user, 'findUnique').mockResolvedValue({
+        id: testUserId,
+        email: 'ping_touch@outside.vip',
+        role: Role.ATTENDEE,
+        emailVerified: true,
+        status: AccountStatus.ACTIVE,
+      } as any);
+
+      // Create a real Redis session with past lastActiveAt
+      const issued = await createSession({ userId: testUserId });
+      const redis = getRedisClient();
+      const sessionKey = `${SESSION_PREFIX}${issued.sessionId}`;
+
+      const initialRaw = await redis.get(sessionKey);
+      expect(initialRaw).not.toBeNull();
+      const initialRecord = JSON.parse(initialRaw!);
+      const initialActiveAt = initialRecord.lastActiveAt;
+
+      // Fast forward time slightly
+      await new Promise((r) => setTimeout(r, 15));
+
+      const pingRes = await request(app)
+        .get('/api/scanner/ping')
+        .set('Cookie', `${SESSION_COOKIE_NAME}=${encodeURIComponent(issued.rawCookieValue)}`);
+
+      expect(pingRes.status).toBe(200);
+      expect(pingRes.body.success).toBe(true);
+
+      const updatedRaw = await redis.get(sessionKey);
+      expect(updatedRaw).not.toBeNull();
+      const updatedRecord = JSON.parse(updatedRaw!);
+      expect(updatedRecord.lastActiveAt).toBeGreaterThan(initialActiveAt);
+    });
+
+    it('preserves absolute 7-day session expiry and cannot be extended indefinitely by ping', async () => {
+      const testUserId = 'usr-ping-absolute-expiry-test';
+      vi.spyOn(prisma.user, 'findUnique').mockResolvedValue({
+        id: testUserId,
+        email: 'ping_expiry@outside.vip',
+        role: Role.ATTENDEE,
+        emailVerified: true,
+        status: AccountStatus.ACTIVE,
+      } as any);
+
+      const issued = await createSession({ userId: testUserId });
+      const redis = getRedisClient();
+      const sessionKey = `${SESSION_PREFIX}${issued.sessionId}`;
+
+      // Simulate session reaching its absolute expiry limit
+      const raw = await redis.get(sessionKey);
+      const record = JSON.parse(raw!);
+      record.absoluteExpiresAt = Date.now() - 1000; // Expired absolute lifetime
+      await redis.setPx(sessionKey, JSON.stringify(record), 60_000);
+
+      const pingRes = await request(app)
+        .get('/api/scanner/ping')
+        .set('Cookie', `${SESSION_COOKIE_NAME}=${encodeURIComponent(issued.rawCookieValue)}`);
+
+      expect(pingRes.status).toBe(401);
+
+      // The expired session must be purged from Redis
+      const postPingRaw = await redis.get(sessionKey);
+      expect(postPingRaw).toBeNull();
+    });
+
+    it('ensures revoked EventStaff assignment remains blocked on check-in even when session is actively touched by ping', async () => {
+      // Staff member has valid session touched by ping
+      const pingRes = await request(app)
+        .get('/api/scanner/ping')
+        .set('Authorization', `Bearer ${staffToken}`);
+      expect(pingRes.status).toBe(200);
+
+      // But organizer revoked staff assignment in PostgreSQL
+      vi.spyOn(prisma.eventStaff, 'findFirst').mockResolvedValue(null);
+      vi.spyOn(prisma.ticket, 'findUnique').mockResolvedValue(mockAssignedTicket as any);
+      vi.spyOn(prisma.eventStaff, 'findUnique').mockResolvedValue({
+        id: 'staff-revoked-id',
+        status: EventStaffStatus.REVOKED,
+      } as any);
+
+      const checkInRes = await request(app)
+        .post('/api/scanner/check-in')
+        .set('Authorization', `Bearer ${staffToken}`)
+        .send({
+          token: mockAssignedTicket.ticketToken,
+          eventId: mockAssignedEvent.slug,
+        });
+
+      // Immediate 403 Forbidden even with active session!
+      expect(checkInRes.status).toBe(403);
+      expect(checkInRes.body.error.message).toContain('You do not have permission');
+    });
+  });
 });
+
 

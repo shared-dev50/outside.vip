@@ -61,9 +61,25 @@ export const StaffInvitationPage: React.FC = () => {
         const res = await api.staffInvitation.getMetadata(token);
         if (isMounted) {
           setMetadata(res);
+          // If invitation is confirmed expired, revoked, or assignment is inactive, clear recovery token
+          if (
+            res.invitation.status === 'EXPIRED' ||
+            res.invitation.status === 'REVOKED' ||
+            res.invitation.isAssignmentActive === false
+          ) {
+            try {
+              sessionStorage.removeItem('outside_scanner_invite_token');
+            } catch {}
+          }
         }
       } catch (err: any) {
         if (isMounted) {
+          const status = err?.statusCode || err?.status;
+          if (status === 404 || status === 410 || status === 403) {
+            try {
+              sessionStorage.removeItem('outside_scanner_invite_token');
+            } catch {}
+          }
           setError(
             err?.message ||
               err?.error?.message ||
@@ -120,6 +136,10 @@ export const StaffInvitationPage: React.FC = () => {
         setActiveCsrfToken(res.csrfToken);
       }
       await refreshUser();
+      // Recovery succeeded: clear the recovery token from sessionStorage
+      try {
+        sessionStorage.removeItem('outside_scanner_invite_token');
+      } catch {}
       setSuccessMessage('Verification successful! Initializing your scanner session...');
       setTimeout(() => {
         const targetGate = metadata?.event.slug || metadata?.event.id || '';
@@ -143,6 +163,10 @@ export const StaffInvitationPage: React.FC = () => {
     try {
       await api.staffInvitation.acceptWithSession(token);
       await refreshUser();
+      // Acceptance succeeded: clear the recovery token from sessionStorage
+      try {
+        sessionStorage.removeItem('outside_scanner_invite_token');
+      } catch {}
       setSuccessMessage('Staff invitation accepted! Redirecting to scanner...');
       setTimeout(() => {
         const targetGate = metadata?.event.slug || metadata?.event.id || '';
@@ -321,6 +345,9 @@ export const StaffInvitationPage: React.FC = () => {
             <button
               type="button"
               onClick={async () => {
+                try {
+                  sessionStorage.removeItem('outside_scanner_invite_token');
+                } catch {}
                 await logout();
                 window.location.reload();
               }}

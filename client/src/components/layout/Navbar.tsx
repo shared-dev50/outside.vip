@@ -170,6 +170,9 @@ export const Navbar: React.FC = () => {
                   </Link>
                   <button
                     onClick={() => {
+                      try {
+                        sessionStorage.removeItem('outside_scanner_invite_token');
+                      } catch {}
                       logout();
                       setShowAccountMenu(false);
                       navigate('/');
@@ -261,6 +264,9 @@ export const Navbar: React.FC = () => {
             {user ? (
               <button
                 onClick={() => {
+                  try {
+                    sessionStorage.removeItem('outside_scanner_invite_token');
+                  } catch {}
                   logout();
                   setMobileMenuOpen(false);
                 }}
