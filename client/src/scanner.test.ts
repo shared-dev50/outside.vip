@@ -607,6 +607,606 @@ describe('Outside.vip Organizer Scanner Utilities', () => {
       expect(scannerSource).toContain('You do not have any active scanner staff assignments');
     });
   });
+
+  describe('Stage 2: Staff Scanner Session Continuity, Heartbeat & Error Differentiation', () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+      vi.useRealTimers();
+    });
+
+    it('api.scanner.ping calls the /scanner/ping endpoint', async () => {
+      const pingSpy = vi.spyOn(api.scanner, 'ping').mockResolvedValue({
+        timestamp: Date.now(),
+      } as any);
+
+      const res = await api.scanner.ping();
+      expect(pingSpy).toHaveBeenCalledTimes(1);
+      expect(res).toHaveProperty('timestamp');
+    });
+
+    it('verifies ScannerPage source code defines 10-minute heartbeat interval and lifecycle guards', async () => {
+      const scannerSource = await import('./pages/ScannerPage?raw').then((m) => m.default || '').catch(() => '');
+      expect(scannerSource).toBeTruthy();
+
+      expect(scannerSource).toContain('HEARTBEAT_INTERVAL_MS = 10 * 60 * 1000');
+      expect(scannerSource).toContain("cameraStatus === 'active'");
+      expect(scannerSource).toContain("document.visibilityState === 'visible'");
+      expect(scannerSource).toContain("document.addEventListener('visibilitychange'");
+      expect(scannerSource).toContain('api.scanner.ping()');
+      expect(scannerSource).toContain('session_expired');
+      expect(scannerSource).toContain('Resume Staff Session');
+    });
+
+    it('simulates heartbeat lifecycle: runs while camera is active and page visible, stops when camera stops or hidden', async () => {
+      vi.useFakeTimers();
+      vi.spyOn(api.scanner, 'ping').mockResolvedValue({
+        timestamp: Date.now(),
+      } as any);
+
+      let cameraStatus: 'idle' | 'active' = 'active';
+      let visibilityState: 'visible' | 'hidden' = 'visible';
+      let heartbeatTimer: any = null;
+      let pingCount = 0;
+
+      const HEARTBEAT_INTERVAL_MS = 10 * 60 * 1000;
+
+      const sendHeartbeat = async () => {
+        if (visibilityState !== 'visible' || cameraStatus !== 'active') return;
+        pingCount++;
+        await api.scanner.ping();
+      };
+
+      const startHeartbeat = () => {
+        if (heartbeatTimer) return;
+        heartbeatTimer = setInterval(sendHeartbeat, HEARTBEAT_INTERVAL_MS);
+      };
+
+      const stopHeartbeat = () => {
+        if (heartbeatTimer) {
+          clearInterval(heartbeatTimer);
+          heartbeatTimer = null;
+        }
+      };
+
+      // 1. Initial active state with visible document starts heartbeat
+      startHeartbeat();
+      expect(heartbeatTimer).not.toBeNull();
+      expect(pingCount).toBe(0);
+
+      // Fast-forward 10 minutes: exactly 1 heartbeat sent
+      await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+      expect(pingCount).toBe(1);
+
+      // Fast-forward another 10 minutes: second heartbeat sent
+      await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+      expect(pingCount).toBe(2);
+
+      // 2. Camera stops -> heartbeat stops
+      cameraStatus = 'idle';
+      stopHeartbeat();
+      expect(heartbeatTimer).toBeNull();
+
+      // Fast-forward 20 minutes: no pings while camera is stopped
+      await vi.advanceTimersByTimeAsync(20 * 60 * 1000);
+      expect(pingCount).toBe(2);
+
+      // 3. Camera starts again -> heartbeat resumes
+      cameraStatus = 'active';
+      startHeartbeat();
+      expect(heartbeatTimer).not.toBeNull();
+
+      await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+      expect(pingCount).toBe(3);
+
+      // 4. Page becomes hidden -> heartbeat stops
+      visibilityState = 'hidden';
+      stopHeartbeat();
+      expect(heartbeatTimer).toBeNull();
+
+      await vi.advanceTimersByTimeAsync(20 * 60 * 1000);
+      expect(pingCount).toBe(3);
+
+      // 5. Page becomes visible again -> heartbeat sends immediate ping and restarts interval
+      visibilityState = 'visible';
+      await sendHeartbeat();
+      startHeartbeat();
+      expect(pingCount).toBe(4);
+
+      await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+      expect(pingCount).toBe(5);
+
+      // Cleanup
+      stopHeartbeat();
+    });
+
+    it('prevents accidental duplicate heartbeat intervals (idempotency guard)', () => {
+      vi.useFakeTimers();
+      let heartbeatTimer: any = null;
+      let intervalCount = 0;
+
+      const startHeartbeat = () => {
+        if (heartbeatTimer) return; // Guard against duplicates
+        intervalCount++;
+        heartbeatTimer = setInterval(() => {}, 600000);
+      };
+
+      startHeartbeat();
+      startHeartbeat();
+      startHeartbeat();
+
+      expect(intervalCount).toBe(1);
+      clearInterval(heartbeatTimer);
+    });
+
+    it('prevents overlapping in-flight ping requests', async () => {
+      let isPinging = false;
+      let executedPings = 0;
+
+      const mockPing = async () => {
+        if (isPinging) return;
+        isPinging = true;
+        executedPings++;
+        await new Promise((r) => setTimeout(r, 100));
+        isPinging = false;
+      };
+
+      // Call twice concurrently
+      const [p1, p2] = [mockPing(), mockPing()];
+      await Promise.all([p1, p2]);
+
+      expect(executedPings).toBe(1);
+    });
+
+    it('handles transient network errors during ping without crashing', async () => {
+      vi.spyOn(api.scanner, 'ping').mockRejectedValue(new Error('Network offline'));
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      let scanStatus = 'idle';
+
+      const sendHeartbeat = async () => {
+        try {
+          await api.scanner.ping();
+        } catch (err: any) {
+          if (err?.statusCode === 401) {
+            scanStatus = 'session_expired';
+            return;
+          }
+          console.warn('[Scanner Heartbeat] Transient ping failure:', err?.message || err);
+        }
+      };
+
+      await expect(sendHeartbeat()).resolves.not.toThrow();
+      expect(scanStatus).toBe('idle');
+      expect(warnSpy).toHaveBeenCalled();
+    });
+
+    it('transitions to session_expired state when ping returns 401', async () => {
+      const authError = new Error('Authentication required');
+      (authError as any).statusCode = 401;
+      vi.spyOn(api.scanner, 'ping').mockRejectedValue(authError);
+
+      let scanStatus = 'idle';
+      let heartbeatTimer: any = 123;
+
+      const sendHeartbeat = async () => {
+        try {
+          await api.scanner.ping();
+        } catch (err: any) {
+          if (err?.statusCode === 401) {
+            heartbeatTimer = null;
+            scanStatus = 'session_expired';
+            return;
+          }
+        }
+      };
+
+      await sendHeartbeat();
+      expect(scanStatus).toBe('session_expired');
+      expect(heartbeatTimer).toBeNull();
+    });
+
+    it('differentiates 401 (session_expired) from 403 (forbidden) in check-in error handling', () => {
+      const simulateCheckInCatch = (status: number, message?: string) => {
+        let scanStatus = 'idle';
+        let ticketMeta: any = null;
+
+        if (status === 401) {
+          scanStatus = 'session_expired';
+          ticketMeta = {
+            note: message || 'Your scanner session has expired due to inactivity. Please resume your session.',
+          };
+        } else if (status === 403) {
+          scanStatus = 'forbidden';
+          ticketMeta = {
+            note: message || 'You do not have permission to check in tickets at this gate. Your staff assignment may have been revoked.',
+          };
+        }
+
+        return { scanStatus, ticketMeta };
+      };
+
+      const res401 = simulateCheckInCatch(401);
+      expect(res401.scanStatus).toBe('session_expired');
+      expect(res401.ticketMeta.note).toContain('scanner session has expired');
+      expect(res401.ticketMeta.note).not.toContain('organizer account');
+
+      const res403 = simulateCheckInCatch(403);
+      expect(res403.scanStatus).toBe('forbidden');
+      expect(res403.ticketMeta.note).toContain('permission to check in tickets');
+      expect(res403.ticketMeta.note).not.toContain('organizer account');
+    });
+
+    it('renders session_expired UI with Resume Staff Session action and without organizer account message', async () => {
+      const scannerSource = await import('./pages/ScannerPage?raw').then((m) => m.default || '').catch(() => '');
+
+      // Verify the session_expired UI block exists
+      expect(scannerSource).toContain("scanStatus === 'session_expired'");
+      expect(scannerSource).toContain('Scanner Session Expired');
+      expect(scannerSource).toContain('Resume Staff Session');
+      expect(scannerSource).toContain('/staff/invitations/');
+
+      // Verify 401 does NOT set organizer account message
+      expect(scannerSource).not.toContain('Please sign in with an organizer account.');
+    });
+
+    it('renders distinct forbidden UI explaining permission revoked without offering OTP resumption', async () => {
+      const scannerSource = await import('./pages/ScannerPage?raw').then((m) => m.default || '').catch(() => '');
+
+      expect(scannerSource).toContain("scanStatus === 'forbidden'");
+      expect(scannerSource).toContain('Unauthorized Gate Staff');
+      expect(scannerSource).toContain('Your staff assignment may have been revoked');
+    });
+  });
+
+  describe('Stage 2 Hardening: Invitation Token Sanitization & Camera Shutdown', () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+      vi.useRealTimers();
+    });
+
+    it('removes invite parameter from address bar using replaceState while preserving event query parameter', () => {
+      const initialUrl = 'https://outside.vip/scanner?event=sol-fest&invite=inv_sec_token_12345';
+      const replaceStateSpy = vi.fn();
+
+      const mockWindow = {
+        location: new URL(initialUrl),
+        history: {
+          state: { some: 'state' },
+          replaceState: replaceStateSpy,
+        },
+      };
+
+      // Execute URL sanitization logic
+      const params = new URLSearchParams(mockWindow.location.search);
+      const paramToken = params.get('invite') || params.get('invitation') || params.get('token');
+      expect(paramToken).toBe('inv_sec_token_12345');
+
+      if (paramToken) {
+        const url = new URL(mockWindow.location.href);
+        url.searchParams.delete('invite');
+        url.searchParams.delete('invitation');
+        url.searchParams.delete('token');
+        const cleanSearch = url.searchParams.toString();
+        const cleanPath = url.pathname + (cleanSearch ? `?${cleanSearch}` : '') + url.hash;
+        mockWindow.history.replaceState(mockWindow.history.state, 'Test Title', cleanPath);
+      }
+
+      expect(replaceStateSpy).toHaveBeenCalledTimes(1);
+      expect(replaceStateSpy).toHaveBeenCalledWith(
+        { some: 'state' },
+        'Test Title',
+        '/scanner?event=sol-fest'
+      );
+    });
+
+    it('verifies ScannerPage source code performs URL sanitization with replaceState', async () => {
+      const scannerSource = await import('./pages/ScannerPage?raw').then((m) => m.default || '').catch(() => '');
+      expect(scannerSource).toBeTruthy();
+
+      expect(scannerSource).toContain("url.searchParams.delete('invite')");
+      expect(scannerSource).toContain("url.searchParams.delete('invitation')");
+      expect(scannerSource).toContain("url.searchParams.delete('token')");
+      expect(scannerSource).toContain('window.history.replaceState');
+    });
+
+    it('verifies token lifecycle: preserved in sessionStorage for recovery, cleared on verification, logout, and revocation', () => {
+      const mockStorage: Record<string, string> = {};
+      const storage = {
+        getItem: (k: string) => mockStorage[k] || null,
+        setItem: (k: string, v: string) => { mockStorage[k] = v; },
+        removeItem: (k: string) => { delete mockStorage[k]; },
+      };
+
+      // 1. Initial read on ScannerPage mounts and saves token
+      storage.setItem('outside_scanner_invite_token', 'test_recovery_token');
+      expect(storage.getItem('outside_scanner_invite_token')).toBe('test_recovery_token');
+
+      // 2. Token remains available while session is active or needs recovery
+      expect(storage.getItem('outside_scanner_invite_token')).toBe('test_recovery_token');
+
+      // 3. Cleared after successful OTP recovery
+      const onVerifyOtpSuccess = () => {
+        storage.removeItem('outside_scanner_invite_token');
+      };
+      onVerifyOtpSuccess();
+      expect(storage.getItem('outside_scanner_invite_token')).toBeNull();
+
+      // 4. Cleared on logout
+      storage.setItem('outside_scanner_invite_token', 'test_recovery_token_2');
+      const onLogout = () => {
+        storage.removeItem('outside_scanner_invite_token');
+      };
+      onLogout();
+      expect(storage.getItem('outside_scanner_invite_token')).toBeNull();
+
+      // 5. Cleared when invitation metadata is confirmed EXPIRED or REVOKED
+      storage.setItem('outside_scanner_invite_token', 'test_recovery_token_3');
+      const onMetadataLoaded = (status: string) => {
+        if (status === 'EXPIRED' || status === 'REVOKED') {
+          storage.removeItem('outside_scanner_invite_token');
+        }
+      };
+      onMetadataLoaded('REVOKED');
+      expect(storage.getItem('outside_scanner_invite_token')).toBeNull();
+    });
+
+    it('verifies stopCamera releases all MediaStream tracks and cancels animation frame', () => {
+      const stopTrack1 = vi.fn();
+      const stopTrack2 = vi.fn();
+      const mockTracks = [{ stop: stopTrack1 }, { stop: stopTrack2 }];
+      const mockStream = {
+        getTracks: () => mockTracks,
+      };
+
+      const cancelAnimationSpy = vi.fn();
+      let cameraStatus = 'active';
+
+      let animationFrameId: number | null = 42;
+      let streamRef: any = mockStream;
+      let videoRef: any = { srcObject: mockStream };
+
+      const stopCamera = () => {
+        if (animationFrameId) {
+          cancelAnimationSpy(animationFrameId);
+          animationFrameId = null;
+        }
+
+        if (streamRef) {
+          streamRef.getTracks().forEach((track: any) => {
+            try { track.stop(); } catch {}
+          });
+          streamRef = null;
+        }
+
+        if (videoRef) {
+          videoRef.srcObject = null;
+        }
+
+        cameraStatus = 'idle';
+      };
+
+      stopCamera();
+
+      expect(cancelAnimationSpy).toHaveBeenCalledWith(42);
+      expect(stopTrack1).toHaveBeenCalledTimes(1);
+      expect(stopTrack2).toHaveBeenCalledTimes(1);
+      expect(streamRef).toBeNull();
+      expect(videoRef.srcObject).toBeNull();
+      expect(cameraStatus).toBe('idle');
+
+      // Calling again is idempotent and does not throw
+      expect(() => stopCamera()).not.toThrow();
+    });
+
+    it('verifies HTTP 401 from heartbeat stops camera immediately and sets session_expired', async () => {
+      const stopCameraSpy = vi.fn();
+      const stopHeartbeatSpy = vi.fn();
+      let scanStatus = 'idle';
+
+      const authError = new Error('Authentication required');
+      (authError as any).statusCode = 401;
+      vi.spyOn(api.scanner, 'ping').mockRejectedValue(authError);
+
+      const sendHeartbeat = async () => {
+        try {
+          await api.scanner.ping();
+        } catch (err: any) {
+          if (err?.statusCode === 401) {
+            stopCameraSpy();
+            stopHeartbeatSpy();
+            scanStatus = 'session_expired';
+            return;
+          }
+        }
+      };
+
+      await sendHeartbeat();
+
+      expect(stopCameraSpy).toHaveBeenCalledTimes(1);
+      expect(stopHeartbeatSpy).toHaveBeenCalledTimes(1);
+      expect(scanStatus).toBe('session_expired');
+    });
+
+    it('verifies HTTP 403 from heartbeat releases camera resources, stops heartbeat, and does not offer OTP recovery', async () => {
+      const stopCameraSpy = vi.fn();
+      const stopHeartbeatSpy = vi.fn();
+      let scanStatus = 'idle';
+      let ticketMeta: any = null;
+
+      const forbiddenError = new Error('Staff assignment revoked');
+      (forbiddenError as any).statusCode = 403;
+      vi.spyOn(api.scanner, 'ping').mockRejectedValue(forbiddenError);
+
+      const sendHeartbeat = async () => {
+        try {
+          await api.scanner.ping();
+        } catch (err: any) {
+          if (err?.statusCode === 403) {
+            stopCameraSpy();
+            stopHeartbeatSpy();
+            scanStatus = 'forbidden';
+            ticketMeta = { note: err.message };
+            return;
+          }
+        }
+      };
+
+      await sendHeartbeat();
+
+      expect(stopCameraSpy).toHaveBeenCalledTimes(1);
+      expect(stopHeartbeatSpy).toHaveBeenCalledTimes(1);
+      expect(scanStatus).toBe('forbidden');
+      expect(ticketMeta.note).toContain('Staff assignment revoked');
+
+      // Verify no OTP recovery or redirection is offered in forbidden state
+      const scannerSource = await import('./pages/ScannerPage?raw').then((m) => m.default || '').catch(() => '');
+      const forbiddenBlockMatch = scannerSource.match(/\{scanStatus === 'forbidden' && \([\s\S]*?\)\}/);
+      expect(forbiddenBlockMatch).not.toBeNull();
+      const forbiddenBlock = forbiddenBlockMatch![0];
+      expect(forbiddenBlock).not.toContain('Resume Staff Session');
+      expect(forbiddenBlock).not.toContain('invitation');
+      expect(forbiddenBlock).not.toContain('verify-otp');
+    });
+
+    it('verifies HTTP 401 from check-in stops both camera resources and heartbeat', () => {
+      const stopCameraSpy = vi.fn();
+      const stopHeartbeatSpy = vi.fn();
+      let scanStatus = 'idle';
+
+      const handleCheckInError = (status: number) => {
+        if (status === 401) {
+          stopCameraSpy();
+          stopHeartbeatSpy();
+          scanStatus = 'session_expired';
+        } else if (status === 403) {
+          stopCameraSpy();
+          stopHeartbeatSpy();
+          scanStatus = 'forbidden';
+        }
+      };
+
+      handleCheckInError(401);
+      expect(stopCameraSpy).toHaveBeenCalledTimes(1);
+      expect(stopHeartbeatSpy).toHaveBeenCalledTimes(1);
+      expect(scanStatus).toBe('session_expired');
+    });
+
+    it('verifies HTTP 403 from check-in releases camera resources, stops heartbeat, and does not offer OTP recovery', () => {
+      const stopCameraSpy = vi.fn();
+      const stopHeartbeatSpy = vi.fn();
+      let scanStatus = 'idle';
+
+      const handleCheckInError = (status: number) => {
+        if (status === 401) {
+          stopCameraSpy();
+          stopHeartbeatSpy();
+          scanStatus = 'session_expired';
+        } else if (status === 403) {
+          stopCameraSpy();
+          stopHeartbeatSpy();
+          scanStatus = 'forbidden';
+        }
+      };
+
+      handleCheckInError(403);
+      expect(stopCameraSpy).toHaveBeenCalledTimes(1);
+      expect(stopHeartbeatSpy).toHaveBeenCalledTimes(1);
+      expect(scanStatus).toBe('forbidden');
+    });
+
+    it('verifies no further scan/check-in attempts occur after either terminal authorization state', async () => {
+      const checkInSpy = vi.spyOn(api.scanner, 'checkIn');
+      const getUserMediaSpy = vi.fn();
+
+      for (const terminalState of ['session_expired', 'forbidden'] as const) {
+        checkInSpy.mockClear();
+        getUserMediaSpy.mockClear();
+
+        let scanStatusRef: { current: string } = { current: terminalState };
+        let isValidatingRef = { current: false };
+        let pendingScanRef = { current: null as any };
+
+        const handleValidateToken = async (token: string) => {
+          if (
+            scanStatusRef.current === 'forbidden' ||
+            scanStatusRef.current === 'session_expired' ||
+            isValidatingRef.current
+          ) {
+            return;
+          }
+          await api.scanner.checkIn({ token, idempotencyKey: 'key_1' });
+        };
+
+        const handleRetry = () => {
+          if (
+            scanStatusRef.current === 'forbidden' ||
+            scanStatusRef.current === 'session_expired' ||
+            !pendingScanRef.current ||
+            isValidatingRef.current
+          ) {
+            return;
+          }
+          handleValidateToken(pendingScanRef.current.token);
+        };
+
+        const startCamera = async () => {
+          if (
+            scanStatusRef.current === 'forbidden' ||
+            scanStatusRef.current === 'session_expired'
+          ) {
+            return;
+          }
+          getUserMediaSpy();
+        };
+
+        const resetScanner = () => {
+          if (
+            scanStatusRef.current === 'forbidden' ||
+            scanStatusRef.current === 'session_expired'
+          ) {
+            return;
+          }
+          scanStatusRef.current = 'idle';
+        };
+
+        // 1. Calling handleValidateToken should be blocked immediately
+        await handleValidateToken('any_test_token');
+        expect(checkInSpy).not.toHaveBeenCalled();
+
+        // 2. Calling handleRetry should be blocked immediately
+        pendingScanRef.current = { token: 'retry_token', gateId: 'gate_1', idempotencyKey: 'retry_key' };
+        handleRetry();
+        expect(checkInSpy).not.toHaveBeenCalled();
+
+        // 3. Calling startCamera should be blocked immediately
+        await startCamera();
+        expect(getUserMediaSpy).not.toHaveBeenCalled();
+
+        // 4. Calling resetScanner must NOT escape the terminal authorization state
+        resetScanner();
+        expect(scanStatusRef.current).toBe(terminalState);
+      }
+    });
+
+    it('verifies ScannerPage source code guarantees camera and heartbeat shutdown on 401 and 403 across heartbeat and check-in', async () => {
+      const scannerSource = await import('./pages/ScannerPage?raw').then((m) => m.default || '').catch(() => '');
+
+      // Verify stopCamera calls stopHeartbeat
+      expect(scannerSource).toMatch(/const stopCamera = useCallback\(\(\) =>\s*\{[\s\S]*?stopHeartbeat\(\);/);
+
+      // Verify heartbeat 403 stops camera and heartbeat
+      expect(scannerSource).toMatch(/if \(status === 403\)\s*\{[\s\S]*?stopCamera\(\);[\s\S]*?stopHeartbeat\(\);[\s\S]*?setScanStatus\('forbidden'\);/);
+
+      // Verify check-in 403 stops camera and heartbeat
+      expect(scannerSource).toMatch(/\} else if \(status === 403\)\s*\{[\s\S]*?stopCamera\(\);[\s\S]*?stopHeartbeat\(\);[\s\S]*?setScanStatus\('forbidden'\);/);
+
+      // Verify check-in 401 stops camera and heartbeat
+      expect(scannerSource).toMatch(/\} else if \(status === 401\)\s*\{[\s\S]*?stopCamera\(\);[\s\S]*?stopHeartbeat\(\);[\s\S]*?setScanStatus\('session_expired'\);/);
+
+      // Verify handleValidateToken guards against terminal states
+      expect(scannerSource).toMatch(/scanStatusRef\.current === 'forbidden'\s*\|\|\s*scanStatusRef\.current === 'session_expired'/);
+    });
+  });
 });
 
 

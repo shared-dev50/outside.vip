@@ -1,9 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { useAuth } from '../context/AuthContext';
+import { useOptionalAuth } from '../context/AuthContext';
 import { api } from '../lib/api';
-import { OrganizerEventItem } from '../types';
+import { OrganizerEventItem, User } from '../types';
 import { OrganizerWaitlistModal } from '../components/organizer/OrganizerWaitlistModal';
 import {
   EmailVerificationGate,
@@ -31,8 +31,18 @@ import {
   Building2,
 } from 'lucide-react';
 
-export const OrganizerDashboardPage: React.FC = () => {
-  const { user } = useAuth();
+interface OrganizerDashboardPageProps {
+  initialUser?: User | null;
+  initialIsLoading?: boolean;
+}
+
+export const OrganizerDashboardPage: React.FC<OrganizerDashboardPageProps> = ({
+  initialUser,
+  initialIsLoading,
+}) => {
+  const auth = useOptionalAuth();
+  const user = initialUser !== undefined ? initialUser : auth?.user;
+  const isLoading = initialIsLoading !== undefined ? initialIsLoading : (auth?.isLoading ?? false);
   const queryClient = useQueryClient();
 
   // Sync body background with page theme to prevent bounce discoloration
@@ -122,6 +132,17 @@ export const OrganizerDashboardPage: React.FC = () => {
     setIsDeleting(true);
     deleteMutation.mutate(eventToDelete.id);
   };
+
+  if (isLoading) {
+    return (
+      <div className="min-h-screen bg-[#FAF8F5] text-stone-900 flex items-center justify-center p-4 selection:bg-stone-900 selection:text-white">
+        <div className="flex items-center gap-2.5 text-xs font-mono uppercase tracking-wider text-stone-500">
+          <RefreshCw className="w-4 h-4 animate-spin text-stone-700" />
+          <span>Loading Organizer Studio...</span>
+        </div>
+      </div>
+    );
+  }
 
   if (!user) {
     return (

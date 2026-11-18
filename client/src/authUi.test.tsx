@@ -124,7 +124,7 @@ describe('Production Authentication UI & Removal of Demo Sign-In', () => {
       <QueryClientProvider client={queryClient}>
         <MemoryRouter initialEntries={['/organizer']}>
           <AuthProvider>
-            <OrganizerDashboardPage />
+            <OrganizerDashboardPage initialIsLoading={false} />
           </AuthProvider>
         </MemoryRouter>
       </QueryClientProvider>
@@ -145,7 +145,10 @@ describe('Production Authentication UI & Removal of Demo Sign-In', () => {
         <MemoryRouter initialEntries={['/organizer/events/new']}>
           <AuthProvider>
             <Routes>
-              <Route path="/organizer/events/new" element={<CreateEventPage />} />
+              <Route
+                path="/organizer/events/new"
+                element={<CreateEventPage initialIsLoading={false} />}
+              />
             </Routes>
           </AuthProvider>
         </MemoryRouter>

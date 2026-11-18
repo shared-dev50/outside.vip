@@ -140,3 +140,30 @@ export async function getScannerGates(
   }
 }
 
+/**
+ * Lightweight scanner keep-alive endpoint.
+ * Requires an active authenticated session (enforced by authenticateUser & requireAuth).
+ * Touches the Redis session to prevent idle timeout while scanning, without DB overhead.
+ */
+export async function pingScanner(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    if (!req.user) {
+      throw new UnauthorizedError('Authentication required to access scanner');
+    }
+
+    res.json({
+      success: true,
+      data: {
+        timestamp: Date.now(),
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+

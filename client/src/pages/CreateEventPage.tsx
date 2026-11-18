@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../lib/api';
-import { useAuth } from '../context/AuthContext';
+import { useOptionalAuth } from '../context/AuthContext';
 import { EmailVerificationGate } from '../components/auth/EmailVerificationGate';
 import { AuthFormCard } from '../components/auth/AuthFormCard';
 import {
@@ -12,6 +12,7 @@ import {
   EventFeatureType,
   EventGalleryImage,
   EventFeature,
+  User,
 } from '../types';
 import {
   ArrowLeft,
@@ -139,12 +140,22 @@ const toIsoValue = (localString?: string | null) => {
   return d.toISOString();
 };
 
-export const CreateEventPage: React.FC = () => {
+interface CreateEventPageProps {
+  initialUser?: User | null;
+  initialIsLoading?: boolean;
+}
+
+export const CreateEventPage: React.FC<CreateEventPageProps> = ({
+  initialUser,
+  initialIsLoading,
+}) => {
   const { id } = useParams<{ id: string }>();
   const isEditing = Boolean(id);
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const { user } = useAuth();
+  const auth = useOptionalAuth();
+  const user = initialUser !== undefined ? initialUser : auth?.user;
+  const isLoading = initialIsLoading !== undefined ? initialIsLoading : (auth?.isLoading ?? false);
 
   const [currentStep, setCurrentStep] = useState<WizardStep>(1);
 
@@ -1282,6 +1293,17 @@ export const CreateEventPage: React.FC = () => {
       showNotification('error', err?.message || 'Failed to cancel event.');
     },
   });
+
+  if (isLoading) {
+    return (
+      <div className="min-h-screen bg-[#FAF8F5] text-stone-900 flex items-center justify-center p-4">
+        <div className="flex items-center gap-2.5 text-xs font-mono uppercase tracking-wider text-stone-500">
+          <RefreshCw className="w-4 h-4 animate-spin text-stone-700" />
+          <span>Loading Event Studio...</span>
+        </div>
+      </div>
+    );
+  }
 
   if (!user) {
     return (

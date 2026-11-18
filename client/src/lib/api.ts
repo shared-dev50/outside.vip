@@ -957,6 +957,10 @@ export const api = {
       }),
   },
   scanner: {
+    ping: () =>
+      request<{
+        timestamp: number;
+      }>('/scanner/ping'),
     getGates: () =>
       request<{
         events: ScannerGateItem[];
