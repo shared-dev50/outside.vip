@@ -104,42 +104,49 @@ if (isLoading) {
     <div className="p-6 space-y-6">
       <div className="flex justify-between items-center">
         <h1 className="text-2xl font-bold">Orders</h1>
+        <input
+          type="text"
+          placeholder="Search by name or order #..."
+          value={searchTerm}
+          onChange={(e) => handleSearchChange(e.target.value)}
+          className="input input-bordered w-64"
+        />
       </div>
-      <div className="flex items-center gap-3 w-full lg:w-auto">
-        <div className="relative flex-1 lg:w-64">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-stone-400" />
-          <input
-            type="text"
-            placeholder="Search by name or order #..."
-            value={searchTerm}
-            onChange={(e) => handleSearchChange(e.target.value)}
-            className="input input-bordered w-64"
-          />
-          {searchTerm && (
-            <button
-              onClick={() => handleSearchChange("")}
-              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-stone-400 hover:text-stone-700"
-              aria-label="Clear search input"
-            >
-              <X className="w-3.5 h-3.5" />
-            </button>
-          )}
-        </div>
+       <div className="flex items-center gap-3 w-full lg:w-auto">
+            <div className="relative flex-1 lg:w-64">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-stone-400" />
+              <input
+                type="text"
+                placeholder="Search events, venues..."
+                value={searchTerm}
+                onChange={(e) => handleSearchChange(e.target.value)}
+                className="w-full pl-9 pr-8 py-2 rounded-lg bg-white border border-stone-300 text-stone-900 placeholder-stone-400 text-xs font-mono focus:outline-none focus:border-stone-900 transition-colors shadow-2xs"
+              />
+              {searchTerm && (
+                <button
+                  onClick={() => handleSearchChange('')}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-stone-400 hover:text-stone-700"
+                  aria-label="Clear search input"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
 
-        <select
-          // value={selectedStatus}
-          className="appearance-none font-sans text-sm sm:text-base font-semibold text-stone-900 bg-white border border-stone-300 rounded-lg pl-4 pr-10 py-2 sm:py-2.5 shadow-2xs hover:border-stone-900 focus:outline-none focus:border-stone-900 transition-colors cursor-pointer"
-          aria-label="Filter events by city"
-        >
-          <option value="date_asc">Paid</option>
-          <option value="date_desc">Refunded</option>
-          <option value="price_asc">Canceled</option>
-          <option value="price_desc">RSVP</option>
-          <option value="price_desc">Transferred</option>
-          <option value="price_desc">Waitlist</option>
-        </select>
-        <ChevronDown className="absolute right-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-stone-500 pointer-events-none" />
-      </div>
+            <select
+                // value={selectedStatus}
+                className="appearance-none font-sans text-sm sm:text-base font-semibold text-stone-900 bg-white border border-stone-300 rounded-lg pl-4 pr-10 py-2 sm:py-2.5 shadow-2xs hover:border-stone-900 focus:outline-none focus:border-stone-900 transition-colors cursor-pointer"
+                aria-label="Filter events by city"
+              >
+              <option value="date_asc">Paid</option>
+              <option value="date_desc">Refunded</option>
+              <option value="price_asc">Canceled: Low to High</option>
+              <option value="price_desc">RSVP: High to Low</option>
+              <option value="price_desc">Transferred</option>
+              <option value="price_desc">Waitlist</option>
+              </select>
+              <ChevronDown className="absolute right-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-stone-500 pointer-events-none" />
+          </div>
       <div className="overflow-x-auto">
         <table className="table table-zebra w-full">
           <thead>
@@ -193,7 +200,7 @@ if (isLoading) {
                   $ {Number(order.totalInCents * order.ticketsCount).toFixed(2)}
                 </td>
               </tr>
-            ))}
+                ))}
           </tbody>
         </table>
       </div>

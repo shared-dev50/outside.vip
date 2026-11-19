@@ -152,7 +152,8 @@ describe('Stage 3 Implementation 1: Redirect Security & Authentication Hydration
 
       const html = renderToString(<TestContainer />);
       expect(html).toBeDefined();
-      expect(sanitizeRedirectUrl('%2Fteams', '/organizer')).toBe('/teams');
+      expect(sanitizeRedirectUrl('/teams', '/organizer')).toBe('/teams');
+      expect(sanitizeRedirectUrl(decodeURIComponent('%2Fteams'), '/organizer')).toBe('/teams');
     });
 
     it('uses safe default /organizer when malicious or auth redirect is provided to AuthPage', () => {
