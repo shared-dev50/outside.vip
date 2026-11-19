@@ -132,6 +132,39 @@ describe('Passwordless Staff Acceptance & Session Issuance API', () => {
       expect(res.body.data.invitation.isCurrentAccount).toBe(true);
     });
 
+    it('returns isCurrentAccount: true when authenticated via session cookie and warm Redis user cache', async () => {
+      const inviteEmail = 'cookie_staff@outside.vip';
+      const mockInvite = createMockInvitation({ email: inviteEmail });
+      const staffUserId = `user-cookie-staff-${Date.now()}`;
+
+      vi.spyOn(prisma.eventStaffInvitation, 'findUnique').mockResolvedValue(mockInvite as any);
+      vi.spyOn(prisma.user, 'findUnique').mockResolvedValue({
+        id: staffUserId,
+        email: inviteEmail,
+        passwordHash: null,
+      } as any);
+
+      // Create a valid session and warm the user auth cache in Redis
+      const issuedSession = await sessionService.createSession({ userId: staffUserId });
+      const ver = await sessionService.getUserAuthCacheVersion(staffUserId);
+      await sessionService.populateUserAuthCacheAtomically({
+        userId: staffUserId,
+        email: inviteEmail,
+        role: Role.ATTENDEE,
+        emailVerified: true,
+        accountStatus: AccountStatus.ACTIVE,
+      }, ver);
+
+      const res = await request(app)
+        .get(`/api/staff/invitations/${rawToken}`)
+        .set('Cookie', `${sessionService.SESSION_COOKIE_NAME}=${encodeURIComponent(issuedSession.rawCookieValue)}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.data.invitation.isCurrentAccount).toBe(true);
+      expect(res.body.data.invitation.requiresLogin).toBe(false);
+    });
+
     it('returns 410 INVITATION_EXPIRED when invitation has expired', async () => {
       const mockInvite = createMockInvitation({ expiresAt: new Date(Date.now() - 5000) });
       vi.spyOn(prisma.eventStaffInvitation, 'findUnique').mockResolvedValue(mockInvite as any);
@@ -967,6 +1000,69 @@ describe('Passwordless Staff Acceptance & Session Issuance API', () => {
           }),
         })
       );
+    });
+
+    it('accepts invitation for user authenticated via session cookie and warm Redis user cache', async () => {
+      const inviteEmail = 'cookie_staff_accept@outside.vip';
+      const mockInvite = createMockInvitation({ email: inviteEmail });
+      const staffUserId = `user-cookie-accept-${Date.now()}`;
+
+      vi.spyOn(prisma.eventStaffInvitation, 'findUnique').mockResolvedValue(mockInvite as any);
+
+      const authenticatedUser = {
+        id: staffUserId,
+        email: inviteEmail,
+        role: Role.ATTENDEE,
+        passwordHash: null,
+        status: AccountStatus.ACTIVE,
+      };
+
+      vi.spyOn(prisma.user, 'findUnique').mockResolvedValue(authenticatedUser as any);
+
+      const mockTx = {
+        eventStaffInvitation: {
+          findUnique: vi.fn().mockResolvedValue(mockInvite),
+          update: vi.fn().mockResolvedValue({ ...mockInvite, status: 'ACCEPTED' }),
+        },
+        user: {
+          findUnique: vi.fn().mockResolvedValue(authenticatedUser),
+        },
+        eventStaff: {
+          findUnique: vi.fn().mockResolvedValue(null),
+          create: vi.fn().mockResolvedValue({
+            id: 'staff-asst-cookie-1',
+            eventId,
+            userId: staffUserId,
+            status: 'ACTIVE',
+          }),
+        },
+      };
+
+      vi.spyOn(prisma, '$transaction').mockImplementation(async (callback: any) => {
+        return callback(mockTx);
+      });
+
+      // Create a valid session and warm the user auth cache in Redis
+      const issuedSession = await sessionService.createSession({ userId: staffUserId });
+      const ver = await sessionService.getUserAuthCacheVersion(staffUserId);
+      await sessionService.populateUserAuthCacheAtomically({
+        userId: staffUserId,
+        email: inviteEmail,
+        role: Role.ATTENDEE,
+        emailVerified: true,
+        accountStatus: AccountStatus.ACTIVE,
+      }, ver);
+
+      const res = await request(app)
+        .post(`/api/staff/invitations/${rawToken}/accept`)
+        .set('Cookie', `${sessionService.SESSION_COOKIE_NAME}=${encodeURIComponent(issuedSession.rawCookieValue)}`)
+        .set('X-CSRF-Token', issuedSession.csrfToken);
+
+      expect(res.body.error).toBeUndefined();
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.data.status).toBe('ACTIVE');
+      expect(res.body.data.user.id).toBe(staffUserId);
     });
 
     it('rejects acceptance with 403 Forbidden when authenticated user email does not match invitation email', async () => {

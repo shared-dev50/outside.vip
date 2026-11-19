@@ -728,6 +728,7 @@ export async function verifyInvitationOtp(
     await populateUserAuthCacheAtomically(
       {
         userId: transactionResult.user.id,
+        email: transactionResult.user.email,
         role: transactionResult.user.role,
         emailVerified: true,
         accountStatus: AccountStatus.ACTIVE,
@@ -916,6 +917,19 @@ export async function acceptInvitationWithSession(
 
       return { user: dbUser, staffRecord };
     });
+
+    await invalidateUserAuthCache(transactionResult.user.id);
+    const ver = await getUserAuthCacheVersion(transactionResult.user.id);
+    await populateUserAuthCacheAtomically(
+      {
+        userId: transactionResult.user.id,
+        email: transactionResult.user.email,
+        role: transactionResult.user.role,
+        emailVerified: transactionResult.user.emailVerified,
+        accountStatus: transactionResult.user.status ?? AccountStatus.ACTIVE,
+      },
+      ver
+    );
 
     res.json({
       success: true,

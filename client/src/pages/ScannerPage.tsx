@@ -162,6 +162,9 @@ export const ScannerPage: React.FC<ScannerPageProps> = ({ initialUser }) => {
               const matched = list.find((e) => e.id === eventParam || e.slug === eventParam);
               if (matched) {
                 setSelectedEventId(matched.id);
+                try {
+                  sessionStorage.removeItem('outside_scanner_invite_token');
+                } catch {}
               } else {
                 setSelectedEventId(eventParam);
                 scanStatusRef.current = 'forbidden';
@@ -174,6 +177,9 @@ export const ScannerPage: React.FC<ScannerPageProps> = ({ initialUser }) => {
               }
             } else {
               setSelectedEventId(list[0].id);
+              try {
+                sessionStorage.removeItem('outside_scanner_invite_token');
+              } catch {}
             }
           }
           setIsLoadingEvents(false);

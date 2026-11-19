@@ -31,10 +31,11 @@ export interface IssuedSession {
 }
 
 /**
- * Contains ONLY the minimum required authorization fields cached in Redis (30s TTL).
+ * Contains authorization fields and email identity cached in Redis (30s TTL).
  */
 export interface CachedUserAuthRecord {
   userId: string;
+  email: string;
   role: Role;
   emailVerified: boolean;
   accountStatus: AccountStatus;
@@ -384,21 +385,25 @@ export async function getCachedUserAuth(userId: string): Promise<CachedUserAuthR
       if (
         !parsed ||
         typeof parsed.userId !== 'string' ||
+        typeof parsed.email !== 'string' ||
+        !parsed.email.trim() ||
         typeof parsed.role !== 'string' ||
         typeof parsed.emailVerified !== 'boolean' ||
         typeof parsed.accountStatus !== 'string'
       ) {
-        await redis.del(`${USER_AUTH_CACHE_PREFIX}${userId}`);
+        // Treat legacy or incomplete records missing email as cache misses
+        await redis.del(`${USER_AUTH_CACHE_PREFIX}${userId}`).catch(() => {});
         return null;
       }
       return {
         userId: parsed.userId,
+        email: parsed.email.trim().toLowerCase(),
         role: parsed.role as Role,
         emailVerified: parsed.emailVerified,
         accountStatus: parsed.accountStatus as AccountStatus,
       };
     } catch {
-      await redis.del(`${USER_AUTH_CACHE_PREFIX}${userId}`);
+      await redis.del(`${USER_AUTH_CACHE_PREFIX}${userId}`).catch(() => {});
       return null;
     }
   } catch (err) {
@@ -417,8 +422,8 @@ export async function getUserAuthCacheVersion(userId: string): Promise<string> {
 }
 
 /**
- * Atomically populates `user_auth_cache:<userId>` (30s TTL) with ONLY
- * `{ userId, role, emailVerified, accountStatus }` if and only if
+ * Atomically populates `user_auth_cache:<userId>` (30s TTL) with
+ * `{ userId, email, role, emailVerified, accountStatus }` if and only if
  * `user_auth_ver:<userId>` still matches `expectedVersion`.
  */
 export async function populateUserAuthCacheAtomically(
@@ -429,6 +434,7 @@ export async function populateUserAuthCacheAtomically(
     const redis = getRedisClient();
     const minimalPayload: CachedUserAuthRecord = {
       userId: record.userId,
+      email: (record.email || '').trim().toLowerCase(),
       role: record.role,
       emailVerified: record.emailVerified,
       accountStatus: record.accountStatus,

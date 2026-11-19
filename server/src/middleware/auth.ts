@@ -43,7 +43,7 @@ declare global {
 
 export async function loadUserAuthFromPostgres(
   userId: string
-): Promise<(CachedUserAuthRecord & { email?: string }) | null> {
+): Promise<CachedUserAuthRecord | null> {
   if (!prisma.user || typeof prisma.user.findUnique !== 'function') {
     return null;
   }
@@ -59,13 +59,13 @@ export async function loadUserAuthFromPostgres(
     },
   });
 
-  if (!dbUser) {
+  if (!dbUser || !dbUser.email) {
     return null;
   }
 
   return {
     userId: dbUser.id,
-    email: dbUser.email,
+    email: dbUser.email.trim().toLowerCase(),
     role: dbUser.role,
     emailVerified: dbUser.emailVerified,
     accountStatus: dbUser.status ?? AccountStatus.ACTIVE,
@@ -200,7 +200,7 @@ export async function authenticateUser(
     req.session = sessionRecord;
     req.user = {
       userId: authUser.userId,
-      email: (authUser as any).email || '',
+      email: authUser.email,
       role: authUser.role,
       emailVerified: authUser.emailVerified,
       accountStatus: authUser.accountStatus,
@@ -277,14 +277,14 @@ export async function requireFreshUserVerification(
       throw new UnauthorizedError('Authentication required to access this resource');
     }
 
-    let freshRecord: (CachedUserAuthRecord & { email?: string }) | null = null;
+    let freshRecord: CachedUserAuthRecord | null = null;
     try {
       const resolved = await resolveUserAuthWithCache(
         req.user.userId,
         loadUserAuthFromPostgres,
         { forceFreshDb: true }
       );
-      freshRecord = resolved.user as (CachedUserAuthRecord & { email?: string }) | null;
+      freshRecord = resolved.user;
     } catch (err) {
       if (err instanceof ServiceUnavailableError) {
         throw err;

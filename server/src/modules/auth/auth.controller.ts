@@ -105,6 +105,7 @@ const USER_PUBLIC_SELECT = {
 
 async function syncUserToAuthCache(user: {
   id: string;
+  email: string;
   role: Role;
   emailVerified: boolean;
   status?: AccountStatus;
@@ -114,6 +115,7 @@ async function syncUserToAuthCache(user: {
   await populateUserAuthCacheAtomically(
     {
       userId: user.id,
+      email: user.email,
       role: user.role,
       emailVerified: user.emailVerified,
       accountStatus: user.status ?? AccountStatus.ACTIVE,
@@ -250,7 +252,7 @@ export async function register(req: Request, res: Response, next: NextFunction):
     } catch (deliveryError) {
       // Roll back the newly created account if the initial verification email cannot be sent
       // so the user does not hit a false success or a duplicate-email conflict when retrying.
-      await prisma.user.delete({ where: { id: user.id } }).catch(() => {});
+      await prisma.user.delete({ where: { id: user.id } }).catch(() => { });
       throw deliveryError;
     }
 

@@ -421,7 +421,7 @@ describe('Outside.vip Organizer Scanner Utilities', () => {
             eventsList = [];
             return;
           }
-        } catch {}
+        } catch { }
       };
 
       await fetchEvents();
@@ -469,7 +469,7 @@ describe('Outside.vip Organizer Scanner Utilities', () => {
             eventsList = [];
             return;
           }
-        } catch {}
+        } catch { }
 
         try {
           const orgRes = await api.organizer.listEvents();
@@ -477,7 +477,7 @@ describe('Outside.vip Organizer Scanner Utilities', () => {
             eventsList = orgRes.events;
             return;
           }
-        } catch {}
+        } catch { }
       };
 
       await fetchEvents();
@@ -523,7 +523,7 @@ describe('Outside.vip Organizer Scanner Utilities', () => {
             eventsList = [];
             return;
           }
-        } catch {}
+        } catch { }
       };
 
       await fetchEvents();
@@ -577,14 +577,14 @@ describe('Outside.vip Organizer Scanner Utilities', () => {
           if (orgRes.events && orgRes.events.length > 0) {
             eventsList = orgRes.events;
           }
-        } catch {}
+        } catch { }
 
         try {
           const publicRes = await api.events.list({ limit: 100 });
           if (publicRes.events && publicRes.events.length > 0) {
             eventsList = publicRes.events;
           }
-        } catch {} finally {
+        } catch { } finally {
           isLoadingEvents = false;
         }
       };
@@ -727,7 +727,7 @@ describe('Outside.vip Organizer Scanner Utilities', () => {
       const startHeartbeat = () => {
         if (heartbeatTimer) return; // Guard against duplicates
         intervalCount++;
-        heartbeatTimer = setInterval(() => {}, 600000);
+        heartbeatTimer = setInterval(() => { }, 600000);
       };
 
       startHeartbeat();
@@ -759,7 +759,7 @@ describe('Outside.vip Organizer Scanner Utilities', () => {
 
     it('handles transient network errors during ping without crashing', async () => {
       vi.spyOn(api.scanner, 'ping').mockRejectedValue(new Error('Network offline'));
-      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => { });
 
       let scanStatus = 'idle';
 
@@ -924,11 +924,11 @@ describe('Outside.vip Organizer Scanner Utilities', () => {
       // 2. Token remains available while session is active or needs recovery
       expect(storage.getItem('outside_scanner_invite_token')).toBe('test_recovery_token');
 
-      // 3. Cleared after successful OTP recovery
-      const onVerifyOtpSuccess = () => {
+      // 3. Preserved through OTP verification and cleared when scanner gate access is established
+      const onGateAccessEstablished = () => {
         storage.removeItem('outside_scanner_invite_token');
       };
-      onVerifyOtpSuccess();
+      onGateAccessEstablished();
       expect(storage.getItem('outside_scanner_invite_token')).toBeNull();
 
       // 4. Cleared on logout
@@ -973,7 +973,7 @@ describe('Outside.vip Organizer Scanner Utilities', () => {
 
         if (streamRef) {
           streamRef.getTracks().forEach((track: any) => {
-            try { track.stop(); } catch {}
+            try { track.stop(); } catch { }
           });
           streamRef = null;
         }

@@ -3,15 +3,15 @@ import { OrderStatus } from "@/types";
 import { useQuery } from "@tanstack/react-query";
 import { AlertCircle } from "lucide-react";
 import { useEffect, useState } from "react";
-import {  useSearchParams } from "react-router-dom";
+import { useSearchParams } from "react-router-dom";
 
 export const OrdersPage: React.FC = () => {
   const [searchParams, setSearchParams] = useSearchParams();
 
-  const initialStatus =(searchParams.get("status") as OrderStatus) || undefined;
+  const initialStatus = (searchParams.get("status") as OrderStatus) || undefined;
   const initialEventId = searchParams.get("eventid") || "";
   const initialSearch = searchParams.get("search") || "";
-  const initialPage = Math.max(1,parseInt(searchParams.get("page") || "1", 10) || 1,);
+  const initialPage = Math.max(1, parseInt(searchParams.get("page") || "1", 10) || 1,);
   const initialSortBy = searchParams.get("sort") || "date_asc";
 
   const [searchTerm, setSearchTerm] = useState(initialSearch);
@@ -28,30 +28,31 @@ export const OrdersPage: React.FC = () => {
     if (searchTerm.trim()) params.set("search", searchTerm.trim());
     if (sortBy && sortBy !== "date_asc") params.set("sort", sortBy);
     if (currentPage > 1) params.set("page", currentPage.toString());
-    setSearchParams(params, { replace: true });}, [ searchTerm, selectedStatus,sortBy,currentPage,setSearchParams]);
+    setSearchParams(params, { replace: true });
+  }, [searchTerm, selectedStatus, sortBy, currentPage, setSearchParams]);
 
-    const { data, isLoading, error, refetch } = useQuery({
-        queryKey: ['events-discover', searchTerm, selectedStatus, sortBy, currentPage],
-        queryFn: () =>
-          api.organizer.getOrders({
-            status: selectedStatus,
-            eventId,
-            search: searchTerm.trim() || undefined,        
-            page: currentPage,
-            limit: 12,
-            sortOrder: 'asc',
-          }),
-      });
+  const { data, isLoading, error, refetch } = useQuery({
+    queryKey: ['events-discover', searchTerm, selectedStatus, sortBy, currentPage],
+    queryFn: () =>
+      api.organizer.getOrders({
+        status: selectedStatus,
+        eventId,
+        search: searchTerm.trim() || undefined,
+        page: currentPage,
+        limit: 12,
+        sortOrder: 'asc',
+      }),
+  });
 
-    const order = data?.orders;
-    console.log(order);
+  const order = data?.orders;
+  console.log(order);
 
   const handleSearchChange = (term: string) => {
     setSearchTerm(term);
     setCurrentPage(1);
   };
 
-   const handleSortChange = (sort: string) => {
+  const handleSortChange = (sort: string) => {
     setSortBy(sort);
     setCurrentPage(1);
   };
@@ -67,8 +68,15 @@ export const OrdersPage: React.FC = () => {
   const pagination = data?.pagination;
   const totalPages = pagination?.totalPages || 1;
   const totalEvents = pagination?.total ?? events.length;
-  
-if (isLoading) {
+
+  void setEventId;
+  void refetch;
+  void handleSortChange;
+  void clearFilters;
+  void totalPages;
+  void totalEvents;
+
+  if (isLoading) {
     return (
       <div className="min-h-screen bg-white">
         <div className="bg-[#08090C] text-white py-3 px-4 text-center text-xs font-mono">
@@ -150,7 +158,7 @@ if (isLoading) {
           </thead>
 
           <tbody>
-             {order?.map(order => (
+            {order?.map(order => (
               <tr key={order.id}>
                 <td>{order.orderNumber}</td>
                 <td>{order.createdAt}</td>
@@ -158,8 +166,8 @@ if (isLoading) {
                 <td>{order.ticketsCount}</td>
                 <td>$ {Number(order.totalInCents * order.ticketsCount).toFixed(2)}</td>
               </tr>
-                ))}
-           
+            ))}
+
             <tr>
               <td>OUT-2026-89413</td>
               <td>27-April-2026</td>
