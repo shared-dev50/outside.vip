@@ -1,41 +1,41 @@
 import { api } from "@/lib/api";
-import { OrderStatus } from "@/types";
+//import { OrderStatus } from "@/types";
 import { useQuery } from "@tanstack/react-query";
-import { AlertCircle } from "lucide-react";
+import { AlertCircle, ChevronDown, Search, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import {  useSearchParams } from "react-router-dom";
 
 export const OrdersPage: React.FC = () => {
   const [searchParams, setSearchParams] = useSearchParams();
 
-  const initialStatus =(searchParams.get("status") as OrderStatus) || undefined;
-  const initialEventId = searchParams.get("eventid") || "";
+ // const initialStatus =(searchParams.get("status") as OrderStatus) || undefined;
+  //const initialEventId = searchParams.get("eventid") || "";
   const initialSearch = searchParams.get("search") || "";
   const initialPage = Math.max(1,parseInt(searchParams.get("page") || "1", 10) || 1,);
-  const initialSortBy = searchParams.get("sort") || "date_asc";
+  //const initialSortBy = searchParams.get("sort") || "date_asc";
 
   const [searchTerm, setSearchTerm] = useState(initialSearch);
-  const [eventId, setEventId] = useState(initialEventId);
-  const [selectedStatus, setSelectedStatus] = useState<OrderStatus | undefined>(initialStatus);
+  //const [eventId, setEventId] = useState(initialEventId);
+  //const [selectedStatus, setSelectedStatus] = useState<OrderStatus | undefined>(initialStatus);
   const [currentPage, setCurrentPage] = useState<number>(initialPage);
-  const [sortBy, setSortBy] = useState<string>(initialSortBy);
+  //const [sortBy, setSortBy] = useState<string>(initialSortBy);
 
   useEffect(() => {
     const params = new URLSearchParams();
 
-    if (selectedStatus) params.set("status", selectedStatus);
-    if (eventId.trim()) params.set("eventid", searchTerm.trim());
+    //if (selectedStatus) params.set("status", selectedStatus);
+    //if (eventId.trim()) params.set("eventid", searchTerm.trim());
     if (searchTerm.trim()) params.set("search", searchTerm.trim());
-    if (sortBy && sortBy !== "date_asc") params.set("sort", sortBy);
+   // if (sortBy && sortBy !== "date_asc") params.set("sort", sortBy);
     if (currentPage > 1) params.set("page", currentPage.toString());
-    setSearchParams(params, { replace: true });}, [ searchTerm, selectedStatus,sortBy,currentPage,setSearchParams]);
+    setSearchParams(params, { replace: true });}, [ searchTerm,currentPage,setSearchParams]);
 
-    const { data, isLoading, error, refetch } = useQuery({
-        queryKey: ['events-discover', searchTerm, selectedStatus, sortBy, currentPage],
+    const { data, isLoading, error } = useQuery({
+        queryKey: ['events-discover', searchTerm,  currentPage],
         queryFn: () =>
           api.organizer.getOrders({
-            status: selectedStatus,
-            eventId,
+           // status: selectedStatus,
+           // eventId,
             search: searchTerm.trim() || undefined,        
             page: currentPage,
             limit: 12,
@@ -51,22 +51,27 @@ export const OrdersPage: React.FC = () => {
     setCurrentPage(1);
   };
 
-   const handleSortChange = (sort: string) => {
-    setSortBy(sort);
-    setCurrentPage(1);
-  };
+  //  const handleSortChange = (sort: string) => {
+  //   setSortBy(sort);
+  //   setCurrentPage(1);
+  // };
 
-  const clearFilters = () => {
-    setSearchTerm('');
-    setSelectedStatus(undefined);
-    setSortBy('date_asc');
-    setCurrentPage(1);
-  };
+  // const handleStatusChange = (status: or) => {
+  //   setSelectedStatus(status);
+  //   setCurrentPage(1);
+  // };
 
-  const events = data?.orders || [];
-  const pagination = data?.pagination;
-  const totalPages = pagination?.totalPages || 1;
-  const totalEvents = pagination?.total ?? events.length;
+  // const clearFilters = () => {
+  //   setSearchTerm('');
+  //   setSelectedStatus(undefined);
+  //   setSortBy('date_asc');
+  //   setCurrentPage(1);
+  // };
+
+  //const orders = data?.orders || [];
+  //const pagination = data?.pagination;
+  //const totalPages = pagination?.totalPages || 1;
+  //const totalorders = pagination?.total ?? orders.length;
   
 if (isLoading) {
     return (
@@ -107,6 +112,41 @@ if (isLoading) {
           className="input input-bordered w-64"
         />
       </div>
+       <div className="flex items-center gap-3 w-full lg:w-auto">
+            <div className="relative flex-1 lg:w-64">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-stone-400" />
+              <input
+                type="text"
+                placeholder="Search events, venues..."
+                value={searchTerm}
+                onChange={(e) => handleSearchChange(e.target.value)}
+                className="w-full pl-9 pr-8 py-2 rounded-lg bg-white border border-stone-300 text-stone-900 placeholder-stone-400 text-xs font-mono focus:outline-none focus:border-stone-900 transition-colors shadow-2xs"
+              />
+              {searchTerm && (
+                <button
+                  onClick={() => handleSearchChange('')}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-stone-400 hover:text-stone-700"
+                  aria-label="Clear search input"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+
+            <select
+                // value={selectedStatus}
+                className="appearance-none font-sans text-sm sm:text-base font-semibold text-stone-900 bg-white border border-stone-300 rounded-lg pl-4 pr-10 py-2 sm:py-2.5 shadow-2xs hover:border-stone-900 focus:outline-none focus:border-stone-900 transition-colors cursor-pointer"
+                aria-label="Filter events by city"
+              >
+              <option value="date_asc">Paid</option>
+              <option value="date_desc">Refunded</option>
+              <option value="price_asc">Canceled: Low to High</option>
+              <option value="price_desc">RSVP: High to Low</option>
+              <option value="price_desc">Transferred</option>
+              <option value="price_desc">Waitlist</option>
+              </select>
+              <ChevronDown className="absolute right-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-stone-500 pointer-events-none" />
+          </div>
       <div className="overflow-x-auto">
         <table className="table table-zebra w-full">
           <thead>
@@ -159,21 +199,6 @@ if (isLoading) {
                 <td>$ {Number(order.totalInCents * order.ticketsCount).toFixed(2)}</td>
               </tr>
                 ))}
-           
-            <tr>
-              <td>OUT-2026-89413</td>
-              <td>27-April-2026</td>
-              <td>SOL FEST: Under The Baobab Tree</td>
-              <td>$5</td>
-              <td>$100</td>
-            </tr>
-            <tr>
-              <td>OUT-2026-89414</td>
-              <td>26-June-2026</td>
-              <td>ALTE CRUISE: Sunset Rooftop Session</td>
-              <td>$2</td>
-              <td>$40</td>
-            </tr>
           </tbody>
         </table>
       </div>
