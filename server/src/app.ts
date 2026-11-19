@@ -19,6 +19,13 @@ import { waitlistRouter } from './modules/waitlist/waitlist.routes.js';
 import { placesRouter } from './modules/places/places.routes.js';
 import { staffInvitationRouter } from './modules/staff/staffInvitation.routes.js';
 import { scannerRouter } from './modules/scanner/scanner.routes.js';
+import promotionsRouter from './modules/promotions/promotions.routes.js';
+import {
+  teamRouter,
+  hostRouter,
+  eventTeamRouter,
+  eventPromotionsRouter,
+} from './modules/eventTeam/eventTeam.routes.js';
 
 export const app = express();
 app.set('trust proxy', 1);
@@ -47,6 +54,10 @@ app.use(csrfProtection);
 
 app.use('/api/health', healthRouter);
 app.use('/api/auth', authRouter);
+app.use('/api/team', teamRouter);
+app.use('/api/host', hostRouter);
+app.use('/api/events/:eventId/team', eventTeamRouter);
+app.use('/api/events/:eventId/promotions', eventPromotionsRouter);
 app.use('/api/events', eventsRouter);
 app.use('/api/organizer', organizerRouter);
 app.use('/api/checkout', checkoutRouter);
@@ -56,6 +67,8 @@ app.use('/api/waitlist', waitlistRouter);
 app.use('/api/places', placesRouter);
 app.use('/api/staff/invitations', staffInvitationRouter);
 app.use('/api/scanner', scannerRouter);
+app.use('/r', promotionsRouter);
+app.use('/api/r', promotionsRouter);
 
 app.use('/api/*', (_req, res) => {
   res.status(404).json({

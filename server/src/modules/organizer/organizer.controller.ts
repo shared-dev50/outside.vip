@@ -34,6 +34,7 @@ import { extractYouTubeVideoId, normalizeYouTubeUrl } from '../../utils/youtube.
 import { hashEventPassword } from '../events/passwordAccess.service.js';
 import { cancelWaitlistForEventIds, processWaitlistForTier } from '../waitlist/waitlist.service.js';
 import { verifyAndNormalizeLocation } from '../places/places.service.js';
+import { resolveEventAuthorization } from '../eventTeam/eventTeam.permissions.js';
 
 async function saveOrganizerPayoutDetails(
   tx: any,
@@ -409,14 +410,15 @@ export async function getOrganizerEventById(req: Request, res: Response, next: N
     }
 
     if (event.organizerId !== organizerId && req.user!.role !== 'ADMIN') {
-      throw new ForbiddenError('You do not have permission to view or edit this event');
+      await resolveEventAuthorization(id, req.user!);
     }
 
-    const effectivePayout = event.payoutDetails || event.organizer?.payoutDetails || null;
-    const sanitizedPayout = sanitizePayoutDetails(effectivePayout);
+    const isOwner = event.organizerId === organizerId;
+    const effectivePayout = isOwner ? (event.payoutDetails || event.organizer?.payoutDetails || null) : null;
+    const sanitizedPayout = isOwner ? sanitizePayoutDetails(effectivePayout) : null;
     const sanitizedOrganizer = {
       ...event.organizer,
-      payoutDetails: sanitizePayoutDetails(event.organizer?.payoutDetails),
+      payoutDetails: isOwner ? sanitizePayoutDetails(event.organizer?.payoutDetails) : null,
     };
 
     const tierIds = event.ticketTiers.map((t) => t.id);
@@ -917,7 +919,7 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
     }
 
     if (existingEvent.organizerId !== organizerId && req.user!.role !== 'ADMIN') {
-      throw new ForbiddenError('You do not have permission to edit this event');
+      await resolveEventAuthorization(id, req.user!, 'canEditDetails');
     }
 
     if (existingEvent.organizerId !== organizerId && req.user!.role === 'ADMIN') {
@@ -1686,7 +1688,7 @@ export async function cancelOrganizerEvent(req: Request, res: Response, next: Ne
     }
 
     if (event.organizerId !== organizerId && req.user!.role !== 'ADMIN') {
-      throw new ForbiddenError('You do not have permission to cancel this event');
+      await resolveEventAuthorization(id, req.user!, 'canCancelEvent');
     }
 
     if (event.organizerId !== organizerId && req.user!.role === 'ADMIN') {
@@ -1857,7 +1859,7 @@ export async function deleteOrganizerEvent(req: Request, res: Response, next: Ne
     }
 
     if (event.organizerId !== organizerId && req.user!.role !== 'ADMIN') {
-      throw new ForbiddenError('You do not have permission to delete this event');
+      await resolveEventAuthorization(id, req.user!, 'canDeleteEvent');
     }
 
     if (event.organizerId !== organizerId && req.user!.role === 'ADMIN') {
@@ -2845,7 +2847,7 @@ export async function getOrganizerOrders(
       }
 
       if (!isAdmin && event.organizerId !== organizerId) {
-        throw new ForbiddenError('You do not have permission to view orders for this event');
+        await resolveEventAuthorization(event.id, req.user, 'canViewOrders');
       }
 
       targetEventId = event.id;

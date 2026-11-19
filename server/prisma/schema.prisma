@@ -216,6 +216,11 @@ model User {
   staffAssignmentsRevoked EventStaff[]           @relation("StaffAssignmentsRevoked")
   staffInvitationsSent    EventStaffInvitation[] @relation("StaffInvitationsSent")
 
+  eventTeamMemberships  EventTeamMember[]      @relation("UserEventTeamMembers")
+  teamMembersInvited    EventTeamMember[]      @relation("TeamMemberInvitedBy")
+  teamInvitationsSent   EventTeamInvitation[]  @relation("TeamInvitationsSent")
+  promotionLinksCreated PromotionLink[]        @relation("PromotionLinksCreated")
+
   @@index([email])
 }
 
@@ -326,6 +331,14 @@ model Event {
 
   staffAssignments EventStaff[]           @relation("EventStaffAssignments")
   staffInvitations EventStaffInvitation[] @relation("EventStaffInvitations")
+
+  teamMembers         EventTeamMember[]             @relation("EventTeamMembers")
+  teamInvitations     EventTeamInvitation[]         @relation("EventTeamInvitations")
+  promotionLinks      PromotionLink[]
+  promotionClicks     PromotionClick[]
+  visitorAttributions PromotionVisitorAttribution[]
+  visitorDays         PromotionVisitorDay[]
+  dailyAggregates     PromotionDailyAggregate[]
 
   @@index([slug])
   @@index([category, status])
@@ -797,4 +810,215 @@ model EventStaffInvitation {
 
   @@index([eventId, email])
   @@index([email, status])
+}
+
+// ==========================================
+// EVENT TEAM & PROMOTIONS ENUMS
+// ==========================================
+
+enum EventTeamRole {
+  ADMIN
+  HOST
+}
+
+enum TeamMemberStatus {
+  ACTIVE
+  INACTIVE
+  REVOKED
+}
+
+enum TeamInvitationStatus {
+  PENDING
+  ACCEPTED
+  REVOKED
+  EXPIRED
+}
+
+enum PromotionLinkType {
+  CAMPAIGN
+  HOST
+}
+
+enum PromotionLinkStatus {
+  ACTIVE
+  DISABLED
+  ARCHIVED
+}
+
+// ==========================================
+// EVENT TEAM & PROMOTIONS MODELS
+// ==========================================
+
+model EventTeamMember {
+  id          String           @id @default(uuid())
+  eventId     String
+  userId      String
+  role        EventTeamRole
+  status      TeamMemberStatus @default(ACTIVE)
+  permissions Json?
+  invitedById String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  event       Event           @relation("EventTeamMembers", fields: [eventId], references: [id], onDelete: Cascade)
+  user        User            @relation("UserEventTeamMembers", fields: [userId], references: [id], onDelete: Cascade)
+  invitedBy   User?           @relation("TeamMemberInvitedBy", fields: [invitedById], references: [id], onDelete: SetNull)
+  hostedLinks PromotionLink[] @relation("HostTeamMemberLinks")
+
+  @@unique([eventId, userId])
+  @@unique([id, eventId])
+  @@index([eventId, role, status])
+}
+
+model EventTeamInvitation {
+  id              String               @id @default(uuid())
+  eventId         String
+  email           String
+  role            EventTeamRole
+  tokenHash       String               @unique
+  status          TeamInvitationStatus @default(PENDING)
+  permissions     Json?
+  invitedByUserId String
+  expiresAt       DateTime
+  acceptedAt      DateTime?
+  revokedAt       DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  event         Event @relation("EventTeamInvitations", fields: [eventId], references: [id], onDelete: Cascade)
+  invitedByUser User  @relation("TeamInvitationsSent", fields: [invitedByUserId], references: [id], onDelete: Restrict)
+
+  @@index([eventId, status])
+  @@index([email, status])
+}
+
+model PromotionLink {
+  id           String              @id @default(uuid())
+  eventId      String
+  type         PromotionLinkType
+  status       PromotionLinkStatus @default(ACTIVE)
+  name         String
+  hostMemberId String?
+  createdById  String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  event        Event                       @relation(fields: [eventId], references: [id], onDelete: Restrict)
+  hostMember   EventTeamMember?            @relation("HostTeamMemberLinks", fields: [hostMemberId, eventId], references: [id, eventId], onDelete: Restrict)
+  createdBy    User                        @relation("PromotionLinksCreated", fields: [createdById], references: [id], onDelete: Restrict)
+  slugRegistry PromotionSlugRegistry[]
+  clicks       PromotionClick[]
+  attributions PromotionVisitorAttribution[]
+  visitorDays  PromotionVisitorDay[]
+  aggregates   PromotionDailyAggregate[]
+
+  @@unique([id, eventId])
+  @@index([eventId, status])
+  @@index([hostMemberId])
+}
+
+model PromotionSlugRegistry {
+  slug            String        @id
+  promotionLinkId String
+  isPrimary       Boolean       @default(true)
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  promotionLink PromotionLink @relation(fields: [promotionLinkId], references: [id], onDelete: Restrict)
+
+  @@index([promotionLinkId])
+}
+
+model PromotionVisitorAttribution {
+  id                 String        @id @default(uuid())
+  visitorIdHash      String
+  canonicalVisitorId String
+  eventId            String
+  promotionLinkId    String
+  clickedAt          DateTime      @default(now())
+  expiresAt          DateTime
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+
+  event         Event         @relation(fields: [eventId], references: [id], onDelete: Restrict)
+  promotionLink PromotionLink @relation(fields: [promotionLinkId, eventId], references: [id, eventId], onDelete: Restrict)
+
+  @@unique([canonicalVisitorId, eventId])
+  @@index([visitorIdHash, eventId])
+  @@index([promotionLinkId, eventId])
+  @@index([expiresAt])
+}
+
+model PromotionVisitorDay {
+  id                 String        @id @default(uuid())
+  eventId            String
+  promotionLinkId    String
+  canonicalVisitorId String
+  visitDate          DateTime      @db.Date
+  clickCount         Int           @default(1)
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+
+  event         Event         @relation(fields: [eventId], references: [id], onDelete: Restrict)
+  promotionLink PromotionLink @relation(fields: [promotionLinkId, eventId], references: [id, eventId], onDelete: Restrict)
+
+  @@unique([promotionLinkId, canonicalVisitorId, visitDate])
+  @@index([eventId, visitDate])
+  @@index([promotionLinkId, visitDate])
+  @@index([canonicalVisitorId])
+}
+
+model PromotionClick {
+  id                 String        @id @default(uuid())
+  eventId            String
+  promotionLinkId    String
+  visitorIdHash      String?
+  canonicalVisitorId String?
+  clickedAt          DateTime      @default(now())
+  referrer           String?
+  utmSource          String?
+  utmMedium          String?
+  utmCampaign        String?
+  utmTerm            String?
+  utmContent         String?
+  fbclid             String?
+  gclid              String?
+  ttclid             String?
+  userAgent          String?
+
+  event         Event         @relation(fields: [eventId], references: [id], onDelete: Restrict)
+  promotionLink PromotionLink @relation(fields: [promotionLinkId, eventId], references: [id, eventId], onDelete: Restrict)
+
+  @@index([promotionLinkId, clickedAt])
+  @@index([eventId, clickedAt])
+  @@index([clickedAt])
+}
+
+model PromotionDailyAggregate {
+  id                     String        @id @default(uuid())
+  eventId                String
+  promotionLinkId        String
+  date                   DateTime      @db.Date
+  uniqueVisitors         Int           @default(0)
+  totalClicks            Int           @default(0)
+  anonymousClicks        Int           @default(0)
+  completedOrders        Int           @default(0)
+  ticketsSold            Int           @default(0)
+  buyerPaidCents         BigInt        @default(0)
+  organizerNetCents      BigInt        @default(0)
+  refundedOrders         Int           @default(0)
+  refundedTickets        Int           @default(0)
+  refundedBuyerCents     BigInt        @default(0)
+  refundedOrganizerCents BigInt        @default(0)
+  createdAt              DateTime      @default(now())
+  updatedAt              DateTime      @updatedAt
+
+  event         Event         @relation(fields: [eventId], references: [id], onDelete: Restrict)
+  promotionLink PromotionLink @relation(fields: [promotionLinkId, eventId], references: [id, eventId], onDelete: Restrict)
+
+  @@unique([promotionLinkId, date])
+  @@index([eventId, date])
 }
