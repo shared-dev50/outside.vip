@@ -124,10 +124,23 @@ export async function updatePromotionLink(
 ) {
   const link = await prisma.promotionLink.findFirst({
     where: { id: linkId, eventId },
+    include: {
+      hostMember: true,
+    },
   });
 
   if (!link) {
     throw new NotFoundError('Promotion link not found');
+  }
+
+  // INVARIANT ENFORCEMENT: A Host link may be ACTIVE only when its associated
+  // membership has role = HOST and status = ACTIVE.
+  if (updates.status === 'ACTIVE' && link.type === 'HOST') {
+    if (!link.hostMember || link.hostMember.role !== 'HOST' || link.hostMember.status !== 'ACTIVE') {
+      throw new BadRequestError(
+        'Cannot activate Host promotional link because the associated team member is not an active Host'
+      );
+    }
   }
 
   const data: Prisma.PromotionLinkUpdateInput = {};

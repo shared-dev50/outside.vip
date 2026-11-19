@@ -394,13 +394,13 @@ export async function acceptTeamInvitation(
 
     let hostLinkResult: AcceptInvitationResult['hostLink'] | undefined;
 
-    // 3. For HOST role: automatically generate personal Host promotional link
-    if (invitation.role === EventTeamRole.HOST) {
+    // 3. For HOST role: automatically generate or reactivate personal Host promotional link
+    // Only activate link if resulting membership is HOST and ACTIVE
+    if (invitation.role === EventTeamRole.HOST && member.status === TeamMemberStatus.ACTIVE) {
       const existingHostLink = await tx.promotionLink.findFirst({
         where: {
           eventId: invitation.eventId,
           hostMemberId: member.id,
-          status: { not: 'ARCHIVED' },
         },
         include: {
           slugRegistry: {
@@ -409,14 +409,44 @@ export async function acceptTeamInvitation(
         },
       });
 
-      if (existingHostLink && existingHostLink.slugRegistry[0]) {
-        hostLinkResult = {
-          id: existingHostLink.id,
-          slug: existingHostLink.slugRegistry[0].slug,
-          name: existingHostLink.name,
-        };
+      if (existingHostLink) {
+        // Reactivate existing personal link if previously ARCHIVED or DISABLED
+        if (existingHostLink.status !== 'ACTIVE') {
+          await tx.promotionLink.update({
+            where: { id: existingHostLink.id },
+            data: { status: 'ACTIVE' },
+          });
+        }
+
+        const primarySlug = existingHostLink.slugRegistry[0]?.slug;
+        if (primarySlug) {
+          hostLinkResult = {
+            id: existingHostLink.id,
+            slug: primarySlug,
+            name: existingHostLink.name,
+          };
+        } else {
+          // Edge-case fallback: ensure primary slug exists
+          const hostSlug = await generateUniqueHostSlug(
+            user.name || user.email.split('@')[0],
+            invitation.event.slug,
+            tx
+          );
+          await tx.promotionSlugRegistry.create({
+            data: {
+              slug: hostSlug,
+              promotionLinkId: existingHostLink.id,
+              isPrimary: true,
+            },
+          });
+          hostLinkResult = {
+            id: existingHostLink.id,
+            slug: hostSlug,
+            name: existingHostLink.name,
+          };
+        }
       } else {
-        // Generate unique primary host slug
+        // Brand new Host: generate unique primary host slug and create the single link
         const hostSlug = await generateUniqueHostSlug(
           user.name || user.email.split('@')[0],
           invitation.event.slug,
@@ -563,6 +593,20 @@ export async function updateTeamMember(
 ) {
   const member = await prisma.eventTeamMember.findFirst({
     where: { id: memberId, eventId },
+    include: {
+      user: {
+        select: {
+          id: true,
+          name: true,
+          email: true,
+        },
+      },
+      event: {
+        select: {
+          slug: true,
+        },
+      },
+    },
   });
 
   if (!member) {
@@ -570,8 +614,12 @@ export async function updateTeamMember(
   }
 
   return await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
-    // If mutating role from HOST to ADMIN, archive dependent links to comply with DB trigger
-    if (member.role === EventTeamRole.HOST && updates.role === EventTeamRole.ADMIN) {
+    const targetRole = updates.role || member.role;
+    const targetStatus = updates.status || member.status;
+
+    // STEP 1: De-escalation & Inactivation
+    // If role is changing away from HOST: archive dependent links first
+    if (member.role === EventTeamRole.HOST && targetRole !== EventTeamRole.HOST) {
       await tx.promotionLink.updateMany({
         where: {
           hostMemberId: member.id,
@@ -583,6 +631,33 @@ export async function updateTeamMember(
       });
     }
 
+    // If status is changing away from ACTIVE for a HOST: disable/archive links first
+    if (member.role === EventTeamRole.HOST && targetRole === EventTeamRole.HOST && updates.status) {
+      if (updates.status === TeamMemberStatus.INACTIVE) {
+        await tx.promotionLink.updateMany({
+          where: {
+            hostMemberId: member.id,
+            eventId,
+            status: 'ACTIVE',
+          },
+          data: {
+            status: 'DISABLED',
+          },
+        });
+      } else if (updates.status === TeamMemberStatus.REVOKED) {
+        await tx.promotionLink.updateMany({
+          where: {
+            hostMemberId: member.id,
+            eventId,
+          },
+          data: {
+            status: 'ARCHIVED',
+          },
+        });
+      }
+    }
+
+    // STEP 2: Update EventTeamMember row
     const data: Prisma.EventTeamMemberUpdateInput = {};
     if (updates.role) {
       data.role = updates.role;
@@ -596,7 +671,7 @@ export async function updateTeamMember(
       data.permissions = Prisma.DbNull;
     }
 
-    return tx.eventTeamMember.update({
+    const updatedMember = await tx.eventTeamMember.update({
       where: { id: member.id },
       data,
       include: {
@@ -609,6 +684,62 @@ export async function updateTeamMember(
         },
       },
     });
+
+    // STEP 3: Escalation & Activation
+    // Now that EventTeamMember is updated to HOST and/or ACTIVE, update/create links to ACTIVE if applicable
+    if (targetRole === EventTeamRole.HOST) {
+      const initialLinkStatus = targetStatus === TeamMemberStatus.ACTIVE ? 'ACTIVE' : 'DISABLED';
+
+      if (member.role !== EventTeamRole.HOST) {
+        // Transitioning role from non-HOST to HOST
+        const existingHostLink = await tx.promotionLink.findFirst({
+          where: {
+            eventId,
+            hostMemberId: member.id,
+          },
+        });
+
+        if (existingHostLink) {
+          await tx.promotionLink.update({
+            where: { id: existingHostLink.id },
+            data: { status: initialLinkStatus },
+          });
+        } else {
+          const hostSlug = await generateUniqueHostSlug(
+            member.user?.name || member.user?.email.split('@')[0] || 'host',
+            member.event.slug,
+            tx
+          );
+          await tx.promotionLink.create({
+            data: {
+              eventId,
+              type: 'HOST',
+              status: initialLinkStatus,
+              name: `${member.user?.name || 'Host'} Personal Link`,
+              hostMemberId: member.id,
+              createdById: member.userId,
+              slugRegistry: {
+                create: [{ slug: hostSlug, isPrimary: true }],
+              },
+            },
+          });
+        }
+      } else if (updates.status === TeamMemberStatus.ACTIVE) {
+        // Restoring existing HOST status to ACTIVE
+        await tx.promotionLink.updateMany({
+          where: {
+            hostMemberId: member.id,
+            eventId,
+            status: { in: ['ARCHIVED', 'DISABLED'] },
+          },
+          data: {
+            status: 'ACTIVE',
+          },
+        });
+      }
+    }
+
+    return updatedMember;
   });
 }
 
