@@ -31,11 +31,11 @@ export const App: React.FC = () => {
     location.pathname.startsWith('/host') ||
     location.pathname.startsWith('/orders') ||
     location.pathname.startsWith('/attendees') ||
-    location.pathname.startsWith('/team');
+    location.pathname.startsWith('/team') ||
     location.pathname.startsWith('/login') ||
     location.pathname.startsWith('/signin') ||
     location.pathname.startsWith('/register') ||
-    location.pathname.startsWith('/forgot-password');
+    location.pathname.startsWith('/forgot-password') ||
     location.pathname.startsWith('/teams') ||
     location.pathname.startsWith('/staff/invitations');
 
@@ -58,7 +58,6 @@ export const App: React.FC = () => {
           <Route path="/events/:slug" element={<EventDetailPage />} />
 
           {/* Conditional & Specialized Access Routes (outside generic guards) */}
-          <Route path="/teams" element={<TeamsPage />} />
           <Route path="/orders" element={<OrdersPage />} />
           <Route path="/atendees" element={<AtendeePage />} />
           <Route path="/staff/invitations/:token" element={<StaffInvitationPage />} />

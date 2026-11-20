@@ -40,6 +40,8 @@ interface PermissionDefinition {
   key: keyof EventAdminPermissions;
   label: string;
   description: string;
+  statusBadge?: string;
+  isDisabled?: boolean;
 }
 
 const EVENT_OPS_PERMISSIONS: PermissionDefinition[] = [
@@ -82,12 +84,16 @@ const SENSITIVE_PERMISSIONS: PermissionDefinition[] = [
   {
     key: 'canManageRefunds',
     label: 'Issue Buyer Refunds',
-    description: 'Approve and execute financial refunds to buyers and void issued tickets.',
+    description: 'Refund management is not currently supported for Event Admins. Financial refunds are handled automatically via payment provider workflows.',
+    statusBadge: 'Coming Soon',
+    isDisabled: true,
   },
   {
     key: 'canManagePayouts',
     label: 'Manage Banking & Payouts',
-    description: 'View connected Stripe accounts and authorize payout withdrawals to bank.',
+    description: 'Payout settings remain exclusively under the event organizer\'s control. Banking credentials and Stripe Connect transfers cannot be delegated.',
+    statusBadge: 'Owner Only',
+    isDisabled: true,
   },
   {
     key: 'canCancelEvent',
@@ -123,6 +129,8 @@ export const AdminPermissionsModal: React.FC<AdminPermissionsModalProps> = ({
   const [permissions, setPermissions] = useState<EventAdminPermissions>({
     ...DEFAULT_ADMIN_PERMISSIONS,
     ...(initialPermissions || {}),
+    canManageRefunds: false,
+    canManagePayouts: false,
   });
 
   useEffect(() => {
@@ -130,6 +138,8 @@ export const AdminPermissionsModal: React.FC<AdminPermissionsModalProps> = ({
       setPermissions({
         ...DEFAULT_ADMIN_PERMISSIONS,
         ...(initialPermissions || {}),
+        canManageRefunds: false,
+        canManagePayouts: false,
       });
     }
   }, [isOpen, initialPermissions]);
@@ -137,6 +147,10 @@ export const AdminPermissionsModal: React.FC<AdminPermissionsModalProps> = ({
   if (!isOpen) return null;
 
   const togglePermission = (key: keyof EventAdminPermissions) => {
+    // Both canManageRefunds and canManagePayouts cannot be granted to Event Admins
+    if (key === 'canManageRefunds' || key === 'canManagePayouts') {
+      return;
+    }
     setPermissions((prev) => ({
       ...prev,
       [key]: !prev[key],
@@ -144,7 +158,11 @@ export const AdminPermissionsModal: React.FC<AdminPermissionsModalProps> = ({
   };
 
   const applySafeDefaults = () => {
-    setPermissions({ ...SAFE_ADMIN_PERMISSIONS });
+    setPermissions({
+      ...SAFE_ADMIN_PERMISSIONS,
+      canManageRefunds: false,
+      canManagePayouts: false,
+    });
   };
 
   const clearAll = () => {
@@ -318,45 +336,64 @@ export const AdminPermissionsModal: React.FC<AdminPermissionsModalProps> = ({
                   </span>
                 </div>
                 <p className="text-[11px] text-rose-700 mt-0.5">
-                  These permissions allow irreversible financial refunds, banking payout changes, or event cancellations. Leave unchecked unless explicitly required.
+                  High-risk actions including event lifecycle cancellation. Note: Buyer refund management is currently unavailable for Event Admins, and banking/payout settings remain strictly owner-only.
                 </p>
               </div>
             </div>
 
             <div className="space-y-2 pt-1">
-              {SENSITIVE_PERMISSIONS.map((perm) => (
-                <label
-                  key={perm.key}
-                  className={`flex items-start gap-3 p-3 rounded-xl border transition-colors cursor-pointer select-none ${
-                    permissions[perm.key]
-                      ? 'bg-rose-100/60 border-rose-300 text-rose-950 font-medium'
-                      : 'bg-white/80 border-rose-200 hover:border-rose-300'
-                  }`}
-                >
-                  <input
-                    type="checkbox"
-                    checked={permissions[perm.key]}
-                    onChange={() => togglePermission(perm.key)}
-                    className="mt-0.5 h-4 w-4 rounded border-rose-300 text-rose-600 focus:ring-rose-500 cursor-pointer accent-rose-600"
-                  />
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2">
-                      <span className="text-xs font-semibold text-stone-900">
-                        {perm.label}
-                      </span>
-                      {permissions[perm.key] && (
-                        <span className="inline-flex items-center gap-0.5 text-[9px] font-mono text-rose-700 font-bold uppercase">
-                          <AlertTriangle className="w-2.5 h-2.5" />
-                          Enabled
+              {SENSITIVE_PERMISSIONS.map((perm) => {
+                const isItemDisabled = perm.isDisabled || false;
+                return (
+                  <label
+                    key={perm.key}
+                    className={`flex items-start gap-3 p-3 rounded-xl border transition-colors select-none ${
+                      isItemDisabled
+                        ? 'bg-stone-50/70 border-stone-200/80 opacity-75 cursor-not-allowed'
+                        : permissions[perm.key]
+                        ? 'bg-rose-100/60 border-rose-300 text-rose-950 font-medium cursor-pointer'
+                        : 'bg-white/80 border-rose-200 hover:border-rose-300 cursor-pointer'
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={permissions[perm.key]}
+                      disabled={isItemDisabled}
+                      onChange={() => togglePermission(perm.key)}
+                      className={`mt-0.5 h-4 w-4 rounded border-rose-300 focus:ring-rose-500 accent-rose-600 ${
+                        isItemDisabled ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'
+                      }`}
+                    />
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className={`text-xs font-semibold ${isItemDisabled ? 'text-stone-700' : 'text-stone-900'}`}>
+                          {perm.label}
                         </span>
-                      )}
+                        {perm.statusBadge && (
+                          <span
+                            className={`inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-mono uppercase font-bold border ${
+                              perm.statusBadge === 'Owner Only'
+                                ? 'bg-amber-100/80 text-amber-900 border-amber-300'
+                                : 'bg-stone-200/80 text-stone-700 border-stone-300'
+                            }`}
+                          >
+                            {perm.statusBadge}
+                          </span>
+                        )}
+                        {!isItemDisabled && permissions[perm.key] && (
+                          <span className="inline-flex items-center gap-0.5 text-[9px] font-mono text-rose-700 font-bold uppercase">
+                            <AlertTriangle className="w-2.5 h-2.5" />
+                            Enabled
+                          </span>
+                        )}
+                      </div>
+                      <span className="text-[11px] text-stone-600 leading-relaxed block mt-0.5">
+                        {perm.description}
+                      </span>
                     </div>
-                    <span className="text-[11px] text-stone-600 leading-relaxed block mt-0.5">
-                      {perm.description}
-                    </span>
-                  </div>
-                </label>
-              ))}
+                  </label>
+                );
+              })}
             </div>
           </div>
         </form>

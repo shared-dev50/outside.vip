@@ -583,5 +583,416 @@ describe('Stage 3: Event Team Management & Admin Permissions Frontend', () => {
       expect(result.hostLink?.slug).toBe('sol-fest-nairobi-host-otieno');
     });
   });
+
+  // =========================================================================
+  // 5. Unified Event Team Workspace (Stage 3 Implementation 5)
+  // =========================================================================
+  describe('5. Unified Event Team Workspace & Multi-Role Integration', () => {
+    it('renders combined unified roster with Door Scanners, Hosts, and Admins', () => {
+      // 1. Seed Hosts & Admins
+      queryClient.setQueryData(['event-team', mockEvent.id], {
+        members: [
+          {
+            id: 'mem-admin-1',
+            userId: 'user-admin-1',
+            name: 'Kipchoge Admin',
+            email: 'admin@outside.vip',
+            role: 'ADMIN' as const,
+            status: 'ACTIVE' as const,
+            permissions: DEFAULT_ADMIN_PERMISSIONS,
+            createdAt: '2026-11-20T08:00:00Z',
+          },
+          {
+            id: 'mem-host-1',
+            userId: 'user-host-1',
+            name: 'Amina Host',
+            email: 'amina@outside.vip',
+            role: 'HOST' as const,
+            status: 'ACTIVE' as const,
+            permissions: null,
+            hostLink: {
+              id: 'link-amina',
+              slug: 'amina-vip',
+              name: 'Amina Official Link',
+            },
+            createdAt: '2026-11-20T09:00:00Z',
+          },
+        ],
+        invitations: [
+          {
+            id: 'inv-host-1',
+            email: 'pendinghost@outside.vip',
+            role: 'HOST' as const,
+            status: 'PENDING' as const,
+            permissions: null,
+            expiresAt: '2026-11-27T10:00:00Z',
+            createdAt: '2026-11-20T10:00:00Z',
+          },
+        ],
+      });
+
+      // 2. Seed Door Scanner Staff
+      queryClient.setQueryData(['event-staff', mockEvent.id], {
+        staff: [
+          {
+            id: 'staff-1',
+            userId: 'user-staff-1',
+            name: 'Baraka Scanner',
+            email: 'baraka@gate.vip',
+            role: 'STAFF' as const,
+            status: 'ACTIVE' as const,
+            assignedAt: '2026-11-20T09:30:00Z',
+          },
+        ],
+        invitations: [
+          {
+            id: 'staff-inv-1',
+            email: 'gatestaff@outside.vip',
+            status: 'PENDING' as const,
+            expiresAt: '2026-11-27T10:00:00Z',
+            createdAt: '2026-11-20T10:00:00Z',
+          },
+        ],
+      });
+
+      const html = renderToString(
+        <QueryClientProvider client={queryClient}>
+          <MemoryRouter>
+            <EventTeamModal isOpen={true} onClose={() => {}} event={mockEvent} />
+          </MemoryRouter>
+        </QueryClientProvider>
+      );
+
+      // Verify header and filter pill tallies
+      expect(html).toContain('Event Team &amp; Hosts');
+      expect(html).toContain('All Roles (');
+      expect(html).toContain('Door Scanners (');
+      expect(html).toContain('Event Hosts (');
+      expect(html).toContain('Event Admins (');
+      expect(html).toContain('Pending Invites (');
+
+      // Verify Admin member
+      expect(html).toContain('Kipchoge Admin');
+      expect(html).toContain('admin@outside.vip');
+      expect(html).toContain('Admin');
+
+      // Verify Host member with personal link
+      expect(html).toContain('Amina Host');
+      expect(html).toContain('amina@outside.vip');
+      expect(html).toContain('Host');
+      expect(html).toContain('/r/amina-vip');
+
+      // Verify Scanner Staff member with gate capability
+      expect(html).toContain('Baraka Scanner');
+      expect(html).toContain('baraka@gate.vip');
+      expect(html).toContain('Scanner Staff');
+      expect(html).toContain('Gate Check-In &amp; QR Scanning');
+    });
+
+    it('supports inline embedding inside TeamsPage (isInline=true) without modal overlay', () => {
+      queryClient.setQueryData(['event-team', mockEvent.id], {
+        members: [],
+        invitations: [],
+      });
+      queryClient.setQueryData(['event-staff', mockEvent.id], {
+        staff: [],
+        invitations: [],
+      });
+
+      const htmlInline = renderToString(
+        <QueryClientProvider client={queryClient}>
+          <MemoryRouter>
+            <EventTeamModal isOpen={true} onClose={() => {}} event={mockEvent} isInline={true} />
+          </MemoryRouter>
+        </QueryClientProvider>
+      );
+
+      // In inline mode, the fixed modal overlay backdrop is omitted
+      expect(htmlInline).not.toContain('fixed inset-0 z-50 bg-black/60 backdrop-blur-xs');
+      expect(htmlInline).toContain('Event Team &amp; Hosts');
+      expect(htmlInline).toContain('rounded-2xl border border-stone-200');
+    });
+
+    it('enforces strict architectural separation between api.staff and api.team in EventTeamModal', () => {
+      const modalSource = fs.readFileSync(
+        path.resolve(__dirname, './components/team/EventTeamModal.tsx'),
+        'utf-8'
+      );
+
+      // Staff invitations route exclusively to api.staff.invite
+      expect(modalSource).toContain('staffInviteMutation = useMutation({');
+      expect(modalSource).toContain('api.staff.invite(event.id, email)');
+
+      // Host & Admin invitations route to api.team.invite
+      expect(modalSource).toContain('teamInviteMutation = useMutation({');
+      expect(modalSource).toContain('api.team.invite(event.id, data)');
+
+      // Revocations route to distinct backend controllers
+      expect(modalSource).toContain('api.staff.revokeMember(event.id, userId)');
+      expect(modalSource).toContain('api.team.revokeMember(event.id, memberId)');
+      expect(modalSource).toContain('api.staff.revokeInvitation(event.id, invitationId)');
+      expect(modalSource).toContain('api.team.revokeInvitation(event.id, invitationId)');
+
+      // Resends route to distinct endpoints
+      expect(modalSource).toContain('api.staff.resendInvitation(event.id, invitationId)');
+      expect(modalSource).toContain('api.team.resendInvitation(event.id, invitationId)');
+    });
+
+    it('ensures TeamsPage enforces RequireRole and embeds unified EventTeamModal', () => {
+      const appSource = fs.readFileSync(
+        path.resolve(__dirname, './App.tsx'),
+        'utf-8'
+      );
+      const teamsPageSource = fs.readFileSync(
+        path.resolve(__dirname, './pages/TeamsPage.tsx'),
+        'utf-8'
+      );
+
+      // Route-level authorization protection in App.tsx
+      expect(appSource).toContain("<RequireRole allowedRoles={['ORGANIZER', 'ADMIN']}>");
+      expect(appSource).toContain('<TeamsPage />');
+
+      // Embeds unified EventTeamModal in inline mode
+      expect(teamsPageSource).toContain('<EventTeamModal');
+      expect(teamsPageSource).toContain('event={selectedEvent}');
+      expect(teamsPageSource).toContain('isInline={true}');
+
+      // Provides navigation link to scanner portal
+      expect(teamsPageSource).toContain('to="/scanner"');
+    });
+  });
+
+  // =========================================================================
+  // 6. Stage 3 Implementation 5.1: Unified Invitation Dropdown Correction
+  // =========================================================================
+  describe('6. Stage 3 Implementation 5.1: Unified Invitation Dropdown & Scanner Restrictions', () => {
+    it('renders role dropdown with exactly Door Scanner, Event Admin, and Event Host without separate role cards', () => {
+      const modalSource = fs.readFileSync(
+        path.resolve(__dirname, './components/team/EventTeamModal.tsx'),
+        'utf-8'
+      );
+
+      // Verifies select element and exact option labels
+      expect(modalSource).toContain('<select');
+      expect(modalSource).toContain('id="invite-role-select"');
+      expect(modalSource).toContain('<option value="STAFF">Door Scanner</option>');
+      expect(modalSource).toContain('<option value="ADMIN">Event Admin</option>');
+      expect(modalSource).toContain('<option value="HOST">Event Host</option>');
+
+      // Verifies that radio-card selection has been removed
+      expect(modalSource).not.toContain('name="unifiedRole"');
+      expect(modalSource).not.toContain('type="radio"');
+    });
+
+    it('dynamically adapts form sections based on selected role', () => {
+      const modalSource = fs.readFileSync(
+        path.resolve(__dirname, './components/team/EventTeamModal.tsx'),
+        'utf-8'
+      );
+
+      // 1. Door Scanner section
+      expect(modalSource).toContain("inviteRole === 'STAFF'");
+      expect(modalSource).toContain('Door Scanner Access');
+      expect(modalSource).toContain('6-digit email OTP');
+      expect(modalSource).toContain('No Outside.vip account or password required');
+
+      // 2. Event Admin section & permission configuration
+      expect(modalSource).toContain("inviteRole === 'ADMIN'");
+      expect(modalSource).toContain('Event Administrator Access');
+      expect(modalSource).toContain('Admin Permissions');
+      expect(modalSource).toContain('Configure Permissions');
+      expect(modalSource).toContain('setIsInvitePermsModalOpen(true)');
+
+      // 3. Event Host section
+      expect(modalSource).toContain("inviteRole === 'HOST'");
+      expect(modalSource).toContain('Event Host Access');
+      expect(modalSource).toContain('personal promotional link (/r/:slug)');
+      expect(modalSource).toContain('Host Workspace');
+
+      // Single submit button adapting its text
+      expect(modalSource).toContain('Send Door Scanner Invite');
+      expect(modalSource).toContain('Send Event Admin Invite');
+      expect(modalSource).toContain('Send Event Host Invite');
+    });
+
+    it('verifies exact default value of all 10 permissions and confirms frontend and backend agree on deny-by-default', () => {
+      const backendPermissionsSource = fs.readFileSync(
+        path.resolve(__dirname, '../../server/src/modules/eventTeam/eventTeam.permissions.ts'),
+        'utf-8'
+      );
+
+      // Verify all 10 permissions default to false in DEFAULT_ADMIN_PERMISSIONS
+      const expectedAllFalse = {
+        canEditDetails: false,
+        canManageTickets: false,
+        canViewOrders: false,
+        canManageTeam: false,
+        canManagePromotions: false,
+        canViewAnalytics: false,
+        canManageRefunds: false,
+        canManagePayouts: false,
+        canCancelEvent: false,
+        canDeleteEvent: false,
+      };
+
+      expect(DEFAULT_ADMIN_PERMISSIONS).toEqual(expectedAllFalse);
+      expect(Object.keys(DEFAULT_ADMIN_PERMISSIONS).length).toBe(10);
+      expect(Object.values(DEFAULT_ADMIN_PERMISSIONS).every((v) => v === false)).toBe(true);
+
+      // Verify backend schema defaults every permission to false
+      expect(backendPermissionsSource).toContain('canEditDetails: z.boolean().default(false)');
+      expect(backendPermissionsSource).toContain('canManageTickets: z.boolean().default(false)');
+      expect(backendPermissionsSource).toContain('canViewOrders: z.boolean().default(false)');
+      expect(backendPermissionsSource).toContain('canManageTeam: z.boolean().default(false)');
+      expect(backendPermissionsSource).toContain('canManagePromotions: z.boolean().default(false)');
+      expect(backendPermissionsSource).toContain('canViewAnalytics: z.boolean().default(false)');
+      expect(backendPermissionsSource).toContain('canManageRefunds: z.boolean().default(false)');
+      expect(backendPermissionsSource).toContain('canManagePayouts: z.boolean().default(false)');
+      expect(backendPermissionsSource).toContain('canCancelEvent: z.boolean().default(false)');
+      expect(backendPermissionsSource).toContain('canDeleteEvent: z.boolean().default(false)');
+    });
+
+    it('displays owner-restricted messaging and preserves Host/Admin management when scanner access returns 403', () => {
+      // Seed Hosts & Admins normally
+      queryClient.setQueryData(['event-team', mockEvent.id], {
+        members: [
+          {
+            id: 'mem-admin-co',
+            userId: 'user-admin-co',
+            name: 'Co-Organizer Admin',
+            email: 'co-org@outside.vip',
+            role: 'ADMIN' as const,
+            status: 'ACTIVE' as const,
+            permissions: DEFAULT_ADMIN_PERMISSIONS,
+            createdAt: '2026-11-20T08:00:00Z',
+          },
+        ],
+        invitations: [],
+      });
+
+      // Seed Scanner query with isRestricted: true (simulating 403 Forbidden for non-owner Event Admin)
+      queryClient.setQueryData(['event-staff', mockEvent.id], {
+        staff: [],
+        invitations: [],
+        isRestricted: true,
+      });
+
+      const html = renderToString(
+        <QueryClientProvider client={queryClient}>
+          <MemoryRouter>
+            <EventTeamModal isOpen={true} onClose={() => {}} event={mockEvent} />
+          </MemoryRouter>
+        </QueryClientProvider>
+      );
+
+      // 1. Filter pill must NOT say (0) for Door Scanners — it must say Restricted
+      expect(html).toMatch(/Door Scanners\s*\([^\)]*Restricted/);
+
+      // 2. Clear owner-restricted notice banner rendered in member view
+      expect(html).toContain('Door scanner staff management is restricted to the event organizer (owner)');
+      expect(html).toContain('Scanner staff are omitted from this view');
+
+      // 3. Host and Admin members remain fully visible and functional
+      expect(html).toContain('Co-Organizer Admin');
+      expect(html).toContain('co-org@outside.vip');
+
+      // 4. Footer indicates scanner staff is restricted rather than 0
+      expect(html).toContain('scanner restricted');
+    });
+  });
+
+  // =========================================================================
+  // 7. Stage 5 Implementation 1: Admin Permission UI Accuracy Correction
+  // =========================================================================
+  describe('7. Stage 5 Implementation 1: Admin Permission UI Accuracy Correction', () => {
+    it('renders canManageRefunds as visibly unavailable (Coming Soon) with disabled input and accurate explanation', () => {
+      // Even if legacy data passes canManageRefunds: true, the modal must enforce false
+      const html = renderToString(
+        <AdminPermissionsModal
+          isOpen={true}
+          onClose={() => {}}
+          onSave={() => {}}
+          initialPermissions={{ canManageRefunds: true as any }}
+          title="Configure Admin Permissions"
+        />
+      );
+
+      // 1. Visibly marked Coming Soon
+      expect(html).toContain('Coming Soon');
+      expect(html).toContain('Issue Buyer Refunds');
+
+      // 2. Accurate explanation that refunds are not supported for Event Admins
+      expect(html).toContain('Refund management is not currently supported for Event Admins');
+
+      // 3. Inspect source to ensure canManageRefunds is locked to false and toggle is blocked
+      const modalSource = fs.readFileSync(
+        path.resolve(__dirname, './components/team/AdminPermissionsModal.tsx'),
+        'utf-8'
+      );
+      expect(modalSource).toContain("key: 'canManageRefunds'");
+      expect(modalSource).toContain("statusBadge: 'Coming Soon'");
+      expect(modalSource).toContain('isDisabled: true');
+      expect(modalSource).toContain("if (key === 'canManageRefunds' || key === 'canManagePayouts')");
+    });
+
+    it('renders canManagePayouts as visibly Owner Only with disabled input and accurate explanation', () => {
+      const html = renderToString(
+        <AdminPermissionsModal
+          isOpen={true}
+          onClose={() => {}}
+          onSave={() => {}}
+          initialPermissions={{ canManagePayouts: true as any }}
+          title="Configure Admin Permissions"
+        />
+      );
+
+      // 1. Visibly marked Owner Only
+      expect(html).toContain('Owner Only');
+      expect(html).toContain('Manage Banking &amp; Payouts');
+
+      // 2. Accurate explanation that payout settings remain exclusively under organizer control
+      expect(html).toContain('Payout settings remain exclusively under the event organizer');
+
+      // 3. Inspect source to ensure canManagePayouts is locked to false
+      const modalSource = fs.readFileSync(
+        path.resolve(__dirname, './components/team/AdminPermissionsModal.tsx'),
+        'utf-8'
+      );
+      expect(modalSource).toContain("key: 'canManagePayouts'");
+      expect(modalSource).toContain("statusBadge: 'Owner Only'");
+    });
+
+    it('preserves configurability for the other eight permissions while keeping all 10 schema keys compatible', () => {
+      const modalSource = fs.readFileSync(
+        path.resolve(__dirname, './components/team/AdminPermissionsModal.tsx'),
+        'utf-8'
+      );
+
+      // The other 8 permissions are not disabled
+      const nonDisabledKeys = [
+        'canEditDetails',
+        'canManageTickets',
+        'canViewOrders',
+        'canManageTeam',
+        'canManagePromotions',
+        'canViewAnalytics',
+        'canCancelEvent',
+        'canDeleteEvent',
+      ];
+
+      nonDisabledKeys.forEach((key) => {
+        // Must be in definition arrays without isDisabled: true
+        expect(modalSource).toMatch(new RegExp(`key:\\s*'${key}'`));
+      });
+
+      // All 10 permissions exist in DEFAULT_ADMIN_PERMISSIONS and default to false
+      expect(Object.keys(DEFAULT_ADMIN_PERMISSIONS).length).toBe(10);
+      expect(Object.values(DEFAULT_ADMIN_PERMISSIONS).every((val) => val === false)).toBe(true);
+
+      // Safe defaults keep both refunds and payouts false
+      expect(SAFE_ADMIN_PERMISSIONS.canManageRefunds).toBe(false);
+      expect(SAFE_ADMIN_PERMISSIONS.canManagePayouts).toBe(false);
+    });
+  });
 });
 
