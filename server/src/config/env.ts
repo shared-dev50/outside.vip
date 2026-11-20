@@ -45,6 +45,11 @@ const envSchema = z.object({
   GOOGLE_PLACES_API_KEY: z.string().default(''),
   GOOGLE_MAPS_API_KEY: z.string().default(''),
   DEFAULT_PLACES_COUNTRY_CODE: z.string().default('US'),
+  PROMOTION_ATTRIBUTION_HMAC_KEY: z
+    .string()
+    .default('dev-attribution-hmac-key-min-32-chars-long-secret-outside-vip'),
+  PROMOTION_ATTRIBUTION_HMAC_KEY_PREVIOUS: z.string().default(''),
+  PROMOTION_ATTRIBUTION_KEY_VERSION: z.string().default('v1'),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -52,6 +57,16 @@ const parsed = envSchema.safeParse(process.env);
 if (!parsed.success) {
   console.error('❌ Invalid server environment configuration:', parsed.error.format());
   throw new Error('Environment variable validation failed');
+}
+
+if (parsed.data.NODE_ENV === 'production') {
+  if (
+    !parsed.data.PROMOTION_ATTRIBUTION_HMAC_KEY ||
+    parsed.data.PROMOTION_ATTRIBUTION_HMAC_KEY.length < 32 ||
+    parsed.data.PROMOTION_ATTRIBUTION_HMAC_KEY === 'dev-attribution-hmac-key-min-32-chars-long-secret-outside-vip'
+  ) {
+    throw new Error('FATAL: PROMOTION_ATTRIBUTION_HMAC_KEY is required and must be at least 32 characters in production');
+  }
 }
 
 export const env = parsed.data;

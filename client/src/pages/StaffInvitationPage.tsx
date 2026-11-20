@@ -61,6 +61,10 @@ export const StaffInvitationPage: React.FC = () => {
         const res = await api.staffInvitation.getMetadata(token);
         if (isMounted) {
           setMetadata(res);
+          // Preserve valid recovery token for scanner session continuity
+          try {
+            sessionStorage.setItem('outside_scanner_invite_token', token);
+          } catch { }
           // If invitation is confirmed expired, revoked, or assignment is inactive, clear recovery token
           if (
             res.invitation.status === 'EXPIRED' ||
@@ -69,7 +73,7 @@ export const StaffInvitationPage: React.FC = () => {
           ) {
             try {
               sessionStorage.removeItem('outside_scanner_invite_token');
-            } catch {}
+            } catch { }
           }
         }
       } catch (err: any) {
@@ -78,12 +82,12 @@ export const StaffInvitationPage: React.FC = () => {
           if (status === 404 || status === 410 || status === 403) {
             try {
               sessionStorage.removeItem('outside_scanner_invite_token');
-            } catch {}
+            } catch { }
           }
           setError(
             err?.message ||
-              err?.error?.message ||
-              'This invitation link is invalid or could not be loaded.'
+            err?.error?.message ||
+            'This invitation link is invalid or could not be loaded.'
           );
         }
       } finally {
@@ -110,8 +114,8 @@ export const StaffInvitationPage: React.FC = () => {
     } catch (err: any) {
       setOtpError(
         err?.message ||
-          err?.error?.message ||
-          'Failed to send verification code. Please try again.'
+        err?.error?.message ||
+        'Failed to send verification code. Please try again.'
       );
     } finally {
       setIsSendingOtp(false);
@@ -135,21 +139,32 @@ export const StaffInvitationPage: React.FC = () => {
       if (res.csrfToken) {
         setActiveCsrfToken(res.csrfToken);
       }
+
+      // 1. Refresh authenticated user/session
       await refreshUser();
-      // Recovery succeeded: clear the recovery token from sessionStorage
-      try {
-        sessionStorage.removeItem('outside_scanner_invite_token');
-      } catch {}
+
+      // 2. Refetch invitation metadata under the authenticated session
+      const freshMetadata = await api.staffInvitation.getMetadata(token);
+      setMetadata(freshMetadata);
+
+      // 3. Confirm that the backend reports isCurrentAccount === true before proceeding
+      if (!freshMetadata.invitation.isCurrentAccount) {
+        setOtpError(
+          'Account mismatch detected. Your verified account does not match this invitation.'
+        );
+        return;
+      }
+
       setSuccessMessage('Verification successful! Initializing your scanner session...');
       setTimeout(() => {
-        const targetGate = metadata?.event.slug || metadata?.event.id || '';
+        const targetGate = freshMetadata.event.slug || freshMetadata.event.id || '';
         navigate(`/scanner${targetGate ? `?event=${targetGate}` : ''}`);
       }, 1200);
     } catch (err: any) {
       setOtpError(
         err?.message ||
-          err?.error?.message ||
-          'Invalid or expired verification code. Please check and try again.'
+        err?.error?.message ||
+        'Invalid or expired verification code. Please check and try again.'
       );
     } finally {
       setIsVerifyingOtp(false);
@@ -163,20 +178,26 @@ export const StaffInvitationPage: React.FC = () => {
     try {
       await api.staffInvitation.acceptWithSession(token);
       await refreshUser();
-      // Acceptance succeeded: clear the recovery token from sessionStorage
-      try {
-        sessionStorage.removeItem('outside_scanner_invite_token');
-      } catch {}
+      const freshMetadata = await api.staffInvitation.getMetadata(token);
+      setMetadata(freshMetadata);
+
+      if (!freshMetadata.invitation.isCurrentAccount) {
+        setError(
+          'Account mismatch detected. Your session does not match this invitation.'
+        );
+        return;
+      }
+
       setSuccessMessage('Staff invitation accepted! Redirecting to scanner...');
       setTimeout(() => {
-        const targetGate = metadata?.event.slug || metadata?.event.id || '';
+        const targetGate = freshMetadata.event.slug || freshMetadata.event.id || '';
         navigate(`/scanner${targetGate ? `?event=${targetGate}` : ''}`);
       }, 1200);
     } catch (err: any) {
       setError(
         err?.message ||
-          err?.error?.message ||
-          'Failed to accept invitation. Please ensure your session matches the invitation email.'
+        err?.error?.message ||
+        'Failed to accept invitation. Please ensure your session matches the invitation email.'
       );
     } finally {
       setIsAcceptingSession(false);
@@ -322,7 +343,7 @@ export const StaffInvitationPage: React.FC = () => {
       )}
 
       {/* Account Mismatch: Visitor authenticated with a different email */}
-      {user && !invitation.isCurrentAccount && (
+      {user && !invitation.isCurrentAccount && !isVerifyingOtp && !isAcceptingSession && !successMessage && (
         <div className="bg-white rounded-2xl p-6 sm:p-8 border border-amber-200 bg-amber-50/20 shadow-sm space-y-5">
           <div className="flex items-start gap-3">
             <div className="p-2.5 rounded-xl bg-amber-100 text-amber-800 shrink-0">
@@ -347,7 +368,7 @@ export const StaffInvitationPage: React.FC = () => {
               onClick={async () => {
                 try {
                   sessionStorage.removeItem('outside_scanner_invite_token');
-                } catch {}
+                } catch { }
                 await logout();
                 window.location.reload();
               }}
@@ -464,7 +485,8 @@ export const StaffInvitationPage: React.FC = () => {
 
       {/* Action Case 3: Passwordless OTP Flow (Initial Acceptance or Returning Staff Resumption) */}
       {!invitation.hasPassword &&
-        !user &&
+        (!user || isVerifyingOtp) &&
+        !successMessage &&
         (invitation.status === 'PENDING' || (invitation.status === 'ACCEPTED' && invitation.isAssignmentActive !== false)) && (
           <div className="bg-white rounded-2xl p-6 sm:p-8 border border-stone-200 shadow-sm space-y-6">
             <div>

@@ -1,7 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { ZodError } from 'zod';
 import { Prisma } from '@prisma/client';
-import { AppError } from '../utils/errors.js';
+import { AppError, TooManyRequestsError } from '../utils/errors.js';
 import { sanitizeErrorMessage } from '../modules/finance/stripeError.js';
 
 export function errorHandler(
@@ -12,12 +12,24 @@ export function errorHandler(
   _next: NextFunction
 ): void {
   if (err instanceof AppError) {
+    const retryAfter =
+      err instanceof TooManyRequestsError &&
+      typeof err.retryAfterSeconds === 'number' &&
+      err.retryAfterSeconds > 0
+        ? Math.max(1, Math.ceil(err.retryAfterSeconds))
+        : undefined;
+
+    if (retryAfter !== undefined) {
+      res.set('Retry-After', String(retryAfter));
+    }
+
     res.status(err.statusCode).json({
       success: false,
       error: {
         message: sanitizeErrorMessage(err.message),
         statusCode: err.statusCode,
         code: err.code || (err.statusCode === 404 ? 'NOT_FOUND' : 'BAD_REQUEST'),
+        ...(retryAfter !== undefined ? { retryAfter } : {}),
       },
     });
     return;

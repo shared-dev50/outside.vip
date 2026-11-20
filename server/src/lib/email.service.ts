@@ -81,6 +81,21 @@ export function resetEmailServiceTestOptions(): void {
 export const sentVerificationEmails: VerificationEmailMessage[] = [];
 export const sentStaffInvitationEmails: StaffInvitationEmailMessage[] = [];
 export const sentStaffOtpEmails: StaffOtpEmailMessage[] = [];
+export const sentTeamInvitationEmails: TeamInvitationEmailMessage[] = [];
+
+export interface TeamInvitationEmailMessage {
+  to: string;
+  from: string;
+  subject: string;
+  text: string;
+  html: string;
+  inviteUrl: string;
+  eventTitle: string;
+  organizerName: string;
+  role: 'ADMIN' | 'HOST';
+  expiresInDays: number;
+  sentAt: Date;
+}
 
 export interface StaffOtpEmailMessage {
   to: string;
@@ -893,6 +908,191 @@ export async function sendStaffOtpEmail(params: {
 
       console.error(
         `[EmailService] Staff OTP email delivery failed for ${maskEmailForLog(to)} after ${attempt} attempt(s): ${safeDetail}`
+      );
+      throw deliveryError;
+    }
+  }
+
+  throw lastError!;
+}
+
+export async function sendTeamInvitationEmail(params: {
+  to: string;
+  eventTitle: string;
+  organizerName: string;
+  role: 'ADMIN' | 'HOST';
+  inviteUrl: string;
+  expiresInDays?: number;
+  idempotencyKey?: string;
+}): Promise<EmailDeliveryResult> {
+  const expiresInDays = params.expiresInDays ?? 7;
+  const from = resolveEmailFrom();
+  const to = sanitizeHeaderField(normalizeEmail(params.to));
+  const cleanTitle = sanitizeHeaderField(params.eventTitle);
+  const cleanOrganizer = sanitizeHeaderField(params.organizerName || 'An event organizer');
+  const roleName = params.role === 'HOST' ? 'Event Host' : 'Event Admin';
+  const cleanUrl = params.inviteUrl.trim();
+  const subject = `You're invited to join the event team as ${roleName} for ${cleanTitle} on Outside.vip`;
+
+  const text = [
+    `Hi,`,
+    '',
+    `${cleanOrganizer} has invited you to join the event team as ${roleName} for "${cleanTitle}" on Outside.vip.`,
+    '',
+    `Accept your invitation here:`,
+    cleanUrl,
+    '',
+    `This invitation link expires in ${expiresInDays} days.`,
+    'You must sign in with a verified Outside.vip account matching this email address to accept.',
+    '',
+    'If you were not expecting this invitation, you can safely ignore this email.',
+  ].join('\n');
+
+  const escapedTitle = escapeHtml(cleanTitle);
+  const escapedOrganizer = escapeHtml(cleanOrganizer);
+  const escapedUrl = escapeHtml(cleanUrl);
+  const escapedRole = escapeHtml(roleName);
+  const escapedDays = escapeHtml(String(expiresInDays));
+
+  const html = `<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en">
+  <head>
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>${escapedTitle} - ${escapedRole} Invitation</title>
+  </head>
+  <body style="margin: 0; padding: 24px; background-color: #0A0A0C; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #F5F5F7;">
+    <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="max-width: 540px; margin: 0 auto; background: #121216; border: 1px solid #22222A; border-radius: 16px; overflow: hidden;">
+      <tr>
+        <td style="padding: 32px;">
+          <p style="font-size: 11px; text-transform: uppercase; letter-spacing: 0.14em; color: #FF5500; font-weight: 700; margin: 0 0 12px 0;">Outside.vip Event Team</p>
+          <h1 style="font-size: 24px; font-weight: 700; margin: 0 0 16px 0; color: #FFFFFF; line-height: 1.3;">You're invited as ${escapedRole}</h1>
+          <p style="font-size: 15px; line-height: 1.6; color: #B8B8C2; margin: 0 0 14px 0;">
+            <strong style="color: #FFFFFF;">${escapedOrganizer}</strong> has invited you to join the team for <strong style="color: #FFFFFF;">${escapedTitle}</strong> on Outside.vip as <strong style="color: #FFFFFF;">${escapedRole}</strong>.
+          </p>
+          
+          <table role="presentation" border="0" cellpadding="0" cellspacing="0" style="margin: 0 auto 28px auto;">
+            <tr>
+              <td align="center" bgcolor="#FF5500" style="border-radius: 10px;">
+                <a href="${escapedUrl}" target="_blank" rel="noopener noreferrer" style="font-size: 15px; font-weight: 600; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: #FFFFFF; text-decoration: none; padding: 14px 32px; border-radius: 10px; border: 1px solid #FF5500; display: inline-block;">
+                  <span style="font-weight: 600; color: #FFFFFF;">Accept Invitation</span>
+                </a>
+              </td>
+            </tr>
+          </table>
+
+          <p style="font-size: 13px; line-height: 1.5; color: #8E8E99; margin: 0 0 16px 0; border-top: 1px solid #22222A; padding-top: 20px;">
+            This invitation link is valid for <strong style="color: #FFFFFF;">${escapedDays} days</strong>. You must sign in with a verified Outside.vip account matching this email address to accept.
+          </p>
+          <p style="font-size: 12px; line-height: 1.5; color: #6E6E78; margin: 0;">
+            If the button above does not work, paste this link into your browser:<br/>
+            <a href="${escapedUrl}" target="_blank" rel="noopener noreferrer" style="color: #FF5500; text-decoration: underline; word-break: break-all; font-size: 12px; display: inline-block; margin-top: 4px;">${escapedUrl}</a>
+          </p>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>`.trim();
+
+  const sentAt = new Date();
+  const activeNodeEnv = getActiveNodeEnv();
+  const shouldUseResendInTest = env.NODE_ENV === 'test' && Boolean(testOptions.useResendInTest);
+
+  if (activeNodeEnv === 'test' && !shouldUseResendInTest) {
+    const message: TeamInvitationEmailMessage = {
+      to,
+      from,
+      subject,
+      text,
+      html,
+      inviteUrl: params.inviteUrl,
+      eventTitle: cleanTitle,
+      organizerName: cleanOrganizer,
+      role: params.role,
+      expiresInDays,
+      sentAt,
+    };
+    sentTeamInvitationEmails.push(message);
+    return {
+      sent: true,
+      status: 'recorded',
+      provider: 'test-recorder',
+      messageId: `test_rec_${crypto.randomUUID()}`,
+      from,
+      to,
+      expiresInMinutes: expiresInDays * 24 * 60,
+      sentAt,
+    };
+  }
+
+  const resendApiKey = resolveResendApiKey();
+  if (!resendApiKey) {
+    console.error(
+      `[EmailService] Team invitation email aborted for ${maskEmailForLog(to)}: RESEND_API_KEY is not configured.`
+    );
+    throw new EmailDeliveryError(
+      'Email delivery service is not configured. Please try again later.',
+      {
+        code: 'EMAIL_SERVICE_UNCONFIGURED',
+        providerStatusCode: null,
+        retryable: false,
+      }
+    );
+  }
+
+  const resend = new Resend(resendApiKey);
+  const timeoutMs = getEffectiveTimeoutMs();
+  const retryDelayMs = getEffectiveRetryDelayMs();
+  const maxRetries = getEffectiveMaxRetries();
+  const sensitiveValues = [resendApiKey];
+
+  let lastError: EmailDeliveryError | null = null;
+  for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
+    try {
+      const { messageId } = await sendSingleResendAttempt({
+        resend,
+        from,
+        to,
+        subject,
+        text,
+        html,
+        idempotencyKey: params.idempotencyKey,
+        timeoutMs,
+      });
+
+      return {
+        sent: true,
+        status: 'sent',
+        provider: 'resend',
+        messageId,
+        from,
+        to,
+        expiresInMinutes: expiresInDays * 24 * 60,
+        sentAt,
+      };
+    } catch (err) {
+      const deliveryError =
+        err instanceof EmailDeliveryError
+          ? err
+          : classifyProviderError({ message: err instanceof Error ? err.message : undefined });
+      lastError = deliveryError;
+
+      const canRetry = deliveryError.retryable && attempt <= maxRetries;
+      const safeDetail = sanitizeEmailLogMessage(
+        deliveryError.providerDetail || deliveryError.message,
+        sensitiveValues
+      );
+
+      if (canRetry) {
+        console.warn(
+          `[EmailService] Transient Resend failure on attempt ${attempt} for ${maskEmailForLog(to)}: ${safeDetail}. Retrying.`
+        );
+        await sleep(retryDelayMs);
+        continue;
+      }
+
+      console.error(
+        `[EmailService] Team invitation email delivery failed for ${maskEmailForLog(to)} after ${attempt} attempt(s): ${safeDetail}`
       );
       throw deliveryError;
     }

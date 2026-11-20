@@ -563,4 +563,127 @@ describe('Organizer Orders Listing API (GET /api/organizer/orders)', () => {
       expect(resInvalidSortOrder.status).toBe(400);
     });
   });
+
+  describe('8. SEC-05: Event Admin Order Access & Data Isolation', () => {
+    it('allows ATTENDEE-role Event Admin with canViewOrders: true to retrieve orders for their assigned event', async () => {
+      vi.spyOn(prisma.event, 'findFirst').mockResolvedValue(mockOrganizerEvent as any);
+      vi.spyOn(prisma.eventTeamMember, 'findUnique').mockResolvedValue({
+        id: 'tm-admin-1',
+        eventId: mockOrganizerEvent.id,
+        userId: attendeeId,
+        role: 'ADMIN',
+        status: 'ACTIVE',
+        permissions: { canViewOrders: true },
+      } as any);
+      const countSpy = vi.spyOn(prisma.order, 'count').mockResolvedValue(1);
+      const findManySpy = vi.spyOn(prisma.order, 'findMany').mockResolvedValue([mockOrdersList[0]] as any);
+
+      const res = await request(app)
+        .get(`/api/organizer/orders?eventId=${mockOrganizerEvent.id}`)
+        .set('Authorization', `Bearer ${attendeeToken}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.data.orders).toHaveLength(1);
+      expect(res.body.data.orders[0].id).toBe('ord-101');
+      // Must scope strictly by eventId without forcing event.organizerId === attendeeId
+      expect(countSpy).toHaveBeenCalledWith({
+        where: {
+          AND: [{ eventId: mockOrganizerEvent.id }],
+        },
+      });
+      expect(findManySpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: {
+            AND: [{ eventId: mockOrganizerEvent.id }],
+          },
+        })
+      );
+    });
+
+    it('allows ORGANIZER-role Event Admin with canViewOrders: true to retrieve orders for an assigned event owned by another organizer', async () => {
+      vi.spyOn(prisma.event, 'findFirst').mockResolvedValue(mockOtherOrganizerEvent as any);
+      vi.spyOn(prisma.eventTeamMember, 'findUnique').mockResolvedValue({
+        id: 'tm-admin-2',
+        eventId: mockOtherOrganizerEvent.id,
+        userId: organizerId,
+        role: 'ADMIN',
+        status: 'ACTIVE',
+        permissions: { canViewOrders: true },
+      } as any);
+      const countSpy = vi.spyOn(prisma.order, 'count').mockResolvedValue(1);
+      vi.spyOn(prisma.order, 'findMany').mockResolvedValue([mockOrdersList[0]] as any);
+
+      const res = await request(app)
+        .get(`/api/organizer/orders?eventId=${mockOtherOrganizerEvent.id}`)
+        .set('Authorization', `Bearer ${organizerToken}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(countSpy).toHaveBeenCalledWith({
+        where: {
+          AND: [{ eventId: mockOtherOrganizerEvent.id }],
+        },
+      });
+    });
+
+    it('rejects Event Admin with canViewOrders: false with 403 Forbidden', async () => {
+      vi.spyOn(prisma.event, 'findFirst').mockResolvedValue(mockOrganizerEvent as any);
+      vi.spyOn(prisma.eventTeamMember, 'findUnique').mockResolvedValue({
+        id: 'tm-admin-no-orders',
+        eventId: mockOrganizerEvent.id,
+        userId: attendeeId,
+        role: 'ADMIN',
+        status: 'ACTIVE',
+        permissions: { canViewOrders: false, canEditDetails: true },
+      } as any);
+
+      const res = await request(app)
+        .get(`/api/organizer/orders?eventId=${mockOrganizerEvent.id}`)
+        .set('Authorization', `Bearer ${attendeeToken}`);
+
+      expect(res.status).toBe(403);
+      expect(res.body.success).toBe(false);
+    });
+
+    it('rejects Event Admin attempting to access orders for an unassigned event with 403 Forbidden', async () => {
+      vi.spyOn(prisma.event, 'findFirst').mockResolvedValue(mockOtherOrganizerEvent as any);
+      vi.spyOn(prisma.eventTeamMember, 'findUnique').mockResolvedValue(null);
+
+      const res = await request(app)
+        .get(`/api/organizer/orders?eventId=${mockOtherOrganizerEvent.id}`)
+        .set('Authorization', `Bearer ${attendeeToken}`);
+
+      expect(res.status).toBe(403);
+      expect(res.body.success).toBe(false);
+    });
+
+    it('scopes requests without eventId for ATTENDEE-role Event Admin strictly to events where they hold active ADMIN membership with canViewOrders: true', async () => {
+      vi.spyOn(prisma.eventTeamMember, 'findMany').mockResolvedValue([
+        {
+          eventId: mockOrganizerEvent.id,
+          role: 'ADMIN',
+          permissions: { canViewOrders: true },
+        },
+        {
+          eventId: mockOtherOrganizerEvent.id,
+          role: 'ADMIN',
+          permissions: { canViewOrders: false },
+        },
+      ] as any);
+      const countSpy = vi.spyOn(prisma.order, 'count').mockResolvedValue(1);
+      vi.spyOn(prisma.order, 'findMany').mockResolvedValue([mockOrdersList[0]] as any);
+
+      const res = await request(app)
+        .get('/api/organizer/orders')
+        .set('Authorization', `Bearer ${attendeeToken}`);
+
+      expect(res.status).toBe(200);
+      expect(countSpy).toHaveBeenCalledWith({
+        where: {
+          AND: [{ eventId: { in: [mockOrganizerEvent.id] } }],
+        },
+      });
+    });
+  });
 });

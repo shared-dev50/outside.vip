@@ -34,6 +34,12 @@ import { extractYouTubeVideoId, normalizeYouTubeUrl } from '../../utils/youtube.
 import { hashEventPassword } from '../events/passwordAccess.service.js';
 import { cancelWaitlistForEventIds, processWaitlistForTier } from '../waitlist/waitlist.service.js';
 import { verifyAndNormalizeLocation } from '../places/places.service.js';
+import {
+  resolveEventAuthorization,
+  hasEventPermission,
+  parseAdminPermissions,
+  EventAdminPermissions,
+} from '../eventTeam/eventTeam.permissions.js';
 
 async function saveOrganizerPayoutDetails(
   tx: any,
@@ -310,9 +316,51 @@ export async function getDashboardStats(req: Request, res: Response, next: NextF
 export async function listOrganizerEvents(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const organizerId = req.user!.userId;
+    const isPlatformAdmin = req.user!.role === Role.ADMIN;
+
+    // SEC-14 Part A: Include events where the user holds an active EventTeamMember ADMIN membership
+    // without weakening authorization or exposing owner-only payout details.
+    const adminMembershipsByEventId = new Map<string, EventAdminPermissions>();
+    if (prisma.eventTeamMember && typeof prisma.eventTeamMember.findMany === 'function') {
+      try {
+        const memberships = await prisma.eventTeamMember.findMany({
+          where: {
+            userId: organizerId,
+            role: 'ADMIN',
+            status: 'ACTIVE',
+          },
+          select: {
+            eventId: true,
+            role: true,
+            status: true,
+            permissions: true,
+          },
+        });
+        if (Array.isArray(memberships)) {
+          for (const membership of memberships) {
+            if (membership.role === 'ADMIN' && membership.status === 'ACTIVE') {
+              adminMembershipsByEventId.set(
+                membership.eventId,
+                parseAdminPermissions(membership.permissions)
+              );
+            }
+          }
+        }
+      } catch {
+        // Ignore if eventTeamMember is unavailable in isolated unit test mocks
+      }
+    }
+
+    const adminEventIds = Array.from(adminMembershipsByEventId.keys());
+    const where: Prisma.EventWhereInput =
+      adminEventIds.length > 0
+        ? {
+            OR: [{ organizerId }, { id: { in: adminEventIds } }],
+          }
+        : { organizerId };
 
     const events = await prisma.event.findMany({
-      where: { organizerId },
+      where,
       orderBy: { updatedAt: 'desc' },
       include: {
         ticketTiers: {
@@ -332,21 +380,38 @@ export async function listOrganizerEvents(req: Request, res: Response, next: Nex
       },
     });
 
-    const enhanced = events.map((event) => {
+    const seenEventIds = new Set<string>();
+    const enhanced = [];
+
+    for (const event of events) {
+      if (seenEventIds.has(event.id)) {
+        continue;
+      }
+      seenEventIds.add(event.id);
+
+      const isOwner = event.organizerId === organizerId;
+      const adminPerms = adminMembershipsByEventId.get(event.id);
+      const canSeeOrderFinancials =
+        isOwner || isPlatformAdmin || Boolean(adminPerms?.canViewOrders);
+
       const totalCapacity = event.ticketTiers.reduce((acc, t) => acc + t.totalCapacity, 0);
       const ticketsSold = event.ticketTiers.reduce((acc, t) => acc + t.soldQuantity, 0);
-      const revenueInCents = event.orders.reduce((acc, o) => acc + o.totalInCents, 0);
+      const revenueInCents = canSeeOrderFinancials
+        ? event.orders.reduce((acc, o) => acc + o.totalInCents, 0)
+        : 0;
 
-      // Clean orders array and sensitive fields before returning
+      // Clean orders array and sensitive/owner-only fields before returning
       const { orders: _, passwordHash: __, ...rest } = event;
-      return {
+      enhanced.push({
         ...rest,
+        payoutDetails: null,
+        payoutDetailsId: isOwner ? event.payoutDetailsId : null,
         totalCapacity,
         ticketsSold,
         revenueInCents,
         revenueFormatted: `$${(revenueInCents / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
-      };
-    });
+      });
+    }
 
     res.json({
       success: true,
@@ -409,14 +474,20 @@ export async function getOrganizerEventById(req: Request, res: Response, next: N
     }
 
     if (event.organizerId !== organizerId && req.user!.role !== 'ADMIN') {
-      throw new ForbiddenError('You do not have permission to view or edit this event');
+      const authCtx = await resolveEventAuthorization(id, req.user!);
+      if (authCtx.isHost || (!authCtx.isOwner && !authCtx.isAdmin)) {
+        throw new ForbiddenError(
+          'Event hosts are restricted to personal promotional links and traffic and cannot access organizer event details.'
+        );
+      }
     }
 
-    const effectivePayout = event.payoutDetails || event.organizer?.payoutDetails || null;
-    const sanitizedPayout = sanitizePayoutDetails(effectivePayout);
+    const isOwner = event.organizerId === organizerId;
+    const effectivePayout = isOwner ? (event.payoutDetails || event.organizer?.payoutDetails || null) : null;
+    const sanitizedPayout = isOwner ? sanitizePayoutDetails(effectivePayout) : null;
     const sanitizedOrganizer = {
       ...event.organizer,
-      payoutDetails: sanitizePayoutDetails(event.organizer?.payoutDetails),
+      payoutDetails: isOwner ? sanitizePayoutDetails(event.organizer?.payoutDetails) : null,
     };
 
     const tierIds = event.ticketTiers.map((t) => t.id);
@@ -901,7 +972,6 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
   try {
     const organizerId = req.user!.userId;
     const { id } = req.params;
-    const input = updateEventSchema.parse(req.body);
 
     existingEvent = await prisma.event.findUnique({
       where: { id },
@@ -916,8 +986,88 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
       throw new NotFoundError('Event not found');
     }
 
-    if (existingEvent.organizerId !== organizerId && req.user!.role !== 'ADMIN') {
-      throw new ForbiddenError('You do not have permission to edit this event');
+    const isOwner = existingEvent.organizerId === organizerId;
+
+    // SEC-02: Only the actual Event Owner may submit or modify payoutDetails or payoutDetailsId
+    const hasPayoutPayload = Boolean(
+      req.body &&
+        typeof req.body === 'object' &&
+        (Object.prototype.hasOwnProperty.call(req.body, 'payoutDetails') ||
+          Object.prototype.hasOwnProperty.call(req.body, 'payoutDetailsId'))
+    );
+
+    if (!isOwner && hasPayoutPayload) {
+      throw new ForbiddenError('Only the event owner can submit or modify payout details.');
+    }
+
+    const input = updateEventSchema.parse(req.body);
+
+    const enforceStatusTransitionAuth = async (
+      targetEventId: string,
+      currentStatus: EventStatus,
+      requestedStatus: EventStatus | undefined
+    ) => {
+      if (requestedStatus === undefined || requestedStatus === currentStatus) {
+        return;
+      }
+      if (isOwner || req.user!.role === 'ADMIN') {
+        return;
+      }
+      if (requestedStatus === EventStatus.CANCELLED) {
+        await resolveEventAuthorization(targetEventId, req.user!, 'canCancelEvent');
+      } else if (requestedStatus === EventStatus.ARCHIVED) {
+        await resolveEventAuthorization(targetEventId, req.user!, 'canDeleteEvent');
+      } else if (requestedStatus === EventStatus.PUBLISHED) {
+        throw new ForbiddenError('You do not have permission to publish this event');
+      } else if (requestedStatus === EventStatus.DRAFT) {
+        throw new ForbiddenError('You do not have permission to unpublish this event');
+      }
+    };
+
+    if (!isOwner && req.user!.role !== 'ADMIN') {
+      await resolveEventAuthorization(id, req.user!, 'canEditDetails');
+      if (input.ticketTiers !== undefined) {
+        await resolveEventAuthorization(id, req.user!, 'canManageTickets');
+      }
+      await enforceStatusTransitionAuth(id, existingEvent.status, input.status);
+    }
+
+    // SEC-04: Validate that every supplied ticketTier.id belongs to existingEvent before any database writes
+    if (input.ticketTiers !== undefined) {
+      const existingTierIds = new Set(existingEvent.ticketTiers.map((t: any) => t.id));
+      for (const tier of input.ticketTiers) {
+        if (tier.id && !existingTierIds.has(tier.id)) {
+          throw new ForbiddenError(
+            `Ticket tier '${tier.id}' does not belong to this event.`
+          );
+        }
+      }
+    }
+
+    // SEC-03: If applyToFuture is requested on a series, enforce lifecycle & edit permissions across future occurrences
+    if (input.applyToFuture && existingEvent.seriesId && !isOwner && req.user!.role !== 'ADMIN') {
+      if (input.status === EventStatus.PUBLISHED) {
+        throw new ForbiddenError('You do not have permission to publish this event');
+      }
+      if (input.status === EventStatus.DRAFT) {
+        throw new ForbiddenError('You do not have permission to unpublish this event');
+      }
+      const futureOccurrencesForAuth = await prisma.event.findMany({
+        where: {
+          seriesId: existingEvent.seriesId,
+          startAt: { gte: existingEvent.startAt },
+          id: { not: id },
+        },
+        select: { id: true, status: true },
+      });
+
+      for (const occ of futureOccurrencesForAuth) {
+        await resolveEventAuthorization(occ.id, req.user!, 'canEditDetails');
+        if (input.ticketTiers !== undefined) {
+          await resolveEventAuthorization(occ.id, req.user!, 'canManageTickets');
+        }
+        await enforceStatusTransitionAuth(occ.id, occ.status, input.status);
+      }
     }
 
     if (existingEvent.organizerId !== organizerId && req.user!.role === 'ADMIN') {
@@ -1093,8 +1243,8 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
 
     const updatedEvent = await prisma.$transaction(async (tx) => {
       let payoutDetailsId = existingEvent.payoutDetailsId;
-      if (input.payoutDetails) {
-        const savedPayout = await saveOrganizerPayoutDetails(tx, organizerId, input.payoutDetails);
+      if (isOwner && input.payoutDetails) {
+        const savedPayout = await saveOrganizerPayoutDetails(tx, existingEvent.organizerId, input.payoutDetails);
         payoutDetailsId = savedPayout.id;
       }
 
@@ -1271,7 +1421,7 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
           ...(youtubeVideoId !== undefined && { youtubeVideoId }),
           ...(youtubeVideoUrl !== undefined && { youtubeVideoUrl }),
           ...(existingEvent.seriesId && !input.applyToFuture ? { isCustomized: true } : {}),
-          ...(payoutDetailsId ? { payoutDetailsId } : {}),
+          ...(isOwner && payoutDetailsId ? { payoutDetailsId } : {}),
         },
       });
 
@@ -1326,7 +1476,7 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
         for (const tier of input.ticketTiers) {
           if (tier.id) {
             await tx.ticketTier.update({
-              where: { id: tier.id },
+              where: { id: tier.id, eventId: id },
               data: {
                 name: tier.name,
                 description: tier.description,
@@ -1442,7 +1592,7 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
         event: {
           ...updatedEvent,
           passwordHash: undefined,
-          payoutDetails: sanitizePayoutDetails(updatedEvent?.payoutDetails),
+          payoutDetails: isOwner ? sanitizePayoutDetails(updatedEvent?.payoutDetails) : null,
         },
       },
     });
@@ -1686,7 +1836,7 @@ export async function cancelOrganizerEvent(req: Request, res: Response, next: Ne
     }
 
     if (event.organizerId !== organizerId && req.user!.role !== 'ADMIN') {
-      throw new ForbiddenError('You do not have permission to cancel this event');
+      await resolveEventAuthorization(id, req.user!, 'canCancelEvent');
     }
 
     if (event.organizerId !== organizerId && req.user!.role === 'ADMIN') {
@@ -1857,7 +2007,7 @@ export async function deleteOrganizerEvent(req: Request, res: Response, next: Ne
     }
 
     if (event.organizerId !== organizerId && req.user!.role !== 'ADMIN') {
-      throw new ForbiddenError('You do not have permission to delete this event');
+      await resolveEventAuthorization(id, req.user!, 'canDeleteEvent');
     }
 
     if (event.organizerId !== organizerId && req.user!.role === 'ADMIN') {
@@ -1875,6 +2025,34 @@ export async function deleteOrganizerEvent(req: Request, res: Response, next: Ne
     if (event.tickets.length > 0 || event.orders.length > 0) {
       throw new BadRequestError(
         'Cannot delete an event with existing orders or tickets. You can unpublish or archive it instead to preserve attendee records.'
+      );
+    }
+
+    const [
+      promotionLinksCount,
+      promotionClicksCount,
+      promotionVisitorDaysCount,
+      promotionAttributionsCount,
+    ] = await Promise.all([
+      prisma.promotionLink ? prisma.promotionLink.count({ where: { eventId: id } }) : Promise.resolve(0),
+      prisma.promotionClick ? prisma.promotionClick.count({ where: { eventId: id } }) : Promise.resolve(0),
+      prisma.promotionVisitorDay
+        ? prisma.promotionVisitorDay.count({ where: { eventId: id } })
+        : Promise.resolve(0),
+      prisma.promotionVisitorAttribution
+        ? prisma.promotionVisitorAttribution.count({ where: { eventId: id } })
+        : Promise.resolve(0),
+    ]);
+
+    if (
+      promotionLinksCount > 0 ||
+      promotionClicksCount > 0 ||
+      promotionVisitorDaysCount > 0 ||
+      promotionAttributionsCount > 0
+    ) {
+      throw new ConflictError(
+        'Cannot delete an event with existing promotional links or traffic analytics history. Please unpublish or archive the event instead to preserve promotional links and historical analytics.',
+        'EVENT_HAS_PROMOTIONAL_HISTORY'
       );
     }
 
@@ -2819,19 +2997,17 @@ export async function getOrganizerOrders(
       throw new UnauthorizedError('Authentication required to access organizer orders');
     }
 
-    if (req.user.role !== Role.ORGANIZER && req.user.role !== Role.ADMIN) {
-      throw new ForbiddenError(
-        `Access denied. Role ${req.user.role} is not permitted for this action.`
-      );
-    }
-
     const isAdmin = req.user.role === Role.ADMIN;
+    const isOrganizerRole = req.user.role === Role.ORGANIZER;
     const organizerId = req.user.userId;
 
     const query = organizerOrdersQuerySchema.parse(req.query);
     const { status: statuses, eventId, search, page, limit, sortBy, sortOrder } = query;
 
     let targetEventId: string | undefined = undefined;
+    let isTargetEventOwner = false;
+    let isAuthorizedEventAdminForTarget = false;
+
     if (eventId) {
       const event = await prisma.event.findFirst({
         where: {
@@ -2844,8 +3020,20 @@ export async function getOrganizerOrders(
         throw new NotFoundError('Event not found');
       }
 
-      if (!isAdmin && event.organizerId !== organizerId) {
-        throw new ForbiddenError('You do not have permission to view orders for this event');
+      if (event.organizerId === organizerId) {
+        isTargetEventOwner = true;
+      } else if (!isAdmin) {
+        try {
+          await resolveEventAuthorization(event.id, req.user, 'canViewOrders');
+          isAuthorizedEventAdminForTarget = true;
+        } catch (err) {
+          if (err instanceof ForbiddenError) {
+            throw new ForbiddenError(
+              `You do not have permission to view orders for this event. ${err.message}`
+            );
+          }
+          throw err;
+        }
       }
 
       targetEventId = event.id;
@@ -2854,10 +3042,58 @@ export async function getOrganizerOrders(
     const andConditions: Prisma.OrderWhereInput[] = [];
 
     if (!isAdmin) {
-      andConditions.push({ event: { organizerId } });
-    }
+      if (targetEventId) {
+        if (isTargetEventOwner) {
+          andConditions.push({ event: { organizerId } });
+        } else if (!isAuthorizedEventAdminForTarget) {
+          throw new ForbiddenError('You do not have permission to view orders for this event');
+        }
+        andConditions.push({ eventId: targetEventId });
+      } else {
+        let authorizedAdminEventIds: string[] = [];
+        if (prisma.eventTeamMember && typeof prisma.eventTeamMember.findMany === 'function') {
+          try {
+            const memberships = await prisma.eventTeamMember.findMany({
+              where: {
+                userId: organizerId,
+                role: 'ADMIN',
+                status: 'ACTIVE',
+              },
+              select: {
+                eventId: true,
+                role: true,
+                permissions: true,
+              },
+            });
+            if (Array.isArray(memberships)) {
+              authorizedAdminEventIds = memberships
+                .filter((m) => hasEventPermission(m, 'canViewOrders'))
+                .map((m) => m.eventId);
+            }
+          } catch {
+            authorizedAdminEventIds = [];
+          }
+        }
 
-    if (targetEventId) {
+        if (authorizedAdminEventIds.length === 0) {
+          if (!isOrganizerRole) {
+            throw new ForbiddenError(
+              `Access denied. Role ${req.user.role} is not permitted for this action.`
+            );
+          }
+          andConditions.push({ event: { organizerId } });
+        } else if (isOrganizerRole) {
+          andConditions.push({
+            OR: [
+              { event: { organizerId } },
+              { eventId: { in: authorizedAdminEventIds } },
+            ],
+          });
+        } else {
+          andConditions.push({ eventId: { in: authorizedAdminEventIds } });
+        }
+      }
+    } else if (targetEventId) {
       andConditions.push({ eventId: targetEventId });
     }
 

@@ -31,10 +31,11 @@ export interface IssuedSession {
 }
 
 /**
- * Contains ONLY the minimum required authorization fields cached in Redis (30s TTL).
+ * Contains authorization fields and email identity cached in Redis (30s TTL).
  */
 export interface CachedUserAuthRecord {
   userId: string;
+  email: string;
   role: Role;
   emailVerified: boolean;
   accountStatus: AccountStatus;
@@ -384,21 +385,25 @@ export async function getCachedUserAuth(userId: string): Promise<CachedUserAuthR
       if (
         !parsed ||
         typeof parsed.userId !== 'string' ||
+        typeof parsed.email !== 'string' ||
+        !parsed.email.trim() ||
         typeof parsed.role !== 'string' ||
         typeof parsed.emailVerified !== 'boolean' ||
         typeof parsed.accountStatus !== 'string'
       ) {
-        await redis.del(`${USER_AUTH_CACHE_PREFIX}${userId}`);
+        // Treat legacy or incomplete records missing email as cache misses
+        await redis.del(`${USER_AUTH_CACHE_PREFIX}${userId}`).catch(() => {});
         return null;
       }
       return {
         userId: parsed.userId,
+        email: parsed.email.trim().toLowerCase(),
         role: parsed.role as Role,
         emailVerified: parsed.emailVerified,
         accountStatus: parsed.accountStatus as AccountStatus,
       };
     } catch {
-      await redis.del(`${USER_AUTH_CACHE_PREFIX}${userId}`);
+      await redis.del(`${USER_AUTH_CACHE_PREFIX}${userId}`).catch(() => {});
       return null;
     }
   } catch (err) {
@@ -417,8 +422,8 @@ export async function getUserAuthCacheVersion(userId: string): Promise<string> {
 }
 
 /**
- * Atomically populates `user_auth_cache:<userId>` (30s TTL) with ONLY
- * `{ userId, role, emailVerified, accountStatus }` if and only if
+ * Atomically populates `user_auth_cache:<userId>` (30s TTL) with
+ * `{ userId, email, role, emailVerified, accountStatus }` if and only if
  * `user_auth_ver:<userId>` still matches `expectedVersion`.
  */
 export async function populateUserAuthCacheAtomically(
@@ -429,6 +434,7 @@ export async function populateUserAuthCacheAtomically(
     const redis = getRedisClient();
     const minimalPayload: CachedUserAuthRecord = {
       userId: record.userId,
+      email: (record.email || '').trim().toLowerCase(),
       role: record.role,
       emailVerified: record.emailVerified,
       accountStatus: record.accountStatus,
@@ -592,5 +598,84 @@ export async function checkRedisRateLimit(
     return count <= maxRequests;
   } catch (err) {
     wrapRedisError(err);
+  }
+}
+
+/**
+ * Derives a non-reversible SHA-256 hash for rate-limit key components
+ * (such as normalized client IPs or User-Agent strings) so raw personal
+ * identifiers are never persisted in Redis keys.
+ */
+export function hashRateLimitIdentifier(raw: string): string {
+  return crypto
+    .createHash('sha256')
+    .update(`outside_ratelimit_v1:${(raw || 'unknown').trim()}`)
+    .digest('hex')
+    .slice(0, 32);
+}
+
+/**
+ * Increments a Redis rate-limit counter with TTL and returns whether the request
+ * is allowed along with the current count and remaining Retry-After seconds.
+ */
+export async function checkRedisRateLimitWithRetryAfter(
+  key: string,
+  maxRequests: number,
+  windowMs: number
+): Promise<{ allowed: boolean; count: number; retryAfterSeconds: number }> {
+  try {
+    const redis = getRedisClient();
+    const fullKey = `ratelimit:${key}`;
+    const count = await redis.incrWithTtl(fullKey, windowMs);
+    if (count <= maxRequests) {
+      return { allowed: true, count, retryAfterSeconds: 0 };
+    }
+    const pttl = await redis.pttl(fullKey);
+    const retryAfterSeconds =
+      pttl > 0
+        ? Math.max(1, Math.ceil(pttl / 1000))
+        : Math.max(1, Math.ceil(windowMs / 1000));
+    return { allowed: false, count, retryAfterSeconds };
+  } catch (err) {
+    wrapRedisError(err);
+  }
+}
+
+/**
+ * Atomically acquires a fixed-duration cooldown lock in Redis using SET ... NX PX.
+ * Prevents concurrent duplicate requests from bypassing cooldown enforcement.
+ */
+export async function acquireRedisCooldown(
+  key: string,
+  cooldownMs: number
+): Promise<{ allowed: boolean; retryAfterSeconds: number }> {
+  try {
+    const redis = getRedisClient();
+    const fullKey = `cooldown:${key}`;
+    const acquired = await redis.setNxPx(fullKey, '1', cooldownMs);
+    if (acquired) {
+      return { allowed: true, retryAfterSeconds: 0 };
+    }
+    const pttl = await redis.pttl(fullKey);
+    const retryAfterSeconds =
+      pttl > 0
+        ? Math.max(1, Math.ceil(pttl / 1000))
+        : Math.max(1, Math.ceil(cooldownMs / 1000));
+    return { allowed: false, retryAfterSeconds };
+  } catch (err) {
+    wrapRedisError(err);
+  }
+}
+
+/**
+ * Releases a previously acquired Redis cooldown key (e.g., if a downstream
+ * rate limit rejected the request before the action was executed).
+ */
+export async function releaseRedisCooldown(key: string): Promise<void> {
+  try {
+    const redis = getRedisClient();
+    await redis.del(`cooldown:${key}`);
+  } catch {
+    // Best-effort cleanup
   }
 }

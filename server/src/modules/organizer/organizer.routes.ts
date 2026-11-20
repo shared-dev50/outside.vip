@@ -3,9 +3,7 @@ import {
   requireAuth,
   requireVerifiedEmail,
   requireFreshUserVerification,
-  requireRole,
 } from '../../middleware/auth.js';
-import { Role } from '@prisma/client';
 import {
   getDashboardStats,
   listOrganizerEvents,
@@ -57,7 +55,7 @@ organizerRouter.post('/upload/sign', getUploadSignature);
 organizerRouter.post('/upload', uploadCoverMiddleware.single('image'), handleDirectUpload);
 
 organizerRouter.get('/dashboard', getDashboardStats);
-organizerRouter.get('/orders', requireRole(Role.ORGANIZER, Role.ADMIN), getOrganizerOrders);
+organizerRouter.get('/orders', getOrganizerOrders);
 organizerRouter.post('/earnings-preview', getOrganizerEarningsPreview);
 organizerRouter.get('/payout-details', getOrganizerPayoutDetails);
 organizerRouter.put('/payout-details', requireFreshUserVerification, updateOrganizerPayoutDetails);

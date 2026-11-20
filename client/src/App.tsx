@@ -16,6 +16,8 @@ import { OrderConfirmationPage } from './pages/OrderConfirmationPage';
 import { FinanceOrganizationPage } from './pages/FinanceOrganizationPage';
 import { AuthPage } from './pages/AuthPage';
 import { StaffInvitationPage } from './pages/StaffInvitationPage';
+import { TeamInvitationPage } from './pages/TeamInvitationPage';
+import { HostDashboardPage } from './pages/HostDashboardPage';
 import { RequireAuth, RequireRole } from './components/auth/RequireAuth';
 import { ScannerGuard } from './components/auth/ScannerGuard';
 
@@ -26,13 +28,14 @@ export const App: React.FC = () => {
     isHome ||
     location.pathname.startsWith('/events') ||
     location.pathname.startsWith('/organizer') ||
+    location.pathname.startsWith('/host') ||
     location.pathname.startsWith('/orders') ||
     location.pathname.startsWith('/attendees') ||
-    location.pathname.startsWith('/team');
+    location.pathname.startsWith('/team') ||
     location.pathname.startsWith('/login') ||
     location.pathname.startsWith('/signin') ||
     location.pathname.startsWith('/register') ||
-    location.pathname.startsWith('/forgot-password');
+    location.pathname.startsWith('/forgot-password') ||
     location.pathname.startsWith('/teams') ||
     location.pathname.startsWith('/staff/invitations');
 
@@ -55,10 +58,10 @@ export const App: React.FC = () => {
           <Route path="/events/:slug" element={<EventDetailPage />} />
 
           {/* Conditional & Specialized Access Routes (outside generic guards) */}
-          <Route path="/teams" element={<TeamsPage />} />
           <Route path="/orders" element={<OrdersPage />} />
           <Route path="/atendees" element={<AtendeePage />} />
           <Route path="/staff/invitations/:token" element={<StaffInvitationPage />} />
+          <Route path="/team/invitations/:token" element={<TeamInvitationPage />} />
           <Route
             path="/scanner"
             element={
@@ -76,6 +79,16 @@ export const App: React.FC = () => {
               <RequireRole allowedRoles={['ORGANIZER', 'ADMIN']}>
                 <TeamsPage />
               </RequireRole>
+            }
+          />
+
+          {/* Authenticated Host Workspace */}
+          <Route
+            path="/host"
+            element={
+              <RequireAuth>
+                <HostDashboardPage />
+              </RequireAuth>
             }
           />
 

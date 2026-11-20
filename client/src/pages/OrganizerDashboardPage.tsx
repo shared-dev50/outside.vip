@@ -5,6 +5,8 @@ import { useOptionalAuth } from '../context/AuthContext';
 import { api } from '../lib/api';
 import { OrganizerEventItem, User } from '../types';
 import { OrganizerWaitlistModal } from '../components/organizer/OrganizerWaitlistModal';
+import { EventTeamModal } from '../components/team/EventTeamModal';
+import { EventPromotionsModal } from '../components/promotions/EventPromotionsModal';
 import {
   EmailVerificationGate,
   OrganizerWorkspaceSetupBanner,
@@ -12,6 +14,7 @@ import {
 import { AuthFormCard } from '../components/auth/AuthFormCard';
 import {
   Plus,
+  Users,
   Calendar,
   Ticket,
   TrendingUp,
@@ -60,6 +63,8 @@ export const OrganizerDashboardPage: React.FC<OrganizerDashboardPageProps> = ({
   const [eventToDelete, setEventToDelete] = useState<OrganizerEventItem | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
   const [waitlistEvent, setWaitlistEvent] = useState<OrganizerEventItem | null>(null);
+  const [teamEvent, setTeamEvent] = useState<OrganizerEventItem | null>(null);
+  const [promotionsEvent, setPromotionsEvent] = useState<OrganizerEventItem | null>(null);
 
   const showNotification = (type: 'success' | 'error', message: string) => {
     setNotification({ type, message });
@@ -598,6 +603,24 @@ export const OrganizerDashboardPage: React.FC<OrganizerDashboardPageProps> = ({
                           <div className="flex items-center justify-end gap-1.5 whitespace-nowrap">
                             <button
                               type="button"
+                              onClick={() => setTeamEvent(evt)}
+                              className="p-2 rounded-lg bg-stone-100/80 hover:bg-stone-200/80 text-stone-600 hover:text-stone-900 border border-stone-200/90 transition-colors shadow-2xs cursor-pointer"
+                              title="Manage Event Team & Hosts"
+                            >
+                              <Users className="w-3.5 h-3.5 text-stone-700" />
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => setPromotionsEvent(evt)}
+                              className="p-2 rounded-lg bg-stone-100/80 hover:bg-stone-200/80 text-stone-600 hover:text-stone-900 border border-stone-200/90 transition-colors shadow-2xs cursor-pointer"
+                              title="Campaign Links & Traffic Analytics"
+                            >
+                              <TrendingUp className="w-3.5 h-3.5 text-stone-700" />
+                            </button>
+
+                            <button
+                              type="button"
                               onClick={() => setWaitlistEvent(evt)}
                               className="p-2 rounded-lg bg-stone-100/80 hover:bg-stone-200/80 text-stone-600 hover:text-stone-900 border border-stone-200/90 transition-colors shadow-2xs cursor-pointer"
                               title="View Event Waitlist"
@@ -720,6 +743,18 @@ export const OrganizerDashboardPage: React.FC<OrganizerDashboardPageProps> = ({
         isOpen={Boolean(waitlistEvent)}
         onClose={() => setWaitlistEvent(null)}
         event={waitlistEvent}
+      />
+
+      <EventTeamModal
+        isOpen={Boolean(teamEvent)}
+        onClose={() => setTeamEvent(null)}
+        event={teamEvent}
+      />
+
+      <EventPromotionsModal
+        isOpen={Boolean(promotionsEvent)}
+        onClose={() => setPromotionsEvent(null)}
+        event={promotionsEvent}
       />
     </div>
   );

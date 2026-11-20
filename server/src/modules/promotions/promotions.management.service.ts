@@ -1,0 +1,790 @@
+import crypto from 'crypto';
+import { Prisma, PromotionLinkType, PromotionLinkStatus } from '@prisma/client';
+import { prisma } from '../../db/prisma.js';
+import {
+  BadRequestError,
+  NotFoundError,
+  ForbiddenError,
+  ConflictError,
+} from '../../utils/errors.js';
+import {
+  isValidSlugFormat,
+  RESERVED_SLUGS,
+  MAX_HISTORICAL_SLUG_ALIASES_PER_LINK,
+  MAX_ANALYTICS_DATE_RANGE_DAYS,
+  MAX_ANALYTICS_DATE_RANGE_MS,
+} from './promotions.constants.js';
+
+export interface CreateCampaignLinkParams {
+  eventId: string;
+  createdById: string;
+  name: string;
+  customSlug?: string;
+}
+
+export interface CustomizeSlugParams {
+  linkId: string;
+  eventId: string;
+  newSlug: string;
+  requestingUserId: string;
+}
+
+/**
+ * Normalizes string to a URL-safe lowercase slug format.
+ */
+function slugify(text: string): string {
+  const cleaned = text
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return cleaned || 'campaign';
+}
+
+/**
+ * Creates a new CAMPAIGN promotional link for an event with a primary slug.
+ */
+export async function createCampaignLink(params: CreateCampaignLinkParams) {
+  const { eventId, createdById, name, customSlug } = params;
+
+  if (!name || typeof name !== 'string' || !name.trim()) {
+    throw new BadRequestError('Link name is required');
+  }
+
+  const cleanName = name.trim().slice(0, 100);
+
+  // Validate or generate slug
+  let chosenSlug: string;
+  if (customSlug && typeof customSlug === 'string' && customSlug.trim()) {
+    const candidate = customSlug.trim().toLowerCase();
+    if (!isValidSlugFormat(candidate)) {
+      throw new BadRequestError(
+        'Invalid slug format. Slugs must be 2-64 lowercase alphanumeric characters and single hyphens.'
+      );
+    }
+    if (RESERVED_SLUGS.has(candidate)) {
+      throw new BadRequestError(`Slug '${candidate}' is reserved and cannot be used.`);
+    }
+
+    const existing = await prisma.promotionSlugRegistry.findUnique({
+      where: { slug: candidate },
+    });
+    if (existing) {
+      throw new ConflictError(`Slug '${candidate}' is already in use.`);
+    }
+    chosenSlug = candidate;
+  } else {
+    // Generate URL-safe slug from campaign name
+    const base = slugify(cleanName).slice(0, 48);
+    let candidate = `${base}-${crypto.randomBytes(3).toString('hex')}`;
+    while (RESERVED_SLUGS.has(candidate) || (await prisma.promotionSlugRegistry.findUnique({ where: { slug: candidate } }))) {
+      candidate = `${base}-${crypto.randomBytes(3).toString('hex')}`;
+    }
+    chosenSlug = candidate;
+  }
+
+  // Create Campaign Link with primary slug
+  const link = await prisma.promotionLink.create({
+    data: {
+      eventId,
+      type: PromotionLinkType.CAMPAIGN,
+      status: PromotionLinkStatus.ACTIVE,
+      name: cleanName,
+      createdById,
+      slugRegistry: {
+        create: [
+          {
+            slug: chosenSlug,
+            isPrimary: true,
+          },
+        ],
+      },
+    },
+    include: {
+      slugRegistry: true,
+    },
+  });
+
+  return {
+    id: link.id,
+    eventId: link.eventId,
+    type: link.type,
+    status: link.status,
+    name: link.name,
+    primarySlug: chosenSlug,
+    shortUrl: `/r/${chosenSlug}`,
+    createdAt: link.createdAt,
+  };
+}
+
+/**
+ * Updates a promotional link's name or status (ACTIVE, DISABLED, ARCHIVED).
+ */
+export async function updatePromotionLink(
+  linkId: string,
+  eventId: string,
+  updates: { name?: string; status?: PromotionLinkStatus }
+) {
+  const link = await prisma.promotionLink.findFirst({
+    where: { id: linkId, eventId },
+    include: {
+      hostMember: true,
+    },
+  });
+
+  if (!link) {
+    throw new NotFoundError('Promotion link not found');
+  }
+
+  if (link.status === PromotionLinkStatus.ARCHIVED) {
+    throw new BadRequestError('Cannot modify an archived promotional link');
+  }
+
+  // INVARIANT ENFORCEMENT: A Host link may be ACTIVE only when its associated
+  // membership has role = HOST and status = ACTIVE.
+  if (updates.status === 'ACTIVE' && link.type === 'HOST') {
+    if (!link.hostMember || link.hostMember.role !== 'HOST' || link.hostMember.status !== 'ACTIVE') {
+      throw new BadRequestError(
+        'Cannot activate Host promotional link because the associated team member is not an active Host'
+      );
+    }
+  }
+
+  const data: Prisma.PromotionLinkUpdateInput = {};
+  if (updates.name && updates.name.trim()) {
+    data.name = updates.name.trim().slice(0, 100);
+  }
+  if (updates.status) {
+    data.status = updates.status;
+  }
+
+  return await prisma.promotionLink.update({
+    where: { id: link.id },
+    data,
+    include: {
+      slugRegistry: {
+        where: { isPrimary: true },
+      },
+    },
+  });
+}
+
+/**
+ * Customizes the primary promotional slug of a Host or Campaign link.
+ * Demotes current primary slug to a historical alias and registers the new slug as primary.
+ */
+export async function customizePromotionSlug(params: CustomizeSlugParams) {
+  const { linkId, eventId, newSlug, requestingUserId } = params;
+
+  if (!newSlug || typeof newSlug !== 'string') {
+    throw new BadRequestError('New slug is required');
+  }
+
+  const normalizedSlug = newSlug.trim().toLowerCase();
+
+  if (!isValidSlugFormat(normalizedSlug)) {
+    throw new BadRequestError(
+      'Invalid slug format. Slugs must be 2-64 lowercase alphanumeric characters and single hyphens.'
+    );
+  }
+
+  if (RESERVED_SLUGS.has(normalizedSlug)) {
+    throw new BadRequestError(`Slug '${normalizedSlug}' is reserved.`);
+  }
+
+  const link = await prisma.promotionLink.findFirst({
+    where: { id: linkId, eventId },
+    include: {
+      hostMember: true,
+      slugRegistry: true,
+    },
+  });
+
+  if (!link) {
+    throw new NotFoundError('Promotion link not found');
+  }
+
+  if (link.status === PromotionLinkStatus.ARCHIVED) {
+    throw new BadRequestError('Cannot modify an archived promotional link');
+  }
+
+  // Verify caller authorization for this link
+  if (link.type === PromotionLinkType.HOST) {
+    // If HOST link: caller must be the assigned Host member or event owner
+    const event = await prisma.event.findUnique({ where: { id: eventId } });
+    const isOwner = event?.organizerId === requestingUserId;
+    const isAssignedHost = link.hostMember?.userId === requestingUserId;
+    if (!isOwner && !isAssignedHost) {
+      throw new ForbiddenError('You can only customize your own Host promotional link slug.');
+    }
+  }
+
+  // Check if requested slug is already primary for this link
+  const currentPrimary = link.slugRegistry.find((s) => s.isPrimary);
+  if (currentPrimary && currentPrimary.slug === normalizedSlug) {
+    return {
+      success: true,
+      primarySlug: normalizedSlug,
+      linkId: link.id,
+      unchanged: true,
+    };
+  }
+
+  // Check if requested slug is already used elsewhere in PromotionSlugRegistry
+  const existingSlug = await prisma.promotionSlugRegistry.findUnique({
+    where: { slug: normalizedSlug },
+  });
+
+  if (existingSlug && existingSlug.promotionLinkId !== link.id) {
+    throw new ConflictError(`Slug '${normalizedSlug}' is already in use by another link.`);
+  }
+
+  // Execute primary slug switch in an advisory-locked transaction to prevent concurrent alias limit bypass
+  return await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+    await tx.$executeRaw`
+      SELECT pg_advisory_xact_lock(
+        (hashtext('promotion_slug_customize')::BIGINT << 32) | (hashtext(${link.id})::BIGINT & 4294967295)
+      )
+    `;
+
+    const lockedLink = await tx.promotionLink.findUnique({
+      where: { id: link.id },
+      include: { slugRegistry: true },
+    });
+
+    if (!lockedLink) {
+      throw new NotFoundError('Promotion link not found');
+    }
+
+    if (lockedLink.status === PromotionLinkStatus.ARCHIVED) {
+      throw new BadRequestError('Cannot modify an archived promotional link');
+    }
+
+    const lockedPrimary = lockedLink.slugRegistry.find((s) => s.isPrimary);
+    if (lockedPrimary && lockedPrimary.slug === normalizedSlug) {
+      return {
+        success: true,
+        primarySlug: normalizedSlug,
+        linkId: link.id,
+        unchanged: true,
+      };
+    }
+
+    const existingSlugInTx = await tx.promotionSlugRegistry.findUnique({
+      where: { slug: normalizedSlug },
+    });
+
+    if (existingSlugInTx && existingSlugInTx.promotionLinkId !== link.id) {
+      throw new ConflictError(`Slug '${normalizedSlug}' is already in use by another link.`);
+    }
+
+    const historicalAliasCount = lockedLink.slugRegistry.filter((s) => !s.isPrimary).length;
+    if (historicalAliasCount >= MAX_HISTORICAL_SLUG_ALIASES_PER_LINK) {
+      throw new ConflictError(
+        `This promotional link has reached its maximum limit of ${MAX_HISTORICAL_SLUG_ALIASES_PER_LINK} historical URL aliases. Existing shared URLs remain active, but no additional custom slugs can be created for this link.`,
+        'PROMOTION_SLUG_ALIAS_LIMIT_REACHED'
+      );
+    }
+
+    // 1. Demote current primary slug(s) to historical alias(es)
+    await tx.promotionSlugRegistry.updateMany({
+      where: {
+        promotionLinkId: link.id,
+        isPrimary: true,
+      },
+      data: {
+        isPrimary: false,
+      },
+    });
+
+    // 2. Upsert or insert the new slug as primary
+    if (existingSlugInTx && existingSlugInTx.promotionLinkId === link.id) {
+      // Re-promoting an existing historical alias to primary
+      await tx.promotionSlugRegistry.update({
+        where: { slug: normalizedSlug },
+        data: { isPrimary: true },
+      });
+    } else {
+      await tx.promotionSlugRegistry.create({
+        data: {
+          slug: normalizedSlug,
+          promotionLinkId: link.id,
+          isPrimary: true,
+        },
+      });
+    }
+
+    return {
+      success: true,
+      primarySlug: normalizedSlug,
+      previousSlug: lockedPrimary?.slug,
+      shortUrl: `/r/${normalizedSlug}`,
+    };
+  });
+}
+
+/**
+ * Lists promotional links for an event with their primary slugs and historical aliases.
+ */
+export async function getEventPromotionalLinks(eventId: string) {
+  const links = await prisma.promotionLink.findMany({
+    where: { eventId },
+    include: {
+      slugRegistry: {
+        orderBy: { createdAt: 'desc' },
+      },
+      hostMember: {
+        include: {
+          user: {
+            select: {
+              name: true,
+              email: true,
+            },
+          },
+        },
+      },
+    },
+    orderBy: { createdAt: 'desc' },
+  });
+
+  return links.map((link) => {
+    const primary = link.slugRegistry.find((s) => s.isPrimary);
+    const aliases = link.slugRegistry.filter((s) => !s.isPrimary).map((s) => s.slug);
+
+    return {
+      id: link.id,
+      eventId: link.eventId,
+      type: link.type,
+      status: link.status,
+      name: link.name,
+      primarySlug: primary?.slug || null,
+      shortUrl: primary ? `/r/${primary.slug}` : null,
+      historicalAliases: aliases,
+      host: link.hostMember ? {
+        memberId: link.hostMember.id,
+        name: link.hostMember.user.name,
+        email: link.hostMember.user.email,
+      } : null,
+      createdAt: link.createdAt,
+    };
+  });
+}
+
+const ISO_DATE_OR_DATETIME_REGEX =
+  /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?(Z|([+-])(\d{2}):(\d{2}))?)?$/;
+
+/**
+ * Parses and validates a single analytics date filter parameter (ISO-8601 date or timestamp).
+ * Rejects malformed strings, non-strings, and impossible calendar dates (such as 2026-02-30)
+ * with a controlled HTTP 400 BadRequestError before reaching database queries.
+ */
+export function parseSingleAnalyticsDate(
+  raw: unknown,
+  paramName: 'startDate' | 'endDate'
+): Date | undefined {
+  if (raw === undefined || raw === null || raw === '') {
+    return undefined;
+  }
+
+  if (raw instanceof Date) {
+    if (Number.isNaN(raw.getTime())) {
+      throw new BadRequestError(`Invalid ${paramName} parameter.`, 'INVALID_DATE_FILTER');
+    }
+    return raw;
+  }
+
+  if (typeof raw !== 'string') {
+    throw new BadRequestError(`Invalid ${paramName} parameter.`, 'INVALID_DATE_FILTER');
+  }
+
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed.length > 64) {
+    throw new BadRequestError(`Invalid ${paramName} parameter.`, 'INVALID_DATE_FILTER');
+  }
+
+  const match = ISO_DATE_OR_DATETIME_REGEX.exec(trimmed);
+  if (!match) {
+    throw new BadRequestError(
+      `Invalid ${paramName} format. Expected an ISO-8601 date (YYYY-MM-DD) or timestamp.`,
+      'INVALID_DATE_FILTER'
+    );
+  }
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+
+  if (year < 2000 || year > 2100 || month < 1 || month > 12 || day < 1 || day > 31) {
+    throw new BadRequestError(
+      `Impossible calendar date in ${paramName}.`,
+      'INVALID_DATE_FILTER'
+    );
+  }
+
+  // Verify calendar date does not roll over (e.g., 2026-02-30 or 2026-04-31)
+  const calendarCheck = new Date(Date.UTC(year, month - 1, day));
+  if (
+    calendarCheck.getUTCFullYear() !== year ||
+    calendarCheck.getUTCMonth() !== month - 1 ||
+    calendarCheck.getUTCDate() !== day
+  ) {
+    throw new BadRequestError(
+      `Impossible calendar date in ${paramName}.`,
+      'INVALID_DATE_FILTER'
+    );
+  }
+
+  if (match[4] !== undefined) {
+    const hours = Number(match[4]);
+    const minutes = Number(match[5]);
+    const seconds = Number(match[6]);
+    if (hours > 23 || minutes > 59 || seconds > 59) {
+      throw new BadRequestError(
+        `Invalid time component in ${paramName}.`,
+        'INVALID_DATE_FILTER'
+      );
+    }
+  }
+
+  if (match[10] !== undefined) {
+    const tzHours = Number(match[10]);
+    const tzMinutes = Number(match[11]);
+    if (tzHours > 23 || tzMinutes > 59) {
+      throw new BadRequestError(
+        `Invalid timezone offset in ${paramName}.`,
+        'INVALID_DATE_FILTER'
+      );
+    }
+  }
+
+  const parsed = new Date(trimmed);
+  if (Number.isNaN(parsed.getTime())) {
+    throw new BadRequestError(`Invalid ${paramName} parameter.`, 'INVALID_DATE_FILTER');
+  }
+
+  return parsed;
+}
+
+/**
+ * Validates startDate and endDate analytics filters, enforcing valid calendar dates,
+ * chronological ordering (startDate <= endDate), and a maximum 366-day query window.
+ */
+export function parseAndValidateAnalyticsDateRange(
+  rawStartDate: unknown,
+  rawEndDate: unknown
+): { startDate?: Date; endDate?: Date } {
+  const startDate = parseSingleAnalyticsDate(rawStartDate, 'startDate');
+  const endDate = parseSingleAnalyticsDate(rawEndDate, 'endDate');
+
+  if (startDate && endDate) {
+    if (startDate.getTime() > endDate.getTime()) {
+      throw new BadRequestError(
+        'startDate must be before or equal to endDate.',
+        'INVALID_DATE_RANGE'
+      );
+    }
+    if (endDate.getTime() - startDate.getTime() > MAX_ANALYTICS_DATE_RANGE_MS) {
+      throw new BadRequestError(
+        `Analytics date range cannot exceed ${MAX_ANALYTICS_DATE_RANGE_DAYS} days.`,
+        'ANALYTICS_DATE_RANGE_TOO_LARGE'
+      );
+    }
+  }
+
+  return { startDate, endDate };
+}
+
+/**
+ * Returns traffic-only promotional analytics for an event or specific campaign.
+ * STRICT: Excludes all sales, revenue, tickets, and conversions.
+ */
+export async function getEventPromotionalAnalytics(
+  eventId: string,
+  options: {
+    linkId?: string;
+    startDate?: Date;
+    endDate?: Date;
+  } = {}
+) {
+  const { linkId } = options;
+  const { startDate, endDate } = parseAndValidateAnalyticsDateRange(
+    options.startDate,
+    options.endDate
+  );
+
+  // 1. Where clauses for clicks and visitor-days
+  const clickWhere: Prisma.PromotionClickWhereInput = { eventId };
+  const dayWhere: Prisma.PromotionVisitorDayWhereInput = { eventId };
+
+  if (linkId) {
+    clickWhere.promotionLinkId = linkId;
+    dayWhere.promotionLinkId = linkId;
+  }
+
+  let dateFilter: Prisma.DateTimeFilter | undefined;
+  if (startDate || endDate) {
+    dateFilter = {};
+    if (startDate) dateFilter.gte = startDate;
+    if (endDate) dateFilter.lte = endDate;
+
+    clickWhere.clickedAt = dateFilter;
+    dayWhere.visitDate = dateFilter;
+  }
+
+  // 2. Total clicks
+  const totalClicks = await prisma.promotionClick.count({ where: clickWhere });
+
+  // 3. Unique visitors (distinct canonicalVisitorId in PromotionVisitorDay)
+  const uniqueVisitorRows = await prisma.promotionVisitorDay.findMany({
+    where: dayWhere,
+    select: { canonicalVisitorId: true },
+    distinct: ['canonicalVisitorId'],
+  });
+  const uniqueVisitors = uniqueVisitorRows.length;
+
+  // 4. Daily visits breakdown (clicks & unique visitors per day)
+  const dailyVisitorDays = await prisma.promotionVisitorDay.findMany({
+    where: dayWhere,
+    orderBy: { visitDate: 'asc' },
+  });
+
+  const dailyMap = new Map<string, { date: string; clicks: number; visitors: Set<string> }>();
+  for (const row of dailyVisitorDays) {
+    const key = row.visitDate.toISOString().slice(0, 10);
+    if (!dailyMap.has(key)) {
+      dailyMap.set(key, { date: key, clicks: 0, visitors: new Set() });
+    }
+    const entry = dailyMap.get(key)!;
+    entry.clicks += row.clickCount;
+    entry.visitors.add(row.canonicalVisitorId);
+  }
+
+  const dailyVisits = Array.from(dailyMap.values()).map((e) => ({
+    date: e.date,
+    clicks: e.clicks,
+    uniqueVisitors: e.visitors.size,
+  }));
+
+  // 5. Top Referrers
+  const referrerClicks = await prisma.promotionClick.groupBy({
+    by: ['referrer'],
+    where: {
+      ...clickWhere,
+      referrer: { not: null },
+    },
+    _count: { _all: true },
+    orderBy: { _count: { referrer: 'desc' } },
+    take: 10,
+  });
+
+  const topReferrers = referrerClicks.map((r) => ({
+    referrer: r.referrer || 'Direct / None',
+    clicks: r._count._all,
+  }));
+
+  // 6. Top UTM Sources
+  const utmSources = await prisma.promotionClick.groupBy({
+    by: ['utmSource'],
+    where: {
+      ...clickWhere,
+      utmSource: { not: null },
+    },
+    _count: { _all: true },
+    orderBy: { _count: { utmSource: 'desc' } },
+    take: 10,
+  });
+
+  // 7. Per-Link Traffic Breakdown (if querying event-wide)
+  let linksBreakdown: Array<{
+    linkId: string;
+    name: string;
+    type: PromotionLinkType;
+    primarySlug: string | null;
+    totalClicks: number;
+    uniqueVisitors: number;
+  }> = [];
+
+  if (!linkId) {
+    const links = await prisma.promotionLink.findMany({
+      where: { eventId, status: { not: 'ARCHIVED' } },
+      include: {
+        slugRegistry: { where: { isPrimary: true } },
+      },
+    });
+
+    const linkStats = await Promise.all(
+      links.map(async (l) => {
+        const clicks = await prisma.promotionClick.count({
+          where: {
+            promotionLinkId: l.id,
+            ...(dateFilter ? { clickedAt: dateFilter } : {}),
+          },
+        });
+        const visitors = await prisma.promotionVisitorDay.findMany({
+          where: {
+            promotionLinkId: l.id,
+            ...(dateFilter ? { visitDate: dateFilter } : {}),
+          },
+          select: { canonicalVisitorId: true },
+          distinct: ['canonicalVisitorId'],
+        });
+        return {
+          linkId: l.id,
+          name: l.name,
+          type: l.type,
+          primarySlug: l.slugRegistry[0]?.slug || null,
+          totalClicks: clicks,
+          uniqueVisitors: visitors.length,
+        };
+      })
+    );
+    linksBreakdown = linkStats;
+  }
+
+  return {
+    traffic: {
+      totalClicks,
+      uniqueVisitors,
+      dailyVisits,
+      topReferrers,
+      utmBreakdown: utmSources.map((u) => ({
+        source: u.utmSource,
+        clicks: u._count._all,
+      })),
+      linksBreakdown: linksBreakdown.length > 0 ? linksBreakdown : undefined,
+    },
+  };
+}
+
+/**
+ * Returns traffic-only analytics strictly for a Host's assigned personal link.
+ * STRICT ISOLATION: Host cannot see any other links, hosts, attendees, buyers, or financials.
+ */
+export async function getHostPromotionalAnalytics(
+  eventId: string,
+  userId: string,
+  options: {
+    startDate?: Date;
+    endDate?: Date;
+  } = {}
+) {
+  const { startDate, endDate } = parseAndValidateAnalyticsDateRange(
+    options.startDate,
+    options.endDate
+  );
+
+  // Find host member record
+  const hostMember = await prisma.eventTeamMember.findUnique({
+    where: {
+      eventId_userId: {
+        eventId,
+        userId,
+      },
+    },
+  });
+
+  if (!hostMember || hostMember.role !== 'HOST' || hostMember.status !== 'ACTIVE') {
+    throw new ForbiddenError('Active Event Host membership required to view Host analytics.');
+  }
+
+  // Find host's personal link
+  const hostLink = await prisma.promotionLink.findFirst({
+    where: {
+      eventId,
+      hostMemberId: hostMember.id,
+      status: { not: 'ARCHIVED' },
+    },
+    include: {
+      slugRegistry: {
+        where: { isPrimary: true },
+      },
+    },
+  });
+
+  if (!hostLink) {
+    throw new NotFoundError('No active promotional link assigned to this Host.');
+  }
+
+  const primarySlug = hostLink.slugRegistry[0]?.slug || null;
+
+  let dateFilter: Prisma.DateTimeFilter | undefined;
+  if (startDate || endDate) {
+    dateFilter = {};
+    if (startDate) dateFilter.gte = startDate;
+    if (endDate) dateFilter.lte = endDate;
+  }
+
+  // Query stats strictly scoped to hostLink.id
+  const totalClicks = await prisma.promotionClick.count({
+    where: {
+      promotionLinkId: hostLink.id,
+      ...(dateFilter ? { clickedAt: dateFilter } : {}),
+    },
+  });
+
+  const uniqueVisitorRows = await prisma.promotionVisitorDay.findMany({
+    where: {
+      promotionLinkId: hostLink.id,
+      ...(dateFilter ? { visitDate: dateFilter } : {}),
+    },
+    select: { canonicalVisitorId: true },
+    distinct: ['canonicalVisitorId'],
+  });
+
+  const dailyVisitorDays = await prisma.promotionVisitorDay.findMany({
+    where: {
+      promotionLinkId: hostLink.id,
+      ...(dateFilter ? { visitDate: dateFilter } : {}),
+    },
+    orderBy: { visitDate: 'asc' },
+  });
+
+  const dailyMap = new Map<string, { date: string; clicks: number; visitors: Set<string> }>();
+  for (const row of dailyVisitorDays) {
+    const key = row.visitDate.toISOString().slice(0, 10);
+    if (!dailyMap.has(key)) {
+      dailyMap.set(key, { date: key, clicks: 0, visitors: new Set() });
+    }
+    const entry = dailyMap.get(key)!;
+    entry.clicks += row.clickCount;
+    entry.visitors.add(row.canonicalVisitorId);
+  }
+
+  const dailyVisits = Array.from(dailyMap.values()).map((e) => ({
+    date: e.date,
+    clicks: e.clicks,
+    uniqueVisitors: e.visitors.size,
+  }));
+
+  const referrerClicks = await prisma.promotionClick.groupBy({
+    by: ['referrer'],
+    where: {
+      promotionLinkId: hostLink.id,
+      referrer: { not: null },
+      ...(dateFilter ? { clickedAt: dateFilter } : {}),
+    },
+    _count: { _all: true },
+    orderBy: { _count: { referrer: 'desc' } },
+    take: 5,
+  });
+
+  return {
+    link: {
+      id: hostLink.id,
+      name: hostLink.name,
+      primarySlug,
+      shortUrl: primarySlug ? `/r/${primarySlug}` : null,
+      status: hostLink.status,
+    },
+    traffic: {
+      totalClicks,
+      uniqueVisitors: uniqueVisitorRows.length,
+      dailyVisits,
+      topReferrers: referrerClicks.map((r) => ({
+        referrer: r.referrer || 'Direct / None',
+        clicks: r._count._all,
+      })),
+    },
+  };
+}
+

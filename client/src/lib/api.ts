@@ -25,6 +25,19 @@ import {
   WithdrawalResponse,
   StripeConnectCountry,
   OrganizerOrdersResponse,
+  EventTeamRole,
+  EventAdminPermissions,
+  EventTeamMemberItem,
+  EventTeamInvitationItem,
+  EventTeamData,
+  TeamInvitationMetadata,
+  AcceptTeamInvitationResult,
+  PromotionLinkItem,
+  PromotionLinkStatus,
+  EventPromotionalAnalytics,
+  CustomizeSlugResult,
+  HostAssignedEventItem,
+  HostPromotionalAnalytics,
 } from '../types';
 
 export interface EventStaffMember {
@@ -228,6 +241,7 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
   if (!response.ok || !json.success) {
     const message =
       json.error?.message ||
+      (json as any)?.message ||
       (json.data as any)?.message ||
       'An unexpected error occurred';
     const statusCode = json.error?.statusCode || response.status;
@@ -236,7 +250,7 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
     throw new ApiError(message, statusCode, json.error?.details, json.data, code);
   }
 
-  return json.data;
+  return (json as any).data !== undefined ? (json as any).data : (json as any);
 }
 
 export interface UploadProgressPayload {
@@ -984,6 +998,169 @@ export const api = {
         headers: payload.idempotencyKey ? { 'Idempotency-Key': payload.idempotencyKey } : undefined,
         body: JSON.stringify(payload),
       }),
+  },
+  team: {
+    getTeam: async (eventId: string): Promise<EventTeamData> => {
+      const res = await request<{ team: EventTeamData }>(`/events/${eventId}/team`);
+      return res.team;
+    },
+    invite: async (
+      eventId: string,
+      data: {
+        email: string;
+        role: EventTeamRole;
+        permissions?: Partial<EventAdminPermissions> | null;
+      }
+    ): Promise<EventTeamInvitationItem> => {
+      const res = await request<{ invitation: EventTeamInvitationItem }>(
+        `/events/${eventId}/team/invitations`,
+        {
+          method: 'POST',
+          body: JSON.stringify(data),
+        }
+      );
+      return res.invitation;
+    },
+    resendInvitation: async (
+      eventId: string,
+      invitationId: string
+    ): Promise<EventTeamInvitationItem> => {
+      const res = await request<{ invitation: EventTeamInvitationItem }>(
+        `/events/${eventId}/team/invitations/${invitationId}/resend`,
+        { method: 'POST' }
+      );
+      return res.invitation;
+    },
+    revokeInvitation: async (
+      eventId: string,
+      invitationId: string
+    ): Promise<{ success: boolean; message: string }> => {
+      return request<{ success: boolean; message: string }>(
+        `/events/${eventId}/team/invitations/${invitationId}`,
+        { method: 'DELETE' }
+      );
+    },
+    updateMember: async (
+      eventId: string,
+      memberId: string,
+      data: {
+        role?: EventTeamRole;
+        status?: 'ACTIVE' | 'INACTIVE';
+        permissions?: Partial<EventAdminPermissions> | null;
+      }
+    ): Promise<EventTeamMemberItem> => {
+      const res = await request<{ member: EventTeamMemberItem }>(
+        `/events/${eventId}/team/members/${memberId}`,
+        {
+          method: 'PATCH',
+          body: JSON.stringify(data),
+        }
+      );
+      return res.member;
+    },
+    revokeMember: async (
+      eventId: string,
+      memberId: string
+    ): Promise<{ success: boolean; message: string }> => {
+      return request<{ success: boolean; message: string }>(
+        `/events/${eventId}/team/members/${memberId}`,
+        { method: 'DELETE' }
+      );
+    },
+    inspectInvitation: async (token: string): Promise<TeamInvitationMetadata> => {
+      const res = await request<{ invitation: TeamInvitationMetadata }>(
+        `/team/invitations/${encodeURIComponent(token)}`
+      );
+      return res.invitation;
+    },
+    acceptInvitation: async (token: string): Promise<AcceptTeamInvitationResult> => {
+      const res = await request<{ membership: AcceptTeamInvitationResult }>(
+        `/team/invitations/${encodeURIComponent(token)}/accept`,
+        { method: 'POST' }
+      );
+      return res.membership;
+    },
+  },
+  promotions: {
+    getLinks: async (eventId: string): Promise<PromotionLinkItem[]> => {
+      const res = await request<{ links: PromotionLinkItem[] }>(
+        `/events/${eventId}/promotions/links`
+      );
+      return res.links;
+    },
+    createCampaignLink: async (
+      eventId: string,
+      data: { name: string; slug?: string }
+    ): Promise<PromotionLinkItem> => {
+      const res = await request<{ link: PromotionLinkItem }>(
+        `/events/${eventId}/promotions/links`,
+        {
+          method: 'POST',
+          body: JSON.stringify(data),
+        }
+      );
+      return res.link;
+    },
+    updateLink: async (
+      eventId: string,
+      linkId: string,
+      data: { name?: string; status?: PromotionLinkStatus }
+    ): Promise<PromotionLinkItem> => {
+      const res = await request<{ link: PromotionLinkItem }>(
+        `/events/${eventId}/promotions/links/${linkId}`,
+        {
+          method: 'PATCH',
+          body: JSON.stringify(data),
+        }
+      );
+      return res.link;
+    },
+    customizeSlug: async (
+      eventId: string,
+      linkId: string,
+      slug: string
+    ): Promise<CustomizeSlugResult> => {
+      return request<CustomizeSlugResult>(
+        `/events/${eventId}/promotions/links/${linkId}/slug`,
+        {
+          method: 'POST',
+          body: JSON.stringify({ slug }),
+        }
+      );
+    },
+    getAnalytics: async (
+      eventId: string,
+      params?: { linkId?: string; startDate?: string; endDate?: string }
+    ): Promise<EventPromotionalAnalytics> => {
+      const query = new URLSearchParams();
+      if (params?.linkId) query.append('linkId', params.linkId);
+      if (params?.startDate) query.append('startDate', params.startDate);
+      if (params?.endDate) query.append('endDate', params.endDate);
+      const queryStr = query.toString() ? `?${query.toString()}` : '';
+
+      const res = await request<{ analytics: EventPromotionalAnalytics }>(
+        `/events/${eventId}/promotions/analytics${queryStr}`
+      );
+      return res.analytics;
+    },
+  },
+  host: {
+    getEvents: async (): Promise<HostAssignedEventItem[]> => {
+      const res = await request<{ events: HostAssignedEventItem[] }>('/host/events');
+      return res.events;
+    },
+    getAnalytics: async (eventId: string): Promise<HostPromotionalAnalytics> => {
+      return request<HostPromotionalAnalytics>(`/host/events/${eventId}/analytics`);
+    },
+    customizeSlug: async (
+      eventId: string,
+      slug: string
+    ): Promise<CustomizeSlugResult> => {
+      return request<CustomizeSlugResult>(`/host/events/${eventId}/slug`, {
+        method: 'PATCH',
+        body: JSON.stringify({ slug }),
+      });
+    },
   },
 };
 

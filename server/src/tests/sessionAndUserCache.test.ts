@@ -169,13 +169,14 @@ describe('Server-Side Redis Sessions & 30-Second Redis User Authorization Cache'
 
   describe('2 & 3. 30-Second Redis User Authorization Cache Hits & Expiration', () => {
     let userId: string;
+    let userEmail: string;
     let sessionCookie: string;
     let csrfToken: string;
 
     beforeAll(async () => {
-      const email = `cache_hit_${Date.now()}@outside.vip`;
+      userEmail = `cache_hit_${Date.now()}@outside.vip`;
       const regRes = await request(app).post('/api/auth/register').send({
-        email,
+        email: userEmail,
         password: 'OutsidePassword2026!',
         name: 'Cache Hit Organizer',
       });
@@ -184,7 +185,7 @@ describe('Server-Side Redis Sessions & 30-Second Redis User Authorization Cache'
 
       const initialCookie = extractCookieFromResponse(regRes)!;
       const initialCsrf = regRes.body.data.csrfToken;
-      const otp = getLatestVerificationEmail(email)!.code;
+      const otp = getLatestVerificationEmail(userEmail)!.code;
 
       const verifyRes = await request(app)
         .post('/api/auth/verify-email')
@@ -197,7 +198,7 @@ describe('Server-Side Redis Sessions & 30-Second Redis User Authorization Cache'
       csrfToken = verifyRes.body.data.csrfToken;
     });
 
-    it('stores only { userId, role, emailVerified, accountStatus } in user_auth_cache:<userId> and serves ordinary authenticated requests with zero User table lookups', async () => {
+    it('stores { userId, email, role, emailVerified, accountStatus } in user_auth_cache:<userId> and serves ordinary authenticated requests with zero User table lookups', async () => {
       const redis = getRedisClient();
       const rawCache = await redis.get(`${USER_AUTH_CACHE_PREFIX}${userId}`);
       expect(rawCache).not.toBeNull();
@@ -205,12 +206,14 @@ describe('Server-Side Redis Sessions & 30-Second Redis User Authorization Cache'
       const parsedCache = JSON.parse(rawCache!);
       expect(Object.keys(parsedCache).sort()).toEqual([
         'accountStatus',
+        'email',
         'emailVerified',
         'role',
         'userId',
       ]);
       expect(parsedCache).toEqual({
         userId,
+        email: userEmail.toLowerCase(),
         role: 'ATTENDEE',
         emailVerified: true,
         accountStatus: 'ACTIVE',
@@ -239,6 +242,34 @@ describe('Server-Side Redis Sessions & 30-Second Redis User Authorization Cache'
       expect(dashRes2.status).toBe(200);
 
       expect(getUserDbReadCount()).toBe(0);
+    });
+
+    it('treats legacy or incomplete cached records without email as cache misses and refreshes from the database', async () => {
+      const redis = getRedisClient();
+      // Inject legacy cache record missing email
+      const legacyPayload = {
+        userId,
+        role: 'ATTENDEE',
+        emailVerified: true,
+        accountStatus: 'ACTIVE',
+      };
+      await redis.setPx(`${USER_AUTH_CACHE_PREFIX}${userId}`, JSON.stringify(legacyPayload), 30000);
+
+      // getCachedUserAuth must return null for legacy payload missing email and purge legacy key
+      const cached = await getCachedUserAuth(userId);
+      expect(cached).toBeNull();
+
+      resetUserDbReadCount();
+      const res = await request(app)
+        .get('/api/organizer/events')
+        .set('Cookie', sessionCookie);
+      expect(res.status).toBe(200);
+      expect(getUserDbReadCount()).toBe(1);
+
+      // Cache is repopulated with authoritative email from the database
+      const freshCache = await getCachedUserAuth(userId);
+      expect(freshCache).not.toBeNull();
+      expect(freshCache!.email).toBe(userEmail.toLowerCase());
     });
 
     it('re-queries PostgreSQL once when the 30-second user cache expires and repopulates the cache', async () => {
@@ -287,6 +318,7 @@ describe('Server-Side Redis Sessions & 30-Second Redis User Authorization Cache'
       const cachedBefore = await getCachedUserAuth(userId);
       expect(cachedBefore).toEqual({
         userId,
+        email: adminEmail.toLowerCase(),
         role: Role.ATTENDEE,
         emailVerified: false,
         accountStatus: AccountStatus.ACTIVE,
@@ -316,6 +348,7 @@ describe('Server-Side Redis Sessions & 30-Second Redis User Authorization Cache'
       const cachedAfter = await getCachedUserAuth(userId);
       expect(cachedAfter).toEqual({
         userId,
+        email: adminEmail.toLowerCase(),
         role: Role.ADMIN,
         emailVerified: true,
         accountStatus: AccountStatus.ACTIVE,
@@ -332,6 +365,7 @@ describe('Server-Side Redis Sessions & 30-Second Redis User Authorization Cache'
         dummyUserId,
         async () => ({
           userId: dummyUserId,
+          email: 'race_user@outside.vip',
           role: Role.ATTENDEE,
           emailVerified: false,
           accountStatus: AccountStatus.ACTIVE,

@@ -1,79 +1,85 @@
 import { api } from "@/lib/api";
-//import { OrderStatus } from "@/types";
+import { OrderStatus } from "@/types";
 import { useQuery } from "@tanstack/react-query";
 import { AlertCircle, ChevronDown, Search, X } from "lucide-react";
 import { useEffect, useState } from "react";
-import {  useSearchParams } from "react-router-dom";
+import { useSearchParams } from "react-router-dom";
 
 export const OrdersPage: React.FC = () => {
   const [searchParams, setSearchParams] = useSearchParams();
 
- // const initialStatus =(searchParams.get("status") as OrderStatus) || undefined;
-  //const initialEventId = searchParams.get("eventid") || "";
+  const initialStatus = (searchParams.get("status") as OrderStatus) || undefined;
+  const initialEventId = searchParams.get("eventid") || "";
   const initialSearch = searchParams.get("search") || "";
-  const initialPage = Math.max(1,parseInt(searchParams.get("page") || "1", 10) || 1,);
-  //const initialSortBy = searchParams.get("sort") || "date_asc";
+  const initialPage = Math.max(1, parseInt(searchParams.get("page") || "1", 10) || 1);
+  const initialSortBy = searchParams.get("sort") || "date_asc";
 
   const [searchTerm, setSearchTerm] = useState(initialSearch);
-  //const [eventId, setEventId] = useState(initialEventId);
-  //const [selectedStatus, setSelectedStatus] = useState<OrderStatus | undefined>(initialStatus);
+  const [eventId, setEventId] = useState(initialEventId);
+  const [selectedStatus, setSelectedStatus] = useState<OrderStatus | undefined>(initialStatus);
   const [currentPage, setCurrentPage] = useState<number>(initialPage);
-  //const [sortBy, setSortBy] = useState<string>(initialSortBy);
+  const [sortBy, setSortBy] = useState<string>(initialSortBy);
 
   useEffect(() => {
     const params = new URLSearchParams();
 
-    //if (selectedStatus) params.set("status", selectedStatus);
-    //if (eventId.trim()) params.set("eventid", searchTerm.trim());
+    if (selectedStatus) params.set("status", selectedStatus);
+    if (eventId.trim()) params.set("eventid", eventId.trim());
     if (searchTerm.trim()) params.set("search", searchTerm.trim());
-   // if (sortBy && sortBy !== "date_asc") params.set("sort", sortBy);
+    if (sortBy && sortBy !== "date_asc") params.set("sort", sortBy);
     if (currentPage > 1) params.set("page", currentPage.toString());
-    setSearchParams(params, { replace: true });}, [ searchTerm,currentPage,setSearchParams]);
+    setSearchParams(params, { replace: true });
+  }, [searchTerm, eventId, selectedStatus, sortBy, currentPage, setSearchParams]);
 
-    const { data, isLoading, error } = useQuery({
-        queryKey: ['events-discover', searchTerm,  currentPage],
-        queryFn: () =>
-          api.organizer.getOrders({
-           // status: selectedStatus,
-           // eventId,
-            search: searchTerm.trim() || undefined,        
-            page: currentPage,
-            limit: 12,
-            sortOrder: 'asc',
-          }),
-      });
+  const { data, isLoading, error, refetch } = useQuery({
+    queryKey: ["organizer-orders", searchTerm, eventId, selectedStatus, sortBy, currentPage],
+    queryFn: () =>
+      api.organizer.getOrders({
+        status: selectedStatus,
+        eventId: eventId.trim() || undefined,
+        search: searchTerm.trim() || undefined,
+        page: currentPage,
+        limit: 12,
+        sortOrder: "asc",
+      }),
+  });
 
-    const order = data?.orders;
-    console.log(order);
+  const orders = data?.orders;
 
   const handleSearchChange = (term: string) => {
     setSearchTerm(term);
     setCurrentPage(1);
   };
 
-  //  const handleSortChange = (sort: string) => {
-  //   setSortBy(sort);
-  //   setCurrentPage(1);
-  // };
+  const handleStatusChange = (status: OrderStatus | undefined) => {
+    setSelectedStatus(status);
+    setCurrentPage(1);
+  };
 
-  // const handleStatusChange = (status: or) => {
-  //   setSelectedStatus(status);
-  //   setCurrentPage(1);
-  // };
+  const handleSortChange = (sort: string) => {
+    setSortBy(sort);
+    setCurrentPage(1);
+  };
 
-  // const clearFilters = () => {
-  //   setSearchTerm('');
-  //   setSelectedStatus(undefined);
-  //   setSortBy('date_asc');
-  //   setCurrentPage(1);
-  // };
+  const clearFilters = () => {
+    setSearchTerm("");
+    setEventId("");
+    setSelectedStatus(undefined);
+    setSortBy("date_asc");
+    setCurrentPage(1);
+  };
 
-  //const orders = data?.orders || [];
-  //const pagination = data?.pagination;
-  //const totalPages = pagination?.totalPages || 1;
-  //const totalorders = pagination?.total ?? orders.length;
-  
-if (isLoading) {
+  const pagination = data?.pagination;
+  const totalPages = pagination?.totalPages || 1;
+  const totalOrders = pagination?.total ?? (orders?.length ?? 0);
+
+  void refetch;
+  void handleSortChange;
+  void clearFilters;
+  void totalPages;
+  void totalOrders;
+
+  if (isLoading) {
     return (
       <div className="min-h-screen bg-white">
         <div className="bg-[#08090C] text-white py-3 px-4 text-center text-xs font-mono">
@@ -87,7 +93,8 @@ if (isLoading) {
       </div>
     );
   }
-  if (error || !order) {
+
+  if (error || !orders) {
     return (
       <div className="min-h-screen bg-[#08090C] text-white flex items-center justify-center p-4">
         <div className="max-w-md w-full bg-[#0E1015] border border-white/10 rounded-2xl p-8 text-center space-y-4">
@@ -100,6 +107,7 @@ if (isLoading) {
       </div>
     );
   }
+
   return (
     <div className="p-6 space-y-6">
       <div className="flex justify-between items-center">
@@ -126,19 +134,24 @@ if (isLoading) {
           )}
         </div>
 
-        <select
-          // value={selectedStatus}
-          className="appearance-none font-sans text-sm sm:text-base font-semibold text-stone-900 bg-white border border-stone-300 rounded-lg pl-4 pr-10 py-2 sm:py-2.5 shadow-2xs hover:border-stone-900 focus:outline-none focus:border-stone-900 transition-colors cursor-pointer"
-          aria-label="Filter events by city"
-        >
-          <option value="date_asc">Paid</option>
-          <option value="date_desc">Refunded</option>
-          <option value="price_asc">Canceled: Low to High</option>
-          <option value="price_desc">RSVP: High to Low</option>
-          <option value="price_desc">Transferred</option>
-          <option value="price_desc">Waitlist</option>
-        </select>
-        <ChevronDown className="absolute right-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-stone-500 pointer-events-none" />
+        <div className="relative">
+          <select
+            value={selectedStatus || ""}
+            onChange={(e) =>
+              handleStatusChange((e.target.value as OrderStatus) || undefined)
+            }
+            className="appearance-none font-sans text-sm sm:text-base font-semibold text-stone-900 bg-white border border-stone-300 rounded-lg pl-4 pr-10 py-2 sm:py-2.5 shadow-2xs hover:border-stone-900 focus:outline-none focus:border-stone-900 transition-colors cursor-pointer"
+            aria-label="Filter orders by status"
+          >
+            <option value="">All Statuses</option>
+            <option value="COMPLETED">Paid</option>
+            <option value="PENDING">Pending</option>
+            <option value="REFUNDED">Refunded</option>
+            <option value="CANCELLED">Cancelled</option>
+            <option value="EXPIRED">Expired</option>
+          </select>
+          <ChevronDown className="absolute right-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-stone-500 pointer-events-none" />
+        </div>
       </div>
       <div className="overflow-x-auto">
         <table className="table table-zebra w-full">
@@ -183,7 +196,7 @@ if (isLoading) {
           </thead>
 
           <tbody>
-            {order?.map((order) => (
+            {orders.map((order) => (
               <tr key={order.id}>
                 <td>{order.orderNumber}</td>
                 <td>{order.createdAt}</td>
