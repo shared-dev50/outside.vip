@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import request from 'supertest';
 import { app } from '../app.js';
 import { prisma } from '../db/prisma.js';
+import { getRedisClient } from '../lib/redis.js';
 import {
   VISITOR_COOKIE_NAME,
   COOKIE_MAX_AGE_SECONDS,
@@ -571,9 +572,12 @@ describe('Promotions & Short-Link Resolver System (Stage 1)', () => {
       expect(dayCount).toBe(0);
     });
 
-    it('deduplicates rapid repeat clicks from the same visitor within 15 minutes', async () => {
+    it('deduplicates rapid repeat clicks from the same visitor within 15 minutes across both PromotionClick and PromotionVisitorDay', async () => {
       const dedupVid = `vid_dedup_test_${Date.now()}`;
       const canonicalId = deriveCanonicalVisitorId(dedupVid);
+      const todayUtc = new Date(
+        Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), new Date().getUTCDate())
+      );
 
       // 1. Initial click
       await request(app)
@@ -589,7 +593,18 @@ describe('Promotions & Short-Link Resolver System (Stage 1)', () => {
       });
       expect(firstClicks).toBe(1);
 
-      // 2. Immediate second click
+      const firstVisitorDay = await prisma.promotionVisitorDay.findUnique({
+        where: {
+          promotionLinkId_canonicalVisitorId_visitDate: {
+            promotionLinkId: campaignLink1Id,
+            canonicalVisitorId: canonicalId,
+            visitDate: todayUtc,
+          },
+        },
+      });
+      expect(firstVisitorDay?.clickCount).toBe(1);
+
+      // 2. Immediate second click within 15 minutes
       await request(app)
         .get(`/r/${primaryCampaignSlug}`)
         .set('Cookie', `${VISITOR_COOKIE_NAME}=${dedupVid}`)
@@ -603,6 +618,86 @@ describe('Promotions & Short-Link Resolver System (Stage 1)', () => {
       });
       // Click count is still 1 because the second click was deduplicated within 15 minutes
       expect(secondClicks).toBe(1);
+
+      const secondVisitorDay = await prisma.promotionVisitorDay.findUnique({
+        where: {
+          promotionLinkId_canonicalVisitorId_visitDate: {
+            promotionLinkId: campaignLink1Id,
+            canonicalVisitorId: canonicalId,
+            visitDate: todayUtc,
+          },
+        },
+      });
+      // SEC-08: PromotionVisitorDay.clickCount also remains 1 (not inflated by duplicate clicks)
+      expect(secondVisitorDay?.clickCount).toBe(1);
+
+      // 3. Simulate expiration of the 15-minute Redis dedup window and send another click
+      const redis = getRedisClient();
+      await redis.del(`click_dedup:${canonicalId}:${campaignLink1Id}`);
+
+      await request(app)
+        .get(`/r/${primaryCampaignSlug}`)
+        .set('Cookie', `${VISITOR_COOKIE_NAME}=${dedupVid}`)
+        .expect(302);
+
+      const thirdClicks = await prisma.promotionClick.count({
+        where: {
+          promotionLinkId: campaignLink1Id,
+          canonicalVisitorId: canonicalId,
+        },
+      });
+      expect(thirdClicks).toBe(2);
+
+      const thirdVisitorDay = await prisma.promotionVisitorDay.findUnique({
+        where: {
+          promotionLinkId_canonicalVisitorId_visitDate: {
+            promotionLinkId: campaignLink1Id,
+            canonicalVisitorId: canonicalId,
+            visitDate: todayUtc,
+          },
+        },
+      });
+      expect(thirdVisitorDay?.clickCount).toBe(2);
+    });
+
+    it('keeps PromotionClick count and PromotionVisitorDay.clickCount at 1 under concurrent duplicate requests', async () => {
+      const concurrentVid = `vid_concurrent_dedup_${Date.now()}`;
+      const canonicalId = deriveCanonicalVisitorId(concurrentVid);
+      const todayUtc = new Date(
+        Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), new Date().getUTCDate())
+      );
+
+      // Fire 5 concurrent requests with the same visitor cookie
+      const responses = await Promise.all(
+        Array.from({ length: 5 }, () =>
+          request(app)
+            .get(`/r/${primaryCampaignSlug}`)
+            .set('Cookie', `${VISITOR_COOKIE_NAME}=${concurrentVid}`)
+        )
+      );
+
+      for (const r of responses) {
+        expect(r.status).toBe(302);
+      }
+
+      const rawClickCount = await prisma.promotionClick.count({
+        where: {
+          promotionLinkId: campaignLink1Id,
+          canonicalVisitorId: canonicalId,
+        },
+      });
+      expect(rawClickCount).toBe(1);
+
+      const visitorDay = await prisma.promotionVisitorDay.findUnique({
+        where: {
+          promotionLinkId_canonicalVisitorId_visitDate: {
+            promotionLinkId: campaignLink1Id,
+            canonicalVisitorId: canonicalId,
+            visitDate: todayUtc,
+          },
+        },
+      });
+      expect(visitorDay?.clickCount).toBe(1);
     });
   });
 

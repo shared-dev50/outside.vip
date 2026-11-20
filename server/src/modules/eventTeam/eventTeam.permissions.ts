@@ -58,6 +58,46 @@ export function hasEventPermission(
   return Boolean(parsed[permissionKey]);
 }
 
+/**
+ * Enforces that an Event Admin (non-owner) cannot grant any permission key
+ * that they do not personally possess.
+ */
+export function assertAdminPermissionCeiling(
+  callerPermissions: EventAdminPermissions | null | undefined,
+  requestedPermissions: unknown
+): void {
+  if (!requestedPermissions || typeof requestedPermissions !== 'object') {
+    return;
+  }
+
+  const rawObj = requestedPermissions as Record<string, unknown>;
+  const validKeys = Object.keys(DEFAULT_ADMIN_PERMISSIONS) as Array<keyof EventAdminPermissions>;
+
+  for (const [key, value] of Object.entries(rawObj)) {
+    if (!validKeys.includes(key as keyof EventAdminPermissions)) {
+      if (Boolean(value)) {
+        throw new ForbiddenError(`Access denied. Unknown or unauthorized permission '${key}'.`);
+      }
+      continue;
+    }
+    const permKey = key as keyof EventAdminPermissions;
+    if (Boolean(value) && (!callerPermissions || !callerPermissions[permKey])) {
+      throw new ForbiddenError(
+        `Access denied. You cannot grant the '${permKey}' permission because you do not possess it.`
+      );
+    }
+  }
+
+  const parsed = parseAdminPermissions(requestedPermissions);
+  for (const permKey of validKeys) {
+    if (parsed[permKey] && (!callerPermissions || !callerPermissions[permKey])) {
+      throw new ForbiddenError(
+        `Access denied. You cannot grant the '${permKey}' permission because you do not possess it.`
+      );
+    }
+  }
+}
+
 export interface EventAuthorizationContext {
   isOwner: boolean;
   isAdmin: boolean;

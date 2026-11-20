@@ -28,7 +28,7 @@ export async function handleInviteTeamMember(
     if (!user) throw new UnauthorizedError('Authentication required');
 
     const eventId = req.params.eventId;
-    await resolveEventAuthorization(eventId, user, 'canManageTeam');
+    const authCtx = await resolveEventAuthorization(eventId, user, 'canManageTeam');
 
     const { email, role, permissions } = req.body;
     if (!email || typeof email !== 'string') {
@@ -44,6 +44,13 @@ export async function handleInviteTeamMember(
       email,
       role,
       permissions: role === EventTeamRole.ADMIN ? permissions : null,
+      actor: {
+        userId: user.userId,
+        email: user.email,
+        isOwner: authCtx.isOwner,
+        memberId: authCtx.memberId,
+        permissions: authCtx.permissions,
+      },
     });
 
     res.status(201).json({
@@ -118,9 +125,15 @@ export async function handleResendTeamInvitation(
     if (!user) throw new UnauthorizedError('Authentication required');
 
     const { eventId, invitationId } = req.params;
-    await resolveEventAuthorization(eventId, user, 'canManageTeam');
+    const authCtx = await resolveEventAuthorization(eventId, user, 'canManageTeam');
 
-    const updated = await resendTeamInvitation(invitationId, eventId);
+    const updated = await resendTeamInvitation(invitationId, eventId, {
+      userId: user.userId,
+      email: user.email,
+      isOwner: authCtx.isOwner,
+      memberId: authCtx.memberId,
+      permissions: authCtx.permissions,
+    });
     res.json({
       success: true,
       invitation: updated,
@@ -144,9 +157,15 @@ export async function handleRevokeTeamInvitation(
     if (!user) throw new UnauthorizedError('Authentication required');
 
     const { eventId, invitationId } = req.params;
-    await resolveEventAuthorization(eventId, user, 'canManageTeam');
+    const authCtx = await resolveEventAuthorization(eventId, user, 'canManageTeam');
 
-    await revokeTeamInvitation(invitationId, eventId);
+    await revokeTeamInvitation(invitationId, eventId, {
+      userId: user.userId,
+      email: user.email,
+      isOwner: authCtx.isOwner,
+      memberId: authCtx.memberId,
+      permissions: authCtx.permissions,
+    });
     res.json({
       success: true,
       message: 'Invitation revoked',
@@ -170,14 +189,25 @@ export async function handleUpdateTeamMember(
     if (!user) throw new UnauthorizedError('Authentication required');
 
     const { eventId, memberId } = req.params;
-    await resolveEventAuthorization(eventId, user, 'canManageTeam');
+    const authCtx = await resolveEventAuthorization(eventId, user, 'canManageTeam');
 
     const { role, permissions, status } = req.body;
-    const updated = await updateTeamMember(memberId, eventId, {
-      role: role as EventTeamRole | undefined,
-      permissions,
-      status: status as TeamMemberStatus | undefined,
-    });
+    const updated = await updateTeamMember(
+      memberId,
+      eventId,
+      {
+        role: role as EventTeamRole | undefined,
+        permissions,
+        status: status as TeamMemberStatus | undefined,
+      },
+      {
+        userId: user.userId,
+        email: user.email,
+        isOwner: authCtx.isOwner,
+        memberId: authCtx.memberId,
+        permissions: authCtx.permissions,
+      }
+    );
 
     res.json({
       success: true,
@@ -202,9 +232,15 @@ export async function handleRevokeTeamMember(
     if (!user) throw new UnauthorizedError('Authentication required');
 
     const { eventId, memberId } = req.params;
-    await resolveEventAuthorization(eventId, user, 'canManageTeam');
+    const authCtx = await resolveEventAuthorization(eventId, user, 'canManageTeam');
 
-    await revokeTeamMember(memberId, eventId);
+    await revokeTeamMember(memberId, eventId, {
+      userId: user.userId,
+      email: user.email,
+      isOwner: authCtx.isOwner,
+      memberId: authCtx.memberId,
+      permissions: authCtx.permissions,
+    });
     res.json({
       success: true,
       message: 'Team member access revoked',

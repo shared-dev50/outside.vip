@@ -11,9 +11,19 @@ import {
 import {
   EventAdminPermissions,
   parseAdminPermissions,
+  assertAdminPermissionCeiling,
+  hasEventPermission,
 } from './eventTeam.permissions.js';
 import { sendTeamInvitationEmail } from '../../lib/email.service.js';
 import { isValidSlugFormat, RESERVED_SLUGS } from '../promotions/promotions.constants.js';
+
+export interface TeamActorContext {
+  userId: string;
+  email?: string;
+  isOwner: boolean;
+  memberId?: string;
+  permissions?: EventAdminPermissions | null;
+}
 
 export interface InviteTeamMemberParams {
   eventId: string;
@@ -21,6 +31,7 @@ export interface InviteTeamMemberParams {
   email: string;
   role: EventTeamRole;
   permissions?: EventAdminPermissions | null;
+  actor?: TeamActorContext;
 }
 
 export interface AcceptInvitationResult {
@@ -88,7 +99,7 @@ async function generateUniqueHostSlug(
  * Enforces email validation, duplicate active membership prevention, and deny-by-default permissions.
  */
 export async function inviteTeamMember(params: InviteTeamMemberParams) {
-  const { eventId, invitedByUserId, email, role, permissions } = params;
+  const { eventId, invitedByUserId, email, role, permissions, actor } = params;
   const normalizedEmail = normalizeEmail(email);
 
   if (!normalizedEmail || !normalizedEmail.includes('@')) {
@@ -127,16 +138,50 @@ export async function inviteTeamMember(params: InviteTeamMemberParams) {
     throw new BadRequestError('Event organizer is already the owner of this event');
   }
 
-  // 3. Prevent duplicate active memberships
+  const isOwner = actor ? actor.isOwner : event.organizerId === invitedByUserId;
+  let callerPermissions = actor?.permissions;
+
+  if (!isOwner) {
+    if (
+      (inviter?.email && normalizeEmail(inviter.email) === normalizedEmail) ||
+      (actor?.email && normalizeEmail(actor.email) === normalizedEmail) ||
+      (targetUser && targetUser.id === invitedByUserId)
+    ) {
+      throw new ForbiddenError('Event Admins cannot invite or modify their own team membership.');
+    }
+
+    if (callerPermissions === undefined) {
+      const inviterMember = await prisma.eventTeamMember.findUnique({
+        where: {
+          eventId_userId: {
+            eventId: event.id,
+            userId: invitedByUserId,
+          },
+        },
+      });
+      callerPermissions = inviterMember ? parseAdminPermissions(inviterMember.permissions) : null;
+    }
+
+    // Event Admins cannot grant permissions they do not personally hold
+    if (role === EventTeamRole.ADMIN || (permissions !== undefined && permissions !== null)) {
+      assertAdminPermissionCeiling(callerPermissions, permissions);
+    }
+  }
+
+  // 3. Prevent duplicate active memberships & prevent Event Admins from modifying existing Event Admins
   if (targetUser) {
     const activeMember = await prisma.eventTeamMember.findUnique({
       where: {
         eventId_userId: {
-          eventId,
+          eventId: event.id,
           userId: targetUser.id,
         },
       },
     });
+
+    if (!isOwner && activeMember && activeMember.role === EventTeamRole.ADMIN) {
+      throw new ForbiddenError('Only the event owner can modify an Event Admin membership.');
+    }
 
     if (activeMember && activeMember.status === 'ACTIVE') {
       throw new ConflictError(
@@ -205,7 +250,6 @@ export async function inviteTeamMember(params: InviteTeamMemberParams) {
     role: invitation.role,
     status: invitation.status,
     expiresAt: invitation.expiresAt,
-    token: rawToken, // Expose token for automated test assertions
   };
 }
 
@@ -298,6 +342,7 @@ export async function acceptTeamInvitation(
           id: true,
           slug: true,
           title: true,
+          organizerId: true,
         },
       },
     },
@@ -358,6 +403,47 @@ export async function acceptTeamInvitation(
     throw new ForbiddenError('Signed-in account email does not match invitation recipient');
   }
 
+  // Enforce delegation ceiling and self/admin modification protection if invited by an Event Admin
+  if (invitation.invitedByUserId !== invitation.event.organizerId) {
+    if (user.userId === invitation.invitedByUserId) {
+      throw new ForbiddenError('Event Admins cannot accept an invitation to modify their own membership.');
+    }
+
+    const existingRecipientMember = await prisma.eventTeamMember.findUnique({
+      where: {
+        eventId_userId: {
+          eventId: invitation.eventId,
+          userId: user.userId,
+        },
+      },
+    });
+
+    if (existingRecipientMember && existingRecipientMember.role === EventTeamRole.ADMIN) {
+      throw new ForbiddenError('Only the event owner can modify an Event Admin membership.');
+    }
+
+    const inviterMember = await prisma.eventTeamMember.findUnique({
+      where: {
+        eventId_userId: {
+          eventId: invitation.eventId,
+          userId: invitation.invitedByUserId,
+        },
+      },
+    });
+
+    if (
+      !inviterMember ||
+      inviterMember.status !== TeamMemberStatus.ACTIVE ||
+      !hasEventPermission(inviterMember, 'canManageTeam')
+    ) {
+      throw new ForbiddenError('The administrator who issued this invitation no longer has team management authority.');
+    }
+
+    if (invitation.role === EventTeamRole.ADMIN || invitation.permissions) {
+      assertAdminPermissionCeiling(parseAdminPermissions(inviterMember.permissions), invitation.permissions);
+    }
+  }
+
   // Execute acceptance in an atomic transaction
   return await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
     // 1. Mark invitation accepted
@@ -368,6 +454,39 @@ export async function acceptTeamInvitation(
         acceptedAt: new Date(),
       },
     });
+
+    // 1b. If transitioning an existing HOST member to a non-HOST role (e.g., ADMIN),
+    // archive their active or disabled personal Host promotional links first within the same
+    // transaction so the trg_protect_host_membership_mutation database trigger is satisfied
+    // and historical slug aliases and analytics remain intact.
+    if (invitation.role !== EventTeamRole.HOST) {
+      const existingMember = await tx.eventTeamMember.findUnique({
+        where: {
+          eventId_userId: {
+            eventId: invitation.eventId,
+            userId: user.userId,
+          },
+        },
+      });
+
+      if (existingMember && existingMember.role === EventTeamRole.HOST) {
+        await tx.promotionLink.updateMany({
+          where: {
+            hostMemberId: existingMember.id,
+            eventId: invitation.eventId,
+            status: { not: 'ARCHIVED' },
+          },
+          data: {
+            status: 'ARCHIVED',
+          },
+        });
+      }
+    }
+
+    const effectivePermissions =
+      invitation.role === EventTeamRole.ADMIN
+        ? (parseAdminPermissions(invitation.permissions) as any)
+        : Prisma.DbNull;
 
     // 2. Upsert active EventTeamMember
     const member = await tx.eventTeamMember.upsert({
@@ -382,13 +501,13 @@ export async function acceptTeamInvitation(
         userId: user.userId,
         role: invitation.role,
         status: TeamMemberStatus.ACTIVE,
-        permissions: invitation.permissions ?? Prisma.DbNull,
+        permissions: effectivePermissions,
         invitedById: invitation.invitedByUserId,
       },
       update: {
         role: invitation.role,
         status: TeamMemberStatus.ACTIVE,
-        permissions: invitation.permissions ?? Prisma.DbNull,
+        permissions: effectivePermissions,
       },
     });
 
@@ -493,13 +612,18 @@ export async function acceptTeamInvitation(
 /**
  * Resends a pending team invitation with refreshed token and extended expiration.
  */
-export async function resendTeamInvitation(invitationId: string, eventId: string) {
+export async function resendTeamInvitation(
+  invitationId: string,
+  eventId: string,
+  actor?: TeamActorContext
+) {
   const invitation = await prisma.eventTeamInvitation.findFirst({
     where: { id: invitationId, eventId },
     include: {
       event: {
         select: {
           title: true,
+          organizerId: true,
           organizer: { select: { name: true } },
         },
       },
@@ -512,6 +636,15 @@ export async function resendTeamInvitation(invitationId: string, eventId: string
 
   if (invitation.status !== TeamInvitationStatus.PENDING) {
     throw new BadRequestError(`Cannot resend invitation that is already ${invitation.status.toLowerCase()}`);
+  }
+
+  if (actor && !actor.isOwner) {
+    if (actor.email && normalizeEmail(actor.email) === normalizeEmail(invitation.email)) {
+      throw new ForbiddenError('Event Admins cannot manage invitations for their own account.');
+    }
+    if (invitation.role === EventTeamRole.ADMIN || invitation.permissions) {
+      assertAdminPermissionCeiling(actor.permissions, invitation.permissions);
+    }
   }
 
   const rawToken = crypto.randomBytes(32).toString('hex');
@@ -546,14 +679,17 @@ export async function resendTeamInvitation(invitationId: string, eventId: string
     id: updated.id,
     email: updated.email,
     expiresAt: updated.expiresAt,
-    token: rawToken,
   };
 }
 
 /**
  * Revokes a pending team invitation.
  */
-export async function revokeTeamInvitation(invitationId: string, eventId: string) {
+export async function revokeTeamInvitation(
+  invitationId: string,
+  eventId: string,
+  actor?: TeamActorContext
+) {
   const invitation = await prisma.eventTeamInvitation.findFirst({
     where: { id: invitationId, eventId },
   });
@@ -564,6 +700,18 @@ export async function revokeTeamInvitation(invitationId: string, eventId: string
 
   if (invitation.status !== TeamInvitationStatus.PENDING) {
     throw new BadRequestError(`Cannot revoke invitation that is already ${invitation.status.toLowerCase()}`);
+  }
+
+  if (actor && !actor.isOwner) {
+    if (actor.email && normalizeEmail(actor.email) === normalizeEmail(invitation.email)) {
+      throw new ForbiddenError('Event Admins cannot manage invitations for their own account.');
+    }
+    if (invitation.role === EventTeamRole.ADMIN) {
+      if (invitation.invitedByUserId !== actor.userId) {
+        throw new ForbiddenError('Only the event owner can revoke an Event Admin invitation created by another administrator or the owner.');
+      }
+      assertAdminPermissionCeiling(actor.permissions, invitation.permissions);
+    }
   }
 
   await prisma.eventTeamInvitation.update({
@@ -589,7 +737,8 @@ export async function updateTeamMember(
     role?: EventTeamRole;
     permissions?: EventAdminPermissions | null;
     status?: TeamMemberStatus;
-  }
+  },
+  actor?: TeamActorContext
 ) {
   const member = await prisma.eventTeamMember.findFirst({
     where: { id: memberId, eventId },
@@ -604,6 +753,7 @@ export async function updateTeamMember(
       event: {
         select: {
           slug: true,
+          organizerId: true,
         },
       },
     },
@@ -611,6 +761,23 @@ export async function updateTeamMember(
 
   if (!member) {
     throw new NotFoundError('Team member not found');
+  }
+
+  if (actor && !actor.isOwner) {
+    // 1. An Event Admin must not update their own membership, permissions, or role
+    if (member.userId === actor.userId || (actor.memberId && member.id === actor.memberId)) {
+      throw new ForbiddenError('Event Admins cannot update their own membership, role, or permissions.');
+    }
+
+    // 2. An Event Admin must not modify another Event Admin's membership
+    if (member.role === EventTeamRole.ADMIN) {
+      throw new ForbiddenError('Only the event owner can modify an Event Admin membership.');
+    }
+
+    // 3. An Event Admin must not grant permissions they do not personally possess
+    if (updates.role === EventTeamRole.ADMIN || (updates.permissions !== undefined && updates.permissions !== null)) {
+      assertAdminPermissionCeiling(actor.permissions, updates.permissions);
+    }
   }
 
   return await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
@@ -665,9 +832,9 @@ export async function updateTeamMember(
     if (updates.status) {
       data.status = updates.status;
     }
-    if (updates.role === EventTeamRole.ADMIN && updates.permissions !== undefined) {
+    if (targetRole === EventTeamRole.ADMIN && updates.permissions !== undefined) {
       data.permissions = (updates.permissions ? parseAdminPermissions(updates.permissions) : null) as any;
-    } else if (updates.role === EventTeamRole.HOST) {
+    } else if (targetRole === EventTeamRole.HOST) {
       data.permissions = Prisma.DbNull;
     }
 
@@ -747,13 +914,29 @@ export async function updateTeamMember(
  * Revokes an EventTeamMember's access.
  * If HOST, marks their personal promotional link as ARCHIVED.
  */
-export async function revokeTeamMember(memberId: string, eventId: string) {
+export async function revokeTeamMember(
+  memberId: string,
+  eventId: string,
+  actor?: TeamActorContext
+) {
   const member = await prisma.eventTeamMember.findFirst({
     where: { id: memberId, eventId },
   });
 
   if (!member) {
     throw new NotFoundError('Team member not found');
+  }
+
+  if (actor && !actor.isOwner) {
+    // 1. An Event Admin must not revoke their own membership
+    if (member.userId === actor.userId || (actor.memberId && member.id === actor.memberId)) {
+      throw new ForbiddenError('Event Admins cannot revoke their own membership.');
+    }
+
+    // 2. An Event Admin must not revoke another Event Admin's membership
+    if (member.role === EventTeamRole.ADMIN) {
+      throw new ForbiddenError('Only the event owner can revoke an Event Admin membership.');
+    }
   }
 
   await prisma.$transaction(async (tx: Prisma.TransactionClient) => {

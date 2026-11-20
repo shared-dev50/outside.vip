@@ -51,6 +51,7 @@ export interface UpsertAttributionParams {
   eventId: string;
   promotionLinkId: string;
   clickedAt?: Date;
+  incrementClickCount?: boolean;
 }
 
 /**
@@ -237,6 +238,7 @@ export async function upsertVisitorAttribution(
 }> {
   const { rawVid, eventId, promotionLinkId } = params;
   const clickedAt = params.clickedAt || new Date();
+  const shouldIncrementClickCount = params.incrementClickCount ?? true;
 
   const canonicalVisitorId = deriveCanonicalVisitorId(rawVid);
   const currentKey = env.PROMOTION_ATTRIBUTION_HMAC_KEY;
@@ -322,11 +324,13 @@ export async function upsertVisitorAttribution(
         promotionLinkId: winningLink,
         canonicalVisitorId,
         visitDate,
-        clickCount: 1,
+        clickCount: shouldIncrementClickCount ? 1 : 0,
       },
-      update: {
-        clickCount: { increment: 1 },
-      },
+      update: shouldIncrementClickCount
+        ? {
+            clickCount: { increment: 1 },
+          }
+        : {},
     });
 
     return { canonicalVisitorId, visitorIdHash: visitorIdHashV2, expiresAt, winningLink };

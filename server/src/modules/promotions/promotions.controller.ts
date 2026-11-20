@@ -67,7 +67,7 @@ export async function handleShortLinkRedirect(
     const referrer = (req.headers['referer'] || req.headers['referrer']) as string | undefined;
 
     // Record click with 15-minute deduplication
-    await recordPromotionClick({
+    const isNewClick = await recordPromotionClick({
       rawVid,
       canonicalVisitorId,
       visitorIdHash,
@@ -79,6 +79,7 @@ export async function handleShortLinkRedirect(
       isBot: false,
     }).catch((err) => {
       console.warn('[Promotions] Click recording error:', err);
+      return false;
     });
 
     // Establish persistent 30-day attribution
@@ -86,6 +87,7 @@ export async function handleShortLinkRedirect(
       rawVid,
       eventId: event.id,
       promotionLinkId: link.id,
+      incrementClickCount: isNewClick,
     }).catch((err) => {
       console.warn('[Promotions] Attribution upsert error:', err);
     });

@@ -4,6 +4,8 @@ import { app } from '../app.js';
 import { prisma } from '../db/prisma.js';
 import { EventTeamRole, TeamMemberStatus, TeamInvitationStatus } from '@prisma/client';
 import { VISITOR_COOKIE_NAME } from '../modules/promotions/promotions.constants.js';
+import { deriveCanonicalVisitorId } from '../modules/promotions/promotions.service.js';
+import { getRedisClient } from '../lib/redis.js';
 import { createSession } from '../lib/session.service.js';
 import { sentTeamInvitationEmails } from '../lib/email.service.js';
 
@@ -197,15 +199,19 @@ describe('Event Teams, Invitations & Host Promotional Tools (Stage 2)', () => {
       expect(res.body.invitation).toBeDefined();
       expect(res.body.invitation.email).toBe(hostUser.email.toLowerCase());
       expect(res.body.invitation.role).toBe('HOST');
-      expect(res.body.invitation.token).toBeDefined();
+      expect(res.body.invitation.token).toBeUndefined();
 
-      hostInviteToken = res.body.invitation.token;
       hostInvitationId = res.body.invitation.id;
 
-      // Verify email was recorded in test email service
-      const sentEmail = sentTeamInvitationEmails.find((e) => e.to === hostUser.email.toLowerCase());
+      // Verify email was recorded in test email service and extract token from email delivery
+      const sentEmail = sentTeamInvitationEmails
+        .slice()
+        .reverse()
+        .find((e) => e.to === hostUser.email.toLowerCase());
       expect(sentEmail).toBeDefined();
       expect(sentEmail?.role).toBe('HOST');
+      hostInviteToken = sentEmail!.inviteUrl.split('/').pop()!;
+      expect(hostInviteToken).toBeTruthy();
       expect(sentEmail?.inviteUrl).toContain(`/team/invitations/${hostInviteToken}`);
     });
 
@@ -229,7 +235,13 @@ describe('Event Teams, Invitations & Host Promotional Tools (Stage 2)', () => {
 
       expect(res.body.success).toBe(true);
       expect(res.body.invitation.role).toBe('ADMIN');
-      adminInviteToken = res.body.invitation.token;
+      expect(res.body.invitation.token).toBeUndefined();
+      const sentEmail = sentTeamInvitationEmails
+        .slice()
+        .reverse()
+        .find((e) => e.to === adminUser.email.toLowerCase());
+      expect(sentEmail).toBeDefined();
+      adminInviteToken = sentEmail!.inviteUrl.split('/').pop()!;
       adminInvitationId = res.body.invitation.id;
     });
 
@@ -267,11 +279,17 @@ describe('Event Teams, Invitations & Host Promotional Tools (Stage 2)', () => {
         .expect(200);
 
       expect(res.body.success).toBe(true);
-      expect(res.body.invitation.token).toBeDefined();
-      expect(res.body.invitation.token).not.toBe(hostInviteToken);
+      expect(res.body.invitation.token).toBeUndefined();
+      const resentEmail = sentTeamInvitationEmails
+        .slice()
+        .reverse()
+        .find((e) => e.to === hostUser.email.toLowerCase());
+      expect(resentEmail).toBeDefined();
+      const rotatedToken = resentEmail!.inviteUrl.split('/').pop()!;
+      expect(rotatedToken).not.toBe(hostInviteToken);
 
       // Update token to the newly rotated token
-      hostInviteToken = res.body.invitation.token;
+      hostInviteToken = rotatedToken;
     });
 
     it('rejects invitation acceptance if account email is not verified', async () => {
@@ -286,8 +304,15 @@ describe('Event Teams, Invitations & Host Promotional Tools (Stage 2)', () => {
         })
         .expect(201);
 
+      expect(inv.body.invitation.token).toBeUndefined();
+      const unverifiedEmail = sentTeamInvitationEmails
+        .slice()
+        .reverse()
+        .find((e) => e.to === unverifiedUser.email.toLowerCase());
+      const unverifiedToken = unverifiedEmail!.inviteUrl.split('/').pop()!;
+
       const res = await request(app)
-        .post(`/api/team/invitations/${inv.body.invitation.token}/accept`)
+        .post(`/api/team/invitations/${unverifiedToken}/accept`)
         .set('Cookie', unverifiedAuth.cookie)
         .set('x-csrf-token', unverifiedAuth.csrf)
         .expect(403);
@@ -354,17 +379,23 @@ describe('Event Teams, Invitations & Host Promotional Tools (Stage 2)', () => {
     });
 
     it('revokes an invitation and prevents subsequent acceptance', async () => {
+      const revokeEmailAddr = `revokeme_${testRunId}@outside.vip`;
       const invRes = await request(app)
         .post(`/api/events/${event1.id}/team/invitations`)
         .set('Cookie', organizerAuth.cookie)
         .set('x-csrf-token', organizerAuth.csrf)
         .send({
-          email: `revokeme_${testRunId}@outside.vip`,
+          email: revokeEmailAddr,
           role: 'HOST',
         })
         .expect(201);
 
-      const token = invRes.body.invitation.token;
+      expect(invRes.body.invitation.token).toBeUndefined();
+      const revokeEmail = sentTeamInvitationEmails
+        .slice()
+        .reverse()
+        .find((e) => e.to === revokeEmailAddr);
+      const token = revokeEmail!.inviteUrl.split('/').pop()!;
       const id = invRes.body.invitation.id;
 
       // Revoke
@@ -1641,6 +1672,1518 @@ describe('Event Teams, Invitations & Host Promotional Tools (Stage 2)', () => {
       const owned = orgRes.body.data.events.find((e: any) => e.id === dualRoleEvent.id);
       expect(owned).toBeDefined();
       expect(owned.id).toBe(dualRoleEvent.id);
+    });
+  });
+
+  describe('9. Stage 6 Implementation 2.1: P0 Event Admin Authorization Remediation (SEC-01 to SEC-05)', () => {
+    let teamMgrAdminUser: any;
+    let teamMgrAdminAuth: { cookie: string; csrf: string };
+    let teamMgrMemberId: string;
+
+    let peerAdminUser: any;
+    let peerAdminAuth: { cookie: string; csrf: string };
+    let peerAdminMemberId: string;
+
+    let sec01HostUser: any;
+    let sec01HostMemberId: string;
+
+    let orgRoleAdminUser: any;
+    let orgRoleAdminAuth: { cookie: string; csrf: string };
+
+    let globalAdminUser: any;
+    let globalAdminAuth: { cookie: string; csrf: string };
+
+    let sec03DraftEvent: any;
+    let sec03SeriesId: string;
+    let sec03SeriesOcc1: any;
+    let sec03SeriesOcc2: any;
+
+    let tierEvent1Id: string;
+    let tierEvent2Id: string;
+
+    let orderEvent1Id: string;
+    let orderEvent2Id: string;
+
+    beforeAll(async () => {
+      // 1. Create teamMgrAdminUser (ATTENDEE global role, granted canManageTeam, canEditDetails, canManageTickets)
+      teamMgrAdminUser = await prisma.user.create({
+        data: {
+          email: `sec01_teammgr_${testRunId}@outside.vip`,
+          name: 'Team Mgr Admin',
+          role: 'ATTENDEE',
+          emailVerified: true,
+          emailVerifiedAt: new Date(),
+        },
+      });
+      createdUserIds.push(teamMgrAdminUser.id);
+      teamMgrAdminAuth = await createAuth(teamMgrAdminUser.id);
+
+      const teamMgrMember = await prisma.eventTeamMember.create({
+        data: {
+          eventId: event1.id,
+          userId: teamMgrAdminUser.id,
+          role: EventTeamRole.ADMIN,
+          status: TeamMemberStatus.ACTIVE,
+          permissions: {
+            canEditDetails: true,
+            canManageTickets: true,
+            canViewOrders: false,
+            canManageTeam: true,
+            canManagePromotions: false,
+            canViewAnalytics: false,
+            canManageRefunds: false,
+            canManagePayouts: false,
+            canCancelEvent: false,
+            canDeleteEvent: false,
+          },
+          invitedById: organizerUser.id,
+        },
+      });
+      teamMgrMemberId = teamMgrMember.id;
+
+      // 2. Create peerAdminUser (another Event Admin on event1)
+      peerAdminUser = await prisma.user.create({
+        data: {
+          email: `sec01_peer_${testRunId}@outside.vip`,
+          name: 'Peer Event Admin',
+          role: 'ATTENDEE',
+          emailVerified: true,
+          emailVerifiedAt: new Date(),
+        },
+      });
+      createdUserIds.push(peerAdminUser.id);
+      peerAdminAuth = await createAuth(peerAdminUser.id);
+
+      const peerMember = await prisma.eventTeamMember.create({
+        data: {
+          eventId: event1.id,
+          userId: peerAdminUser.id,
+          role: EventTeamRole.ADMIN,
+          status: TeamMemberStatus.ACTIVE,
+          permissions: {
+            canEditDetails: true,
+            canManageTickets: false,
+            canViewOrders: true,
+            canManageTeam: false,
+            canManagePromotions: true,
+            canViewAnalytics: true,
+            canManageRefunds: false,
+            canManagePayouts: false,
+            canCancelEvent: true,
+            canDeleteEvent: false,
+          },
+          invitedById: organizerUser.id,
+        },
+      });
+      peerAdminMemberId = peerMember.id;
+
+      // 3. Create sec01HostUser (a Host on event1)
+      sec01HostUser = await prisma.user.create({
+        data: {
+          email: `sec01_host_${testRunId}@outside.vip`,
+          name: 'SEC01 Target Host',
+          role: 'ATTENDEE',
+          emailVerified: true,
+          emailVerifiedAt: new Date(),
+        },
+      });
+      createdUserIds.push(sec01HostUser.id);
+
+      const hostMem = await prisma.eventTeamMember.create({
+        data: {
+          eventId: event1.id,
+          userId: sec01HostUser.id,
+          role: EventTeamRole.HOST,
+          status: TeamMemberStatus.ACTIVE,
+          invitedById: organizerUser.id,
+        },
+      });
+      sec01HostMemberId = hostMem.id;
+
+      // 4. Create orgRoleAdminUser (global role ORGANIZER, Event Admin on event1 with canViewOrders: true)
+      orgRoleAdminUser = await prisma.user.create({
+        data: {
+          email: `sec05_orgadmin_${testRunId}@outside.vip`,
+          name: 'Organizer Role Event Admin',
+          role: 'ORGANIZER',
+          emailVerified: true,
+          emailVerifiedAt: new Date(),
+        },
+      });
+      createdUserIds.push(orgRoleAdminUser.id);
+      orgRoleAdminAuth = await createAuth(orgRoleAdminUser.id);
+
+      await prisma.eventTeamMember.create({
+        data: {
+          eventId: event1.id,
+          userId: orgRoleAdminUser.id,
+          role: EventTeamRole.ADMIN,
+          status: TeamMemberStatus.ACTIVE,
+          permissions: {
+            canEditDetails: false,
+            canManageTickets: false,
+            canViewOrders: true,
+            canManageTeam: false,
+            canManagePromotions: false,
+            canViewAnalytics: false,
+            canManageRefunds: false,
+            canManagePayouts: false,
+            canCancelEvent: false,
+            canDeleteEvent: false,
+          },
+          invitedById: organizerUser.id,
+        },
+      });
+
+      // 5. Create globalAdminUser (Platform ADMIN)
+      globalAdminUser = await prisma.user.create({
+        data: {
+          email: `sec05_globaladmin_${testRunId}@outside.vip`,
+          name: 'Global Platform Admin',
+          role: 'ADMIN',
+          emailVerified: true,
+          emailVerifiedAt: new Date(),
+        },
+      });
+      createdUserIds.push(globalAdminUser.id);
+      globalAdminAuth = await createAuth(globalAdminUser.id);
+
+      // 6. Create sec03DraftEvent & series for lifecycle transition tests
+      sec03DraftEvent = await prisma.event.create({
+        data: {
+          organizerId: organizerUser.id,
+          title: `SEC03 Draft Event - ${testRunId}`,
+          description: 'Draft lifecycle test event',
+          coverImageUrl: 'https://example.com/sec03.jpg',
+          venueAddress: '300 Lifecycle Ave',
+          slug: `sec03-draft-${testRunId}`,
+          category: 'MUSIC',
+          status: 'DRAFT',
+          startAt: new Date(Date.now() + 86400000 * 15),
+          endAt: new Date(Date.now() + 86400000 * 16),
+          venueName: 'Lifecycle Hall',
+          city: 'Nairobi',
+          country: 'KE',
+          ticketTiers: {
+            create: [
+              {
+                name: 'Free RSVP',
+                priceInCents: 0,
+                totalCapacity: 100,
+                status: 'ACTIVE',
+              },
+            ],
+          },
+        },
+      });
+      createdEventIds.push(sec03DraftEvent.id);
+
+      await prisma.eventTeamMember.create({
+        data: {
+          eventId: sec03DraftEvent.id,
+          userId: teamMgrAdminUser.id,
+          role: EventTeamRole.ADMIN,
+          status: TeamMemberStatus.ACTIVE,
+          permissions: {
+            canEditDetails: true,
+            canManageTickets: true,
+            canViewOrders: false,
+            canManageTeam: false,
+            canManagePromotions: false,
+            canViewAnalytics: false,
+            canManageRefunds: false,
+            canManagePayouts: false,
+            canCancelEvent: false,
+            canDeleteEvent: false,
+          },
+          invitedById: organizerUser.id,
+        },
+      });
+
+      const series = await prisma.eventSeries.create({
+        data: {
+          organizerId: organizerUser.id,
+          title: `SEC03 Series - ${testRunId}`,
+          frequency: 'WEEKLY',
+          interval: 1,
+          startDate: new Date(Date.now() + 86400000 * 20),
+          count: 2,
+        },
+      });
+      sec03SeriesId = series.id;
+
+      sec03SeriesOcc1 = await prisma.event.create({
+        data: {
+          organizerId: organizerUser.id,
+          seriesId: series.id,
+          occurrenceIndex: 1,
+          title: `SEC03 Series Occ 1 - ${testRunId}`,
+          description: 'Series Occ 1',
+          coverImageUrl: 'https://example.com/occ1.jpg',
+          venueAddress: '300 Series St',
+          slug: `sec03-occ1-${testRunId}`,
+          category: 'MUSIC',
+          status: 'PUBLISHED',
+          startAt: new Date(Date.now() + 86400000 * 20),
+          endAt: new Date(Date.now() + 86400000 * 21),
+          venueName: 'Series Hall',
+          city: 'Nairobi',
+          country: 'KE',
+        },
+      });
+      createdEventIds.push(sec03SeriesOcc1.id);
+
+      sec03SeriesOcc2 = await prisma.event.create({
+        data: {
+          organizerId: organizerUser.id,
+          seriesId: series.id,
+          occurrenceIndex: 2,
+          title: `SEC03 Series Occ 2 - ${testRunId}`,
+          description: 'Series Occ 2',
+          coverImageUrl: 'https://example.com/occ2.jpg',
+          venueAddress: '300 Series St',
+          slug: `sec03-occ2-${testRunId}`,
+          category: 'MUSIC',
+          status: 'PUBLISHED',
+          startAt: new Date(Date.now() + 86400000 * 27),
+          endAt: new Date(Date.now() + 86400000 * 28),
+          venueName: 'Series Hall',
+          city: 'Nairobi',
+          country: 'KE',
+        },
+      });
+      createdEventIds.push(sec03SeriesOcc2.id);
+
+      await prisma.eventTeamMember.create({
+        data: {
+          eventId: sec03SeriesOcc1.id,
+          userId: teamMgrAdminUser.id,
+          role: EventTeamRole.ADMIN,
+          status: TeamMemberStatus.ACTIVE,
+          permissions: {
+            canEditDetails: true,
+            canManageTickets: true,
+            canViewOrders: false,
+            canManageTeam: false,
+            canManagePromotions: false,
+            canViewAnalytics: false,
+            canManageRefunds: false,
+            canManagePayouts: false,
+            canCancelEvent: false,
+            canDeleteEvent: false,
+          },
+          invitedById: organizerUser.id,
+        },
+      });
+
+      // 7. Create ticket tiers on event1 and event2 for SEC-04 IDOR testing
+      const tier1 = await prisma.ticketTier.create({
+        data: {
+          eventId: event1.id,
+          name: 'Event 1 Local Tier',
+          priceInCents: 5000,
+          totalCapacity: 100,
+          status: 'ACTIVE',
+        },
+      });
+      tierEvent1Id = tier1.id;
+
+      const tier2 = await prisma.ticketTier.create({
+        data: {
+          eventId: event2.id,
+          name: 'Event 2 Foreign Tier',
+          priceInCents: 8000,
+          totalCapacity: 200,
+          status: 'ACTIVE',
+        },
+      });
+      tierEvent2Id = tier2.id;
+
+      // 8. Create orders on event1 and event2 for SEC-05 order access testing
+      const ord1 = await prisma.order.create({
+        data: {
+          orderNumber: `OUT-SEC05-E1-${testRunId}`,
+          eventId: event1.id,
+          status: 'COMPLETED',
+          customerName: 'Event 1 Buyer',
+          customerEmail: `buyer1_${testRunId}@outside.vip`,
+          totalInCents: 5000,
+          platformFeeInCents: 500,
+          organizerNetInCents: 4500,
+          idempotencyKey: `idem_sec05_e1_${testRunId}`,
+          expiresAt: new Date(Date.now() + 3600000),
+          items: {
+            create: [
+              {
+                ticketTierId: tierEvent1Id,
+                quantity: 1,
+                unitPriceInCents: 5000,
+                subtotalInCents: 5000,
+              },
+            ],
+          },
+        },
+      });
+      orderEvent1Id = ord1.id;
+
+      const ord2 = await prisma.order.create({
+        data: {
+          orderNumber: `OUT-SEC05-E2-${testRunId}`,
+          eventId: event2.id,
+          status: 'COMPLETED',
+          customerName: 'Event 2 Buyer',
+          customerEmail: `buyer2_${testRunId}@outside.vip`,
+          totalInCents: 8000,
+          platformFeeInCents: 800,
+          organizerNetInCents: 7200,
+          idempotencyKey: `idem_sec05_e2_${testRunId}`,
+          expiresAt: new Date(Date.now() + 3600000),
+          items: {
+            create: [
+              {
+                ticketTierId: tierEvent2Id,
+                quantity: 1,
+                unitPriceInCents: 8000,
+                subtotalInCents: 8000,
+              },
+            ],
+          },
+        },
+      });
+      orderEvent2Id = ord2.id;
+    });
+
+    afterAll(async () => {
+      // Clean up orders, tiers, series, and payout details created in this block before top-level teardown
+      await prisma.orderItem.deleteMany({
+        where: { orderId: { in: [orderEvent1Id, orderEvent2Id].filter(Boolean) } },
+      });
+      await prisma.order.deleteMany({
+        where: { id: { in: [orderEvent1Id, orderEvent2Id].filter(Boolean) } },
+      });
+      await prisma.ticketTier.deleteMany({
+        where: { eventId: { in: createdEventIds } },
+      });
+      await prisma.event.updateMany({
+        where: { id: { in: createdEventIds } },
+        data: { payoutDetailsId: null, seriesId: null },
+      });
+      if (sec03SeriesId) {
+        await prisma.eventSeries.deleteMany({ where: { id: sec03SeriesId } });
+      }
+      await prisma.organizerPayoutDetails.deleteMany({
+        where: { userId: { in: createdUserIds } },
+      });
+    });
+
+    // =========================================================================
+    // SEC-01: Prevent Event Admin Privilege Escalation
+    // =========================================================================
+    describe('SEC-01: Event Admin Privilege Escalation Prevention', () => {
+      it('forbids Event Admin from modifying their own permissions or role', async () => {
+        const res = await request(app)
+          .patch(`/api/events/${event1.id}/team/members/${teamMgrMemberId}`)
+          .set('Cookie', teamMgrAdminAuth.cookie)
+          .set('x-csrf-token', teamMgrAdminAuth.csrf)
+          .send({
+            role: 'ADMIN',
+            permissions: {
+              canEditDetails: true,
+              canManageTickets: true,
+              canViewOrders: true,
+              canManageTeam: true,
+              canCancelEvent: true,
+              canDeleteEvent: true,
+            },
+          })
+          .expect(403);
+
+        expect(res.body.error.message).toContain('cannot update their own membership');
+
+        const dbMember = await prisma.eventTeamMember.findUnique({ where: { id: teamMgrMemberId } });
+        expect((dbMember?.permissions as any)?.canDeleteEvent).toBe(false);
+        expect((dbMember?.permissions as any)?.canCancelEvent).toBe(false);
+      });
+
+      it('forbids Event Admin from revoking their own membership', async () => {
+        const res = await request(app)
+          .delete(`/api/events/${event1.id}/team/members/${teamMgrMemberId}`)
+          .set('Cookie', teamMgrAdminAuth.cookie)
+          .set('x-csrf-token', teamMgrAdminAuth.csrf)
+          .expect(403);
+
+        expect(res.body.error.message).toContain('cannot revoke their own membership');
+
+        const dbMember = await prisma.eventTeamMember.findUnique({ where: { id: teamMgrMemberId } });
+        expect(dbMember?.status).toBe(TeamMemberStatus.ACTIVE);
+      });
+
+      it('forbids Event Admin from modifying or revoking another Event Admin', async () => {
+        await request(app)
+          .patch(`/api/events/${event1.id}/team/members/${peerAdminMemberId}`)
+          .set('Cookie', teamMgrAdminAuth.cookie)
+          .set('x-csrf-token', teamMgrAdminAuth.csrf)
+          .send({
+            role: 'HOST',
+          })
+          .expect(403);
+
+        await request(app)
+          .delete(`/api/events/${event1.id}/team/members/${peerAdminMemberId}`)
+          .set('Cookie', teamMgrAdminAuth.cookie)
+          .set('x-csrf-token', teamMgrAdminAuth.csrf)
+          .expect(403);
+
+        const dbPeer = await prisma.eventTeamMember.findUnique({ where: { id: peerAdminMemberId } });
+        expect(dbPeer?.role).toBe(EventTeamRole.ADMIN);
+        expect(dbPeer?.status).toBe(TeamMemberStatus.ACTIVE);
+      });
+
+      it('forbids Event Admin from granting permissions they do not personally hold when updating a member', async () => {
+        // teamMgrAdmin does NOT hold canDeleteEvent or canCancelEvent
+        const res = await request(app)
+          .patch(`/api/events/${event1.id}/team/members/${sec01HostMemberId}`)
+          .set('Cookie', teamMgrAdminAuth.cookie)
+          .set('x-csrf-token', teamMgrAdminAuth.csrf)
+          .send({
+            role: 'ADMIN',
+            permissions: {
+              canEditDetails: true,
+              canDeleteEvent: true,
+            },
+          })
+          .expect(403);
+
+        expect(res.body.error.message).toContain("cannot grant the 'canDeleteEvent' permission");
+
+        const dbHost = await prisma.eventTeamMember.findUnique({ where: { id: sec01HostMemberId } });
+        expect(dbHost?.role).toBe(EventTeamRole.HOST);
+      });
+
+      it('forbids Event Admin from inviting another Event Admin with permissions exceeding their own', async () => {
+        const res = await request(app)
+          .post(`/api/events/${event1.id}/team/invitations`)
+          .set('Cookie', teamMgrAdminAuth.cookie)
+          .set('x-csrf-token', teamMgrAdminAuth.csrf)
+          .send({
+            email: `escalated_invite_${testRunId}@outside.vip`,
+            role: 'ADMIN',
+            permissions: {
+              canEditDetails: true,
+              canCancelEvent: true, // teamMgrAdmin lacks canCancelEvent
+            },
+          })
+          .expect(403);
+
+        expect(res.body.error.message).toContain("cannot grant the 'canCancelEvent' permission");
+      });
+
+      it('preserves Event Admin management of Hosts and subset-permission invitations, and preserves Event Owner full control', async () => {
+        // 1. Event Admin with canManageTeam can invite a Host
+        await request(app)
+          .post(`/api/events/${event1.id}/team/invitations`)
+          .set('Cookie', teamMgrAdminAuth.cookie)
+          .set('x-csrf-token', teamMgrAdminAuth.csrf)
+          .send({
+            email: `valid_host_by_admin_${testRunId}@outside.vip`,
+            role: 'HOST',
+          })
+          .expect(201);
+
+        // 2. Event Admin with canManageTeam can invite an Admin with permissions within their own ceiling
+        await request(app)
+          .post(`/api/events/${event1.id}/team/invitations`)
+          .set('Cookie', teamMgrAdminAuth.cookie)
+          .set('x-csrf-token', teamMgrAdminAuth.csrf)
+          .send({
+            email: `valid_subadmin_${testRunId}@outside.vip`,
+            role: 'ADMIN',
+            permissions: {
+              canEditDetails: true,
+            },
+          })
+          .expect(201);
+
+        // 3. Event Owner retains full control to modify any Event Admin's permissions
+        const ownerRes = await request(app)
+          .patch(`/api/events/${event1.id}/team/members/${peerAdminMemberId}`)
+          .set('Cookie', organizerAuth.cookie)
+          .set('x-csrf-token', organizerAuth.csrf)
+          .send({
+            role: 'ADMIN',
+            permissions: {
+              canEditDetails: true,
+              canViewOrders: true,
+              canCancelEvent: true,
+              canDeleteEvent: true,
+            },
+          })
+          .expect(200);
+
+        expect((ownerRes.body.member.permissions as any).canDeleteEvent).toBe(true);
+      });
+    });
+
+    // =========================================================================
+    // SEC-02: Enforce Owner-Only Payout Details
+    // =========================================================================
+    describe('SEC-02: Owner-Only Payout Details Enforcement', () => {
+      const ownerPayoutPayload = {
+        orgType: 'Company',
+        registeredName: 'Outside Events Group Ltd',
+        registrationNumber: 'PVT-2026-001',
+        country: 'Kenya',
+        address: 'Westlands Commercial Center',
+        contactPersonName: 'Stage 2 Organizer',
+        contactEmail: 'finance@outside.vip',
+        accountHolderName: 'Outside Events Group Ltd',
+        bankName: 'Equity Bank Kenya',
+        bankCountry: 'Kenya',
+        accountCurrency: 'USD',
+        accountNumber: '123456789012',
+        confirmAccountNumber: '123456789012',
+        swiftBic: 'EQBLKENA',
+      };
+
+      it('allows Event Owner to submit and update payout details on their event', async () => {
+        const res = await request(app)
+          .put(`/api/organizer/events/${event1.id}`)
+          .set('Cookie', organizerAuth.cookie)
+          .set('x-csrf-token', organizerAuth.csrf)
+          .send({
+            title: event1.title,
+            payoutDetails: ownerPayoutPayload,
+          })
+          .expect(200);
+
+        expect(res.body.data.event.payoutDetails).not.toBeNull();
+        expect(res.body.data.event.payoutDetails.registeredName).toBe('Outside Events Group Ltd');
+        expect(res.body.data.event.payoutDetails.accountNumberMasked).toContain('9012');
+        expect(res.body.data.event.payoutDetails.accountNumberEncrypted).toBeUndefined();
+      });
+
+      it('rejects Event Admin submitting payoutDetails (valid, null, or empty) with 403 Forbidden and preserves owner payout association', async () => {
+        const beforeEvent = await prisma.event.findUnique({ where: { id: event1.id } });
+        expect(beforeEvent?.payoutDetailsId).not.toBeNull();
+
+        // 1. Attempt to overwrite with Admin's own payout details
+        await request(app)
+          .put(`/api/organizer/events/${event1.id}`)
+          .set('Cookie', teamMgrAdminAuth.cookie)
+          .set('x-csrf-token', teamMgrAdminAuth.csrf)
+          .send({
+            title: event1.title,
+            payoutDetails: {
+              ...ownerPayoutPayload,
+              registeredName: 'Attacker Hijacked LLC',
+              accountHolderName: 'Attacker Hijacked LLC',
+              accountNumber: '999988887777',
+              confirmAccountNumber: '999988887777',
+            },
+          })
+          .expect(403);
+
+        // 2. Attempt with payoutDetails: null
+        await request(app)
+          .patch(`/api/organizer/events/${event1.id}`)
+          .set('Cookie', teamMgrAdminAuth.cookie)
+          .set('x-csrf-token', teamMgrAdminAuth.csrf)
+          .send({
+            payoutDetails: null,
+          })
+          .expect(403);
+
+        // 3. Attempt with payoutDetailsId
+        await request(app)
+          .patch(`/api/organizer/events/${event1.id}`)
+          .set('Cookie', teamMgrAdminAuth.cookie)
+          .set('x-csrf-token', teamMgrAdminAuth.csrf)
+          .send({
+            payoutDetailsId: 'malicious-id',
+          })
+          .expect(403);
+
+        const afterEvent = await prisma.event.findUnique({ where: { id: event1.id } });
+        expect(afterEvent?.payoutDetailsId).toBe(beforeEvent?.payoutDetailsId);
+      });
+
+      it('returns payoutDetails: null in ordinary event-update responses for Event Admins', async () => {
+        const res = await request(app)
+          .patch(`/api/organizer/events/${event1.id}`)
+          .set('Cookie', teamMgrAdminAuth.cookie)
+          .set('x-csrf-token', teamMgrAdminAuth.csrf)
+          .send({
+            tagline: 'Admin Updated Tagline Safely',
+          })
+          .expect(200);
+
+        expect(res.body.data.event.tagline).toBe('Admin Updated Tagline Safely');
+        expect(res.body.data.event.payoutDetails).toBeNull();
+      });
+    });
+
+    // =========================================================================
+    // SEC-03: Enforce Event Lifecycle Permissions
+    // =========================================================================
+    describe('SEC-03: Event Lifecycle Status Transition Authorization', () => {
+      it('forbids Event Admin with canEditDetails from publishing a DRAFT event via updateOrganizerEvent', async () => {
+        await request(app)
+          .patch(`/api/organizer/events/${sec03DraftEvent.id}`)
+          .set('Cookie', teamMgrAdminAuth.cookie)
+          .set('x-csrf-token', teamMgrAdminAuth.csrf)
+          .send({
+            status: 'PUBLISHED',
+          })
+          .expect(403);
+
+        const dbEvt = await prisma.event.findUnique({ where: { id: sec03DraftEvent.id } });
+        expect(dbEvt?.status).toBe('DRAFT');
+      });
+
+      it('allows Event Owner to publish event and forbids Event Admin from unpublishing back to DRAFT', async () => {
+        await request(app)
+          .patch(`/api/organizer/events/${sec03DraftEvent.id}`)
+          .set('Cookie', organizerAuth.cookie)
+          .set('x-csrf-token', organizerAuth.csrf)
+          .send({
+            status: 'PUBLISHED',
+          })
+          .expect(200);
+
+        const publishedEvt = await prisma.event.findUnique({ where: { id: sec03DraftEvent.id } });
+        expect(publishedEvt?.status).toBe('PUBLISHED');
+
+        // Event Admin cannot unpublish back to DRAFT via update endpoint
+        await request(app)
+          .patch(`/api/organizer/events/${sec03DraftEvent.id}`)
+          .set('Cookie', teamMgrAdminAuth.cookie)
+          .set('x-csrf-token', teamMgrAdminAuth.csrf)
+          .send({
+            status: 'DRAFT',
+          })
+          .expect(403);
+      });
+
+      it('forbids Event Admin without canCancelEvent from changing status to CANCELLED', async () => {
+        await request(app)
+          .patch(`/api/organizer/events/${sec03DraftEvent.id}`)
+          .set('Cookie', teamMgrAdminAuth.cookie)
+          .set('x-csrf-token', teamMgrAdminAuth.csrf)
+          .send({
+            status: 'CANCELLED',
+          })
+          .expect(403);
+
+        const dbEvt = await prisma.event.findUnique({ where: { id: sec03DraftEvent.id } });
+        expect(dbEvt?.status).toBe('PUBLISHED');
+      });
+
+      it('forbids Event Admin with only canEditDetails from changing status to ARCHIVED', async () => {
+        await request(app)
+          .patch(`/api/organizer/events/${sec03DraftEvent.id}`)
+          .set('Cookie', teamMgrAdminAuth.cookie)
+          .set('x-csrf-token', teamMgrAdminAuth.csrf)
+          .send({
+            status: 'ARCHIVED',
+          })
+          .expect(403);
+
+        const dbEvt = await prisma.event.findUnique({ where: { id: sec03DraftEvent.id } });
+        expect(dbEvt?.status).toBe('PUBLISHED');
+      });
+
+      it('enforces lifecycle permissions across future series occurrences when applyToFuture is true', async () => {
+        // Attempt to cancel or unpublish future series occurrences via applyToFuture without permission
+        await request(app)
+          .patch(`/api/organizer/events/${sec03SeriesOcc1.id}`)
+          .set('Cookie', teamMgrAdminAuth.cookie)
+          .set('x-csrf-token', teamMgrAdminAuth.csrf)
+          .send({
+            status: 'CANCELLED',
+            applyToFuture: true,
+          })
+          .expect(403);
+
+        await request(app)
+          .patch(`/api/organizer/events/${sec03SeriesOcc1.id}`)
+          .set('Cookie', teamMgrAdminAuth.cookie)
+          .set('x-csrf-token', teamMgrAdminAuth.csrf)
+          .send({
+            status: 'DRAFT',
+            applyToFuture: true,
+          })
+          .expect(403);
+
+        const occ2 = await prisma.event.findUnique({ where: { id: sec03SeriesOcc2.id } });
+        expect(occ2?.status).toBe('PUBLISHED');
+      });
+
+      it('allows Event Admin with canCancelEvent: true to transition status to CANCELLED', async () => {
+        // peerAdminUser has canEditDetails: true and canCancelEvent: true on sec03DraftEvent
+        await prisma.eventTeamMember.create({
+          data: {
+            eventId: sec03DraftEvent.id,
+            userId: peerAdminUser.id,
+            role: EventTeamRole.ADMIN,
+            status: TeamMemberStatus.ACTIVE,
+            permissions: {
+              canEditDetails: true,
+              canCancelEvent: true,
+            },
+            invitedById: organizerUser.id,
+          },
+        });
+
+        await request(app)
+          .patch(`/api/organizer/events/${sec03DraftEvent.id}`)
+          .set('Cookie', peerAdminAuth.cookie)
+          .set('x-csrf-token', peerAdminAuth.csrf)
+          .send({
+            status: 'CANCELLED',
+          })
+          .expect(200);
+
+        const dbEvt = await prisma.event.findUnique({ where: { id: sec03DraftEvent.id } });
+        expect(dbEvt?.status).toBe('CANCELLED');
+      });
+    });
+
+    // =========================================================================
+    // SEC-04: Prevent Cross-Event Ticket-Tier Updates (IDOR)
+    // =========================================================================
+    describe('SEC-04: Cross-Event Ticket-Tier IDOR Prevention', () => {
+      it('rejects foreign tier ID from Event 2 when updating Event 1 and leaves Event 2 tier untouched', async () => {
+        await request(app)
+          .put(`/api/organizer/events/${event1.id}`)
+          .set('Cookie', teamMgrAdminAuth.cookie)
+          .set('x-csrf-token', teamMgrAdminAuth.csrf)
+          .send({
+            ticketTiers: [
+              {
+                id: tierEvent2Id, // Belongs to event2!
+                name: 'Hijacked Foreign Tier',
+                priceInCents: 0,
+                totalCapacity: 999,
+              },
+            ],
+          })
+          .expect(403);
+
+        const foreignTier = await prisma.ticketTier.findUnique({ where: { id: tierEvent2Id } });
+        expect(foreignTier?.name).toBe('Event 2 Foreign Tier');
+        expect(foreignTier?.priceInCents).toBe(8000);
+        expect(foreignTier?.totalCapacity).toBe(200);
+      });
+
+      it('causes zero partial writes when a mixed local and foreign tier payload is submitted', async () => {
+        await request(app)
+          .put(`/api/organizer/events/${event1.id}`)
+          .set('Cookie', teamMgrAdminAuth.cookie)
+          .set('x-csrf-token', teamMgrAdminAuth.csrf)
+          .send({
+            ticketTiers: [
+              {
+                id: tierEvent1Id, // Valid local tier
+                name: 'Should Not Persist Local Update',
+                priceInCents: 1234,
+                totalCapacity: 50,
+              },
+              {
+                id: tierEvent2Id, // Foreign tier from event2
+                name: 'Hijacked Foreign Tier',
+                priceInCents: 0,
+                totalCapacity: 999,
+              },
+            ],
+          })
+          .expect(403);
+
+        const localTier = await prisma.ticketTier.findUnique({ where: { id: tierEvent1Id } });
+        expect(localTier?.name).toBe('Event 1 Local Tier');
+        expect(localTier?.priceInCents).toBe(5000);
+        expect(localTier?.totalCapacity).toBe(100);
+
+        const foreignTier = await prisma.ticketTier.findUnique({ where: { id: tierEvent2Id } });
+        expect(foreignTier?.name).toBe('Event 2 Foreign Tier');
+        expect(foreignTier?.priceInCents).toBe(8000);
+      });
+
+      it('allows legitimate local ticket tier updates for the target event', async () => {
+        const res = await request(app)
+          .put(`/api/organizer/events/${event1.id}`)
+          .set('Cookie', teamMgrAdminAuth.cookie)
+          .set('x-csrf-token', teamMgrAdminAuth.csrf)
+          .send({
+            ticketTiers: [
+              {
+                id: tierEvent1Id,
+                name: 'Event 1 Local Tier Updated',
+                priceInCents: 0,
+                totalCapacity: 120,
+              },
+            ],
+          })
+          .expect(200);
+
+        const updatedTier = res.body.data.event.ticketTiers.find((t: any) => t.id === tierEvent1Id);
+        expect(updatedTier).toBeDefined();
+        expect(updatedTier.name).toBe('Event 1 Local Tier Updated');
+        expect(updatedTier.priceInCents).toBe(0);
+        expect(updatedTier.totalCapacity).toBe(120);
+      });
+    });
+
+    // =========================================================================
+    // SEC-05: Repair Event Admin Order Access (canViewOrders)
+    // =========================================================================
+    describe('SEC-05: Event Admin Order Access & Scoping (Live DB)', () => {
+      it('allows ATTENDEE-role Event Admin with canViewOrders: true to retrieve orders for their assigned event', async () => {
+        // peerAdminUser has global role ATTENDEE and canViewOrders: true on event1
+        const res = await request(app)
+          .get(`/api/organizer/orders?eventId=${event1.id}`)
+          .set('Cookie', peerAdminAuth.cookie)
+          .expect(200);
+
+        expect(res.body.success).toBe(true);
+        const orderNumbers = res.body.data.orders.map((o: any) => o.orderNumber);
+        expect(orderNumbers).toContain(`OUT-SEC05-E1-${testRunId}`);
+        expect(orderNumbers).not.toContain(`OUT-SEC05-E2-${testRunId}`);
+      });
+
+      it('allows ORGANIZER-role Event Admin with canViewOrders: true to retrieve orders for an assigned event owned by another organizer', async () => {
+        // orgRoleAdminUser has global role ORGANIZER and canViewOrders: true on event1 (owned by organizerUser)
+        const res = await request(app)
+          .get(`/api/organizer/orders?eventId=${event1.id}`)
+          .set('Cookie', orgRoleAdminAuth.cookie)
+          .expect(200);
+
+        expect(res.body.success).toBe(true);
+        const orderNumbers = res.body.data.orders.map((o: any) => o.orderNumber);
+        expect(orderNumbers).toContain(`OUT-SEC05-E1-${testRunId}`);
+      });
+
+      it('rejects Event Admin with canViewOrders: false with 403 Forbidden', async () => {
+        // teamMgrAdminUser has canViewOrders: false on event1
+        await request(app)
+          .get(`/api/organizer/orders?eventId=${event1.id}`)
+          .set('Cookie', teamMgrAdminAuth.cookie)
+          .expect(403);
+      });
+
+      it('rejects Event Admin attempting to access orders for an unassigned event with 403 Forbidden', async () => {
+        // peerAdminUser is not a member of event2
+        await request(app)
+          .get(`/api/organizer/orders?eventId=${event2.id}`)
+          .set('Cookie', peerAdminAuth.cookie)
+          .expect(403);
+      });
+
+      it('scopes requests without eventId for Event Admin strictly to events where they hold active ADMIN membership with canViewOrders: true', async () => {
+        const res = await request(app)
+          .get('/api/organizer/orders')
+          .set('Cookie', peerAdminAuth.cookie)
+          .expect(200);
+
+        const orderNumbers = res.body.data.orders.map((o: any) => o.orderNumber);
+        expect(orderNumbers).toContain(`OUT-SEC05-E1-${testRunId}`);
+        expect(orderNumbers).not.toContain(`OUT-SEC05-E2-${testRunId}`);
+      });
+
+      it('preserves Event Owner and global Platform ADMIN order access', async () => {
+        // Event Owner
+        const ownerRes = await request(app)
+          .get(`/api/organizer/orders?eventId=${event1.id}`)
+          .set('Cookie', organizerAuth.cookie)
+          .expect(200);
+        expect(ownerRes.body.data.orders.map((o: any) => o.orderNumber)).toContain(
+          `OUT-SEC05-E1-${testRunId}`
+        );
+
+        // Global Platform ADMIN
+        const adminRes = await request(app)
+          .get(`/api/organizer/orders?eventId=${event2.id}`)
+          .set('Cookie', globalAdminAuth.cookie)
+          .expect(200);
+        expect(adminRes.body.data.orders.map((o: any) => o.orderNumber)).toContain(
+          `OUT-SEC05-E2-${testRunId}`
+        );
+      });
+    });
+  });
+
+  // ===========================================================================
+  // 10. Stage 6 Implementation 2.2: P1 Security Remediation (SEC-06, SEC-07, SEC-08, SEC-09, SEC-11)
+  // ===========================================================================
+  describe('10. Stage 6 Implementation 2.2: P1 Security Remediation (SEC-06, SEC-07, SEC-08, SEC-09, SEC-11)', () => {
+    // =========================================================================
+    // SEC-06: Prevent Raw Invitation Token Exposure
+    // =========================================================================
+    describe('SEC-06: Invitation Token Exposure Prevention', () => {
+      it('omits raw token from POST /api/events/:eventId/team/invitations and POST .../resend responses while delivering valid token via email', async () => {
+        const recipientUser = await prisma.user.create({
+          data: {
+            email: `sec06_recipient_${testRunId}@outside.vip`,
+            name: 'SEC-06 Recipient',
+            role: 'ATTENDEE',
+            emailVerified: true,
+            emailVerifiedAt: new Date(),
+          },
+        });
+        createdUserIds.push(recipientUser.id);
+        const recipientAuth = await createAuth(recipientUser.id);
+
+        // 1. Invite member -> response MUST NOT contain token
+        const inviteRes = await request(app)
+          .post(`/api/events/${event1.id}/team/invitations`)
+          .set('Cookie', organizerAuth.cookie)
+          .set('x-csrf-token', organizerAuth.csrf)
+          .send({
+            email: recipientUser.email,
+            role: 'HOST',
+          })
+          .expect(201);
+
+        expect(inviteRes.body.success).toBe(true);
+        expect(inviteRes.body.invitation).toBeDefined();
+        expect(inviteRes.body.invitation.token).toBeUndefined();
+        expect('token' in inviteRes.body.invitation).toBe(false);
+
+        const firstEmail = sentTeamInvitationEmails
+          .slice()
+          .reverse()
+          .find((e) => e.to === recipientUser.email.toLowerCase());
+        expect(firstEmail).toBeDefined();
+        const firstToken = firstEmail!.inviteUrl.split('/').pop()!;
+        expect(firstToken).toMatch(/^[a-f0-9]{64}$/);
+
+        // 2. Resend invitation -> response MUST NOT contain token
+        const resendRes = await request(app)
+          .post(`/api/events/${event1.id}/team/invitations/${inviteRes.body.invitation.id}/resend`)
+          .set('Cookie', organizerAuth.cookie)
+          .set('x-csrf-token', organizerAuth.csrf)
+          .expect(200);
+
+        expect(resendRes.body.success).toBe(true);
+        expect(resendRes.body.invitation).toBeDefined();
+        expect(resendRes.body.invitation.token).toBeUndefined();
+        expect('token' in resendRes.body.invitation).toBe(false);
+
+        const secondEmail = sentTeamInvitationEmails
+          .slice()
+          .reverse()
+          .find((e) => e.to === recipientUser.email.toLowerCase());
+        expect(secondEmail).toBeDefined();
+        const rotatedToken = secondEmail!.inviteUrl.split('/').pop()!;
+        expect(rotatedToken).toMatch(/^[a-f0-9]{64}$/);
+        expect(rotatedToken).not.toBe(firstToken);
+
+        // 3. Inspection and acceptance via the emailed token continue to succeed
+        const inspectRes = await request(app)
+          .get(`/api/team/invitations/${rotatedToken}`)
+          .expect(200);
+        expect(inspectRes.body.invitation.status).toBe('PENDING');
+
+        const acceptRes = await request(app)
+          .post(`/api/team/invitations/${rotatedToken}/accept`)
+          .set('Cookie', recipientAuth.cookie)
+          .set('x-csrf-token', recipientAuth.csrf)
+          .expect(200);
+        expect(acceptRes.body.membership.role).toBe('HOST');
+        expect(acceptRes.body.membership.status).toBe('ACTIVE');
+      });
+    });
+
+    // =========================================================================
+    // SEC-07: Explicitly Deny Hosts Access to Organizer Event Details
+    // =========================================================================
+    describe('SEC-07: Host Access to Organizer Event Details Denied', () => {
+      it('rejects active Event Host calling GET /api/organizer/events/:id with 403 Forbidden', async () => {
+        // Ensure hostUser is an active HOST on event1
+        await prisma.eventTeamMember.updateMany({
+          where: { eventId: event1.id, userId: hostUser.id },
+          data: { role: EventTeamRole.HOST, status: TeamMemberStatus.ACTIVE },
+        });
+
+        const res = await request(app)
+          .get(`/api/organizer/events/${event1.id}`)
+          .set('Cookie', hostAuth.cookie)
+          .expect(403);
+
+        expect(res.body.error.message).toMatch(/Event hosts are restricted|permission/i);
+      });
+
+      it('allows active Event Admin calling GET /api/organizer/events/:id with 200 OK', async () => {
+        const res = await request(app)
+          .get(`/api/organizer/events/${event1.id}`)
+          .set('Cookie', adminAuth.cookie)
+          .expect(200);
+
+        expect(res.body.success).toBe(true);
+        expect(res.body.data.event.id).toBe(event1.id);
+      });
+
+      it('allows Event Owner calling GET /api/organizer/events/:id with 200 OK', async () => {
+        const res = await request(app)
+          .get(`/api/organizer/events/${event1.id}`)
+          .set('Cookie', organizerAuth.cookie)
+          .expect(200);
+
+        expect(res.body.success).toBe(true);
+        expect(res.body.data.event.id).toBe(event1.id);
+      });
+
+      it('rejects non-member user calling GET /api/organizer/events/:id with 403 Forbidden', async () => {
+        await request(app)
+          .get(`/api/organizer/events/${event1.id}`)
+          .set('Cookie', outsiderAuth.cookie)
+          .expect(403);
+      });
+
+      it('rejects revoked or suspended Event Admin calling GET /api/organizer/events/:id with 403 Forbidden', async () => {
+        const tempAdminUser = await prisma.user.create({
+          data: {
+            email: `sec07_revoked_admin_${testRunId}@outside.vip`,
+            name: 'SEC-07 Revoked Admin',
+            role: 'ATTENDEE',
+            emailVerified: true,
+            emailVerifiedAt: new Date(),
+          },
+        });
+        createdUserIds.push(tempAdminUser.id);
+        const tempAdminAuth = await createAuth(tempAdminUser.id);
+
+        const tempMember = await prisma.eventTeamMember.create({
+          data: {
+            eventId: event1.id,
+            userId: tempAdminUser.id,
+            role: EventTeamRole.ADMIN,
+            status: TeamMemberStatus.INACTIVE,
+            permissions: { canEditDetails: true },
+            invitedById: organizerUser.id,
+          },
+        });
+
+        await request(app)
+          .get(`/api/organizer/events/${event1.id}`)
+          .set('Cookie', tempAdminAuth.cookie)
+          .expect(403);
+
+        await prisma.eventTeamMember.update({
+          where: { id: tempMember.id },
+          data: { status: TeamMemberStatus.REVOKED },
+        });
+
+        await request(app)
+          .get(`/api/organizer/events/${event1.id}`)
+          .set('Cookie', tempAdminAuth.cookie)
+          .expect(403);
+      });
+    });
+
+    // =========================================================================
+    // SEC-08: Correct PromotionVisitorDay Click Counter Consistency
+    // =========================================================================
+    describe('SEC-08: PromotionVisitorDay Click Counter Consistency', () => {
+      it('does not increment PromotionVisitorDay.clickCount on duplicate or concurrent clicks within 15 minutes, and increments after dedup expiration', async () => {
+        const sec08Slug = `sec08-promo-${testRunId}`;
+        const createLinkRes = await request(app)
+          .post(`/api/events/${event1.id}/promotions/links`)
+          .set('Cookie', organizerAuth.cookie)
+          .set('x-csrf-token', organizerAuth.csrf)
+          .send({
+            name: 'SEC-08 Campaign Link',
+            slug: sec08Slug,
+          })
+          .expect(201);
+
+        const sec08LinkId = createLinkRes.body.link.id;
+        const rawVid = `vid_sec08_${testRunId}_123456`;
+        const canonicalId = deriveCanonicalVisitorId(rawVid);
+        const todayUtc = new Date(
+          Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), new Date().getUTCDate())
+        );
+
+        // 1. First click -> creates 1 PromotionClick and sets PromotionVisitorDay.clickCount = 1
+        await request(app)
+          .get(`/r/${sec08Slug}`)
+          .set('Cookie', `${VISITOR_COOKIE_NAME}=${rawVid}`)
+          .expect(302);
+
+        let clickRows = await prisma.promotionClick.count({
+          where: { promotionLinkId: sec08LinkId, canonicalVisitorId: canonicalId },
+        });
+        let visitorDay = await prisma.promotionVisitorDay.findUnique({
+          where: {
+            promotionLinkId_canonicalVisitorId_visitDate: {
+              promotionLinkId: sec08LinkId,
+              canonicalVisitorId: canonicalId,
+              visitDate: todayUtc,
+            },
+          },
+        });
+        expect(clickRows).toBe(1);
+        expect(visitorDay?.clickCount).toBe(1);
+
+        // 2. Duplicate click within 15 minutes -> neither PromotionClick nor PromotionVisitorDay.clickCount increments
+        await request(app)
+          .get(`/r/${sec08Slug}`)
+          .set('Cookie', `${VISITOR_COOKIE_NAME}=${rawVid}`)
+          .expect(302);
+
+        clickRows = await prisma.promotionClick.count({
+          where: { promotionLinkId: sec08LinkId, canonicalVisitorId: canonicalId },
+        });
+        visitorDay = await prisma.promotionVisitorDay.findUnique({
+          where: {
+            promotionLinkId_canonicalVisitorId_visitDate: {
+              promotionLinkId: sec08LinkId,
+              canonicalVisitorId: canonicalId,
+              visitDate: todayUtc,
+            },
+          },
+        });
+        expect(clickRows).toBe(1);
+        expect(visitorDay?.clickCount).toBe(1);
+
+        // 3. Concurrent duplicate clicks within 15 minutes -> still 1
+        await Promise.all(
+          Array.from({ length: 4 }, () =>
+            request(app)
+              .get(`/r/${sec08Slug}`)
+              .set('Cookie', `${VISITOR_COOKIE_NAME}=${rawVid}`)
+              .expect(302)
+          )
+        );
+
+        clickRows = await prisma.promotionClick.count({
+          where: { promotionLinkId: sec08LinkId, canonicalVisitorId: canonicalId },
+        });
+        visitorDay = await prisma.promotionVisitorDay.findUnique({
+          where: {
+            promotionLinkId_canonicalVisitorId_visitDate: {
+              promotionLinkId: sec08LinkId,
+              canonicalVisitorId: canonicalId,
+              visitDate: todayUtc,
+            },
+          },
+        });
+        expect(clickRows).toBe(1);
+        expect(visitorDay?.clickCount).toBe(1);
+
+        // Verify unique visitor count and 30-day attribution remain intact
+        const uniqueVisitors = await prisma.promotionVisitorDay.count({
+          where: { promotionLinkId: sec08LinkId },
+        });
+        expect(uniqueVisitors).toBe(1);
+
+        const attr = await prisma.promotionVisitorAttribution.findUnique({
+          where: {
+            canonicalVisitorId_eventId: {
+              canonicalVisitorId: canonicalId,
+              eventId: event1.id,
+            },
+          },
+        });
+        expect(attr?.promotionLinkId).toBe(sec08LinkId);
+
+        // 4. Simulate 15-minute deduplication window expiration -> next click increments both to 2
+        const redis = getRedisClient();
+        await redis.del(`click_dedup:${canonicalId}:${sec08LinkId}`);
+
+        await request(app)
+          .get(`/r/${sec08Slug}`)
+          .set('Cookie', `${VISITOR_COOKIE_NAME}=${rawVid}`)
+          .expect(302);
+
+        clickRows = await prisma.promotionClick.count({
+          where: { promotionLinkId: sec08LinkId, canonicalVisitorId: canonicalId },
+        });
+        visitorDay = await prisma.promotionVisitorDay.findUnique({
+          where: {
+            promotionLinkId_canonicalVisitorId_visitDate: {
+              promotionLinkId: sec08LinkId,
+              canonicalVisitorId: canonicalId,
+              visitDate: todayUtc,
+            },
+          },
+        });
+        expect(clickRows).toBe(2);
+        expect(visitorDay?.clickCount).toBe(2);
+      });
+    });
+
+    // =========================================================================
+    // SEC-09: Fix Host-to-Admin Invitation Acceptance Lifecycle
+    // =========================================================================
+    describe('SEC-09: Host-to-Admin Invitation Acceptance Lifecycle', () => {
+      it('transitions an INACTIVE Host with a DISABLED personal link to ADMIN upon invitation acceptance without trigger failure, archiving personal link and preserving history', async () => {
+        const sec09User = await prisma.user.create({
+          data: {
+            email: `sec09_host_to_admin_${testRunId}@outside.vip`,
+            name: 'SEC-09 Host To Admin',
+            role: 'ATTENDEE',
+            emailVerified: true,
+            emailVerifiedAt: new Date(),
+          },
+        });
+        createdUserIds.push(sec09User.id);
+        const sec09Auth = await createAuth(sec09User.id);
+
+        // 1. Invite and accept as HOST
+        await request(app)
+          .post(`/api/events/${event1.id}/team/invitations`)
+          .set('Cookie', organizerAuth.cookie)
+          .set('x-csrf-token', organizerAuth.csrf)
+          .send({ email: sec09User.email, role: 'HOST' })
+          .expect(201);
+
+        const hostInviteEmail = sentTeamInvitationEmails
+          .slice()
+          .reverse()
+          .find((e) => e.to === sec09User.email.toLowerCase());
+        const hostInviteToken = hostInviteEmail!.inviteUrl.split('/').pop()!;
+
+        const hostAcceptRes = await request(app)
+          .post(`/api/team/invitations/${hostInviteToken}/accept`)
+          .set('Cookie', sec09Auth.cookie)
+          .set('x-csrf-token', sec09Auth.csrf)
+          .expect(200);
+
+        const memberId = hostAcceptRes.body.membership.memberId;
+        const hostLinkId = hostAcceptRes.body.membership.hostLink.id;
+        const initialSlug = hostAcceptRes.body.membership.hostLink.slug;
+
+        // Customize slug to create historical alias and record a click
+        const customSlug = `sec09-custom-${testRunId}`;
+        await request(app)
+          .patch(`/api/host/events/${event1.id}/slug`)
+          .set('Cookie', sec09Auth.cookie)
+          .set('x-csrf-token', sec09Auth.csrf)
+          .send({ slug: customSlug })
+          .expect(200);
+
+        await request(app)
+          .get(`/r/${customSlug}`)
+          .set('Cookie', `${VISITOR_COOKIE_NAME}=vid_sec09_history_${testRunId}`)
+          .expect(302);
+
+        // 2. Organizer sets Host membership to INACTIVE (which disables their personal link to DISABLED)
+        await request(app)
+          .patch(`/api/events/${event1.id}/team/members/${memberId}`)
+          .set('Cookie', organizerAuth.cookie)
+          .set('x-csrf-token', organizerAuth.csrf)
+          .send({ status: 'INACTIVE' })
+          .expect(200);
+
+        const disabledLink = await prisma.promotionLink.findUnique({ where: { id: hostLinkId } });
+        expect(disabledLink?.status).toBe('DISABLED');
+
+        // 3. Organizer invites the inactive user as Event Admin
+        await request(app)
+          .post(`/api/events/${event1.id}/team/invitations`)
+          .set('Cookie', organizerAuth.cookie)
+          .set('x-csrf-token', organizerAuth.csrf)
+          .send({
+            email: sec09User.email,
+            role: 'ADMIN',
+            permissions: {
+              canEditDetails: true,
+              canViewAnalytics: true,
+            },
+          })
+          .expect(201);
+
+        const adminInviteEmail = sentTeamInvitationEmails
+          .slice()
+          .reverse()
+          .find((e) => e.to === sec09User.email.toLowerCase());
+        const adminInviteToken = adminInviteEmail!.inviteUrl.split('/').pop()!;
+
+        // 4. User accepts the ADMIN invitation -> succeeds cleanly without trg_protect_host_membership_mutation error
+        const adminAcceptRes = await request(app)
+          .post(`/api/team/invitations/${adminInviteToken}/accept`)
+          .set('Cookie', sec09Auth.cookie)
+          .set('x-csrf-token', sec09Auth.csrf)
+          .expect(200);
+
+        expect(adminAcceptRes.body.success).toBe(true);
+        expect(adminAcceptRes.body.membership.memberId).toBe(memberId);
+        expect(adminAcceptRes.body.membership.role).toBe('ADMIN');
+        expect(adminAcceptRes.body.membership.status).toBe('ACTIVE');
+
+        // 5. Verify DB state: member is ACTIVE ADMIN, personal Host link is ARCHIVED, historical aliases & clicks preserved
+        const updatedMember = await prisma.eventTeamMember.findUnique({ where: { id: memberId } });
+        expect(updatedMember?.role).toBe(EventTeamRole.ADMIN);
+        expect(updatedMember?.status).toBe(TeamMemberStatus.ACTIVE);
+        expect((updatedMember?.permissions as any)?.canEditDetails).toBe(true);
+        expect((updatedMember?.permissions as any)?.canViewAnalytics).toBe(true);
+
+        const archivedLink = await prisma.promotionLink.findUnique({
+          where: { id: hostLinkId },
+          include: { slugRegistry: true },
+        });
+        expect(archivedLink?.status).toBe('ARCHIVED');
+        const slugs = archivedLink?.slugRegistry.map((s) => s.slug) || [];
+        expect(slugs).toContain(initialSlug);
+        expect(slugs).toContain(customSlug);
+
+        const clickHistoryCount = await prisma.promotionClick.count({
+          where: { promotionLinkId: hostLinkId },
+        });
+        expect(clickHistoryCount).toBe(1);
+      });
+    });
+
+    // =========================================================================
+    // SEC-11: Prevent Promotional Analytics Foreign-Key Failures During Event Deletion
+    // =========================================================================
+    describe('SEC-11: Promotional Analytics Protection During Event Deletion', () => {
+      it('rejects deleting an event with existing promotional links or analytics with 409 Conflict instead of 500 P2003, while preserving authorization and clean-event deletion', async () => {
+        // 1. Create an event with a promotional link and recorded click
+        const eventWithPromos = await prisma.event.create({
+          data: {
+            organizerId: organizerUser.id,
+            title: `SEC-11 Promo Protected Event ${testRunId}`,
+            slug: `sec11-promo-event-${testRunId}`,
+            description: 'Event with promotional history',
+            category: 'MUSIC',
+            venueName: 'SEC-11 Arena',
+            venueAddress: '11 Security Way',
+            city: 'Nairobi',
+            startAt: new Date(Date.now() + 86400000 * 20),
+            endAt: new Date(Date.now() + 86400000 * 21),
+            coverImageUrl: 'https://outside.vip/sec11.jpg',
+            status: 'DRAFT',
+          },
+        });
+        createdEventIds.push(eventWithPromos.id);
+
+        const promoSlug = `sec11-camp-${testRunId}`;
+        const linkRes = await request(app)
+          .post(`/api/events/${eventWithPromos.id}/promotions/links`)
+          .set('Cookie', organizerAuth.cookie)
+          .set('x-csrf-token', organizerAuth.csrf)
+          .send({
+            name: 'SEC-11 Launch Campaign',
+            slug: promoSlug,
+          })
+          .expect(201);
+        const promoLinkId = linkRes.body.link.id;
+
+        await request(app)
+          .get(`/r/${promoSlug}`)
+          .set('Cookie', `${VISITOR_COOKIE_NAME}=vid_sec11_${testRunId}`)
+          .expect(302);
+
+        // 2. Grant an Event Admin without canDeleteEvent and another with canDeleteEvent
+        const noDeleteAdmin = await prisma.user.create({
+          data: {
+            email: `sec11_nodelete_admin_${testRunId}@outside.vip`,
+            name: 'No Delete Admin',
+            role: 'ATTENDEE',
+            emailVerified: true,
+            emailVerifiedAt: new Date(),
+          },
+        });
+        createdUserIds.push(noDeleteAdmin.id);
+        const noDeleteAdminAuth = await createAuth(noDeleteAdmin.id);
+
+        await prisma.eventTeamMember.create({
+          data: {
+            eventId: eventWithPromos.id,
+            userId: noDeleteAdmin.id,
+            role: EventTeamRole.ADMIN,
+            status: TeamMemberStatus.ACTIVE,
+            permissions: { canEditDetails: true, canDeleteEvent: false },
+            invitedById: organizerUser.id,
+          },
+        });
+
+        const canDeleteAdmin = await prisma.user.create({
+          data: {
+            email: `sec11_candelete_admin_${testRunId}@outside.vip`,
+            name: 'Can Delete Admin',
+            role: 'ATTENDEE',
+            emailVerified: true,
+            emailVerifiedAt: new Date(),
+          },
+        });
+        createdUserIds.push(canDeleteAdmin.id);
+        const canDeleteAdminAuth = await createAuth(canDeleteAdmin.id);
+
+        await prisma.eventTeamMember.create({
+          data: {
+            eventId: eventWithPromos.id,
+            userId: canDeleteAdmin.id,
+            role: EventTeamRole.ADMIN,
+            status: TeamMemberStatus.ACTIVE,
+            permissions: { canDeleteEvent: true },
+            invitedById: organizerUser.id,
+          },
+        });
+
+        // 3. Event Admin with canDeleteEvent: false is rejected with 403 Forbidden first
+        await request(app)
+          .delete(`/api/organizer/events/${eventWithPromos.id}`)
+          .set('Cookie', noDeleteAdminAuth.cookie)
+          .set('x-csrf-token', noDeleteAdminAuth.csrf)
+          .expect(403);
+
+        // 4. Event Owner attempting to delete event with promotional links receives 409 Conflict (not 500)
+        const ownerDelRes = await request(app)
+          .delete(`/api/organizer/events/${eventWithPromos.id}`)
+          .set('Cookie', organizerAuth.cookie)
+          .set('x-csrf-token', organizerAuth.csrf)
+          .expect(409);
+
+        expect(ownerDelRes.body.error.code).toBe('EVENT_HAS_PROMOTIONAL_HISTORY');
+        expect(ownerDelRes.body.error.message).toMatch(/unpublish or archive/i);
+
+        // 5. Event Admin with canDeleteEvent: true also receives 409 Conflict when promotional links exist
+        const adminDelRes = await request(app)
+          .delete(`/api/organizer/events/${eventWithPromos.id}`)
+          .set('Cookie', canDeleteAdminAuth.cookie)
+          .set('x-csrf-token', canDeleteAdminAuth.csrf)
+          .expect(409);
+
+        expect(adminDelRes.body.error.code).toBe('EVENT_HAS_PROMOTIONAL_HISTORY');
+
+        // Verify event, promotional link, slug alias, and click history remain completely intact
+        const checkEvent = await prisma.event.findUnique({ where: { id: eventWithPromos.id } });
+        expect(checkEvent).not.toBeNull();
+        const checkLink = await prisma.promotionLink.findUnique({ where: { id: promoLinkId } });
+        expect(checkLink).not.toBeNull();
+        const checkClicks = await prisma.promotionClick.count({ where: { promotionLinkId: promoLinkId } });
+        expect(checkClicks).toBe(1);
+
+        // 6. Clean event with no orders, tickets, or promotional links can be deleted cleanly (200 OK)
+        const cleanEvent = await prisma.event.create({
+          data: {
+            organizerId: organizerUser.id,
+            title: `SEC-11 Clean Deletable Event ${testRunId}`,
+            slug: `sec11-clean-event-${testRunId}`,
+            description: 'Clean event without promos or orders',
+            category: 'MUSIC',
+            venueName: 'SEC-11 Clean Venue',
+            venueAddress: '12 Clean Way',
+            city: 'Nairobi',
+            startAt: new Date(Date.now() + 86400000 * 25),
+            endAt: new Date(Date.now() + 86400000 * 26),
+            coverImageUrl: 'https://outside.vip/sec11-clean.jpg',
+            status: 'DRAFT',
+          },
+        });
+
+        const cleanDelRes = await request(app)
+          .delete(`/api/organizer/events/${cleanEvent.id}`)
+          .set('Cookie', organizerAuth.cookie)
+          .set('x-csrf-token', organizerAuth.csrf)
+          .expect(200);
+
+        expect(cleanDelRes.body.success).toBe(true);
+        const deletedCheck = await prisma.event.findUnique({ where: { id: cleanEvent.id } });
+        expect(deletedCheck).toBeNull();
+      });
     });
   });
 });
