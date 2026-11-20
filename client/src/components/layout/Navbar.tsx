@@ -20,6 +20,7 @@ export const Navbar: React.FC = () => {
   const isHome = location.pathname === '/';
   const isDiscover = location.pathname.startsWith('/events');
   const isOrganizer = location.pathname.startsWith('/organizer');
+  const isHost = location.pathname.startsWith('/host');
   const isAtendee = location.pathname.startsWith('/atendee');
   const isOrder = location.pathname.startsWith('/order');
   const isTeam = location.pathname.startsWith('/team');
@@ -45,7 +46,7 @@ export const Navbar: React.FC = () => {
     ? isScrolled
       ? 'bg-[#FAF8F5]/90 backdrop-blur-md border-b border-stone-200/80 shadow-xs'
       : 'bg-transparent border-b border-transparent'
-    : isDiscover || isOrganizer || isAuthPage
+    : isDiscover || isOrganizer || isHost || isAuthPage
       ? 'bg-[#FAF8F5]/95 backdrop-blur-md border-b border-stone-200/80 shadow-2xs'
       : 'bg-white/95 backdrop-blur-md border-b border-gray-200';
 
@@ -155,6 +156,13 @@ export const Navbar: React.FC = () => {
                     Organizer Dashboard
                   </Link>
                   <Link
+                    to="/host"
+                    onClick={() => setShowAccountMenu(false)}
+                    className="w-full text-left px-3 py-1.5 rounded hover:bg-stone-50 text-stone-700 block font-medium"
+                  >
+                    Host Workspace
+                  </Link>
+                  <Link
                     to="/organizer/finance"
                     onClick={() => setShowAccountMenu(false)}
                     className="w-full text-left px-3 py-1.5 rounded hover:bg-stone-50 text-stone-700 block font-medium"
@@ -234,6 +242,13 @@ export const Navbar: React.FC = () => {
               className="block text-stone-600 hover:text-stone-900 py-1.5"
             >
               Organizer Portal
+            </Link>
+            <Link
+              to="/host"
+              onClick={() => setMobileMenuOpen(false)}
+              className="block text-stone-600 hover:text-stone-900 py-1.5"
+            >
+              Host Workspace
             </Link>
             <Link
               to="/organizer/finance"

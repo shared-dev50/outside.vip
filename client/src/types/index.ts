@@ -664,6 +664,185 @@ export interface OrganizerEventItem extends Event {
   revenueFormatted: string;
 }
 
+export type EventTeamRole = 'ADMIN' | 'HOST';
+export type TeamMemberStatus = 'ACTIVE' | 'INACTIVE' | 'REVOKED';
+export type TeamInvitationStatus = 'PENDING' | 'ACCEPTED' | 'EXPIRED' | 'REVOKED';
+
+export interface EventAdminPermissions {
+  canEditDetails: boolean;
+  canManageTickets: boolean;
+  canViewOrders: boolean;
+  canManageTeam: boolean;
+  canManagePromotions: boolean;
+  canViewAnalytics: boolean;
+  canManageRefunds: boolean;
+  canManagePayouts: boolean;
+  canCancelEvent: boolean;
+  canDeleteEvent: boolean;
+}
+
+export interface EventTeamMemberItem {
+  id: string;
+  userId: string;
+  name: string;
+  email: string;
+  role: EventTeamRole;
+  status: TeamMemberStatus;
+  permissions: EventAdminPermissions | null;
+  hostLink?: {
+    id: string;
+    slug?: string;
+    name: string;
+  } | null;
+  createdAt: string;
+}
+
+export interface EventTeamInvitationItem {
+  id: string;
+  email: string;
+  role: EventTeamRole;
+  status: TeamInvitationStatus;
+  permissions: EventAdminPermissions | null;
+  expiresAt: string;
+  createdAt: string;
+}
+
+export interface EventTeamData {
+  members: EventTeamMemberItem[];
+  invitations: EventTeamInvitationItem[];
+}
+
+export interface TeamInvitationMetadata {
+  id: string;
+  eventId: string;
+  eventTitle: string;
+  eventSlug: string;
+  organizerName: string;
+  role: EventTeamRole;
+  emailMasked: string;
+  status: TeamInvitationStatus;
+  expiresAt: string;
+}
+
+export interface AcceptTeamInvitationResult {
+  memberId: string;
+  eventId: string;
+  role: EventTeamRole;
+  status: TeamMemberStatus;
+  hostLink?: {
+    id: string;
+    slug: string;
+    name: string;
+  };
+}
+
+export type PromotionLinkType = 'CAMPAIGN' | 'HOST';
+export type PromotionLinkStatus = 'ACTIVE' | 'DISABLED' | 'ARCHIVED';
+
+export interface PromotionLinkItem {
+  id: string;
+  eventId: string;
+  type: PromotionLinkType;
+  status: PromotionLinkStatus;
+  name: string;
+  primarySlug: string | null;
+  shortUrl: string | null;
+  historicalAliases: string[];
+  host?: {
+    memberId: string;
+    name: string;
+    email: string;
+  } | null;
+  createdAt: string;
+}
+
+export interface DailyTrafficItem {
+  date: string;
+  clicks: number;
+  uniqueVisitors: number;
+}
+
+export interface ReferrerTrafficItem {
+  referrer: string;
+  clicks: number;
+}
+
+export interface UtmTrafficItem {
+  source: string | null;
+  clicks: number;
+}
+
+export interface LinkTrafficBreakdownItem {
+  linkId: string;
+  name: string;
+  type: PromotionLinkType;
+  primarySlug: string | null;
+  totalClicks: number;
+  uniqueVisitors: number;
+}
+
+export interface EventPromotionalAnalytics {
+  traffic: {
+    totalClicks: number;
+    uniqueVisitors: number;
+    dailyVisits: DailyTrafficItem[];
+    topReferrers: ReferrerTrafficItem[];
+    utmBreakdown: UtmTrafficItem[];
+    linksBreakdown?: LinkTrafficBreakdownItem[];
+  };
+}
+
+export interface CustomizeSlugResult {
+  success: boolean;
+  primarySlug: string;
+  previousSlug?: string;
+  shortUrl: string;
+  unchanged?: boolean;
+}
+
+export interface HostAssignedEvent {
+  id: string;
+  slug: string;
+  title: string;
+  status: string;
+  startAt: string;
+  endAt: string;
+  venueName: string | null;
+  city: string;
+  coverImageUrl: string | null;
+}
+
+export interface HostLinkSummary {
+  id: string;
+  name: string;
+  status: PromotionLinkStatus;
+  slug: string;
+  shortUrl: string;
+}
+
+export interface HostAssignedEventItem {
+  membershipId: string;
+  event: HostAssignedEvent;
+  hostLink: HostLinkSummary | null;
+}
+
+export interface HostPromotionalAnalytics {
+  link: {
+    id: string;
+    name: string;
+    primarySlug: string | null;
+    shortUrl: string | null;
+    status: PromotionLinkStatus;
+  };
+  traffic: {
+    totalClicks: number;
+    uniqueVisitors: number;
+    dailyVisits: DailyTrafficItem[];
+    topReferrers: ReferrerTrafficItem[];
+    utmBreakdown?: UtmTrafficItem[];
+  };
+}
+
 export type {
   TierFeeBreakdown,
   CombinedEarningsBreakdown,

@@ -133,6 +133,10 @@ export async function updatePromotionLink(
     throw new NotFoundError('Promotion link not found');
   }
 
+  if (link.status === PromotionLinkStatus.ARCHIVED) {
+    throw new BadRequestError('Cannot modify an archived promotional link');
+  }
+
   // INVARIANT ENFORCEMENT: A Host link may be ACTIVE only when its associated
   // membership has role = HOST and status = ACTIVE.
   if (updates.status === 'ACTIVE' && link.type === 'HOST') {
@@ -195,6 +199,10 @@ export async function customizePromotionSlug(params: CustomizeSlugParams) {
 
   if (!link) {
     throw new NotFoundError('Promotion link not found');
+  }
+
+  if (link.status === PromotionLinkStatus.ARCHIVED) {
+    throw new BadRequestError('Cannot modify an archived promotional link');
   }
 
   // Verify caller authorization for this link

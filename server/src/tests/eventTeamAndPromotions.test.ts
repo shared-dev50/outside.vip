@@ -3,6 +3,7 @@ import request from 'supertest';
 import { app } from '../app.js';
 import { prisma } from '../db/prisma.js';
 import { EventTeamRole, TeamMemberStatus, TeamInvitationStatus } from '@prisma/client';
+import { VISITOR_COOKIE_NAME } from '../modules/promotions/promotions.constants.js';
 import { createSession } from '../lib/session.service.js';
 import { sentTeamInvitationEmails } from '../lib/email.service.js';
 
@@ -974,6 +975,479 @@ describe('Event Teams, Invitations & Host Promotional Tools (Stage 2)', () => {
         where: { promotionLinkId: host2LinkId },
       });
       expect(afterAnalytics).toBe(beforeAnalytics);
+    });
+  });
+
+  // =========================================================================
+  // 7. Final Host Link Lifecycle & Authorization Verification (Stage 3 Verification)
+  // =========================================================================
+  describe('7. Final Host Link Lifecycle & Authorization Verification (Stage 3 Verification)', () => {
+    // ==========================================
+    // 2A. Disabled Host links
+    // ==========================================
+    describe('2A. Disabled Host links', () => {
+      let testHostSlug: string;
+
+      beforeAll(async () => {
+        // Ensure hostUser has an ACTIVE link on event1
+        const hostLink = await prisma.promotionLink.findFirst({
+          where: { eventId: event1.id, hostMember: { userId: hostUser.id } },
+          include: { slugRegistry: { where: { isPrimary: true } } },
+        });
+        testHostSlug = hostLink!.slugRegistry[0].slug;
+      });
+
+      it('2A.1: Host cannot reactivate their own DISABLED link via promotion management endpoints', async () => {
+        // Organizer disables the host link
+        const hostLink = await prisma.promotionLink.findFirst({
+          where: { eventId: event1.id, hostMember: { userId: hostUser.id } },
+        });
+        await request(app)
+          .patch(`/api/events/${event1.id}/promotions/links/${hostLink!.id}`)
+          .set('Cookie', organizerAuth.cookie)
+          .set('x-csrf-token', organizerAuth.csrf)
+          .send({ status: 'DISABLED' })
+          .expect(200);
+
+        // Host attempts to reactivate link
+        await request(app)
+          .patch(`/api/events/${event1.id}/promotions/links/${hostLink!.id}`)
+          .set('Cookie', hostAuth.cookie)
+          .set('x-csrf-token', hostAuth.csrf)
+          .send({ status: 'ACTIVE' })
+          .expect(403);
+
+        const checkLink = await prisma.promotionLink.findUnique({ where: { id: hostLink!.id } });
+        expect(checkLink?.status).toBe('DISABLED');
+      });
+
+      it('2A.2: A DISABLED link redirects to the correct public event page', async () => {
+        const res = await request(app)
+          .get(`/r/${testHostSlug}`)
+          .expect(302);
+
+        expect(res.header.location).toContain(`/events/${event1.slug}`);
+      });
+
+      it('2A.3: Resolving a DISABLED link does not record a new click, visitor-day entry, or attribution', async () => {
+        const hostLink = await prisma.promotionLink.findFirst({
+          where: { eventId: event1.id, hostMember: { userId: hostUser.id } },
+        });
+
+        const initialClicks = await prisma.promotionClick.count({
+          where: { promotionLinkId: hostLink!.id },
+        });
+        const initialVisitorDays = await prisma.promotionVisitorDay.count({
+          where: { promotionLinkId: hostLink!.id },
+        });
+        const initialAttributions = await prisma.promotionVisitorAttribution.count({
+          where: { promotionLinkId: hostLink!.id },
+        });
+
+        // Resolve disabled link
+        await request(app)
+          .get(`/r/${testHostSlug}`)
+          .set('Cookie', `${VISITOR_COOKIE_NAME}=test_vid_disabled_check_${testRunId}`)
+          .expect(302);
+
+        const afterClicks = await prisma.promotionClick.count({
+          where: { promotionLinkId: hostLink!.id },
+        });
+        const afterVisitorDays = await prisma.promotionVisitorDay.count({
+          where: { promotionLinkId: hostLink!.id },
+        });
+        const afterAttributions = await prisma.promotionVisitorAttribution.count({
+          where: { promotionLinkId: hostLink!.id },
+        });
+
+        expect(afterClicks).toBe(initialClicks);
+        expect(afterVisitorDays).toBe(initialVisitorDays);
+        expect(afterAttributions).toBe(initialAttributions);
+      });
+
+      it('2A.4: Organizer-controlled pause/resume behavior works through existing authorized management endpoint', async () => {
+        const hostLink = await prisma.promotionLink.findFirst({
+          where: { eventId: event1.id, hostMember: { userId: hostUser.id } },
+        });
+
+        // Resume to ACTIVE
+        const res = await request(app)
+          .patch(`/api/events/${event1.id}/promotions/links/${hostLink!.id}`)
+          .set('Cookie', organizerAuth.cookie)
+          .set('x-csrf-token', organizerAuth.csrf)
+          .send({ status: 'ACTIVE' })
+          .expect(200);
+
+        expect(res.body.link.status).toBe('ACTIVE');
+
+        const activeLink = await prisma.promotionLink.findUnique({ where: { id: hostLink!.id } });
+        expect(activeLink?.status).toBe('ACTIVE');
+      });
+    });
+
+    // ==========================================
+    // 2B. Archived Host links
+    // ==========================================
+    describe('2B. Archived Host links', () => {
+      let archivedHostUser: any;
+      let archivedHostAuth: { cookie: string; csrf: string };
+      let archivedHostMember: any;
+      let archivedLinkId: string;
+      let archivedSlug: string;
+
+      beforeAll(async () => {
+        archivedHostUser = await prisma.user.create({
+          data: {
+            email: `archived_host_${testRunId}@outside.vip`,
+            name: 'Archived Host User',
+            role: 'ATTENDEE',
+            emailVerified: true,
+            emailVerifiedAt: new Date(),
+          },
+        });
+        createdUserIds.push(archivedHostUser.id);
+        archivedHostAuth = await createAuth(archivedHostUser.id);
+
+        // Invite and accept as HOST on event1
+        await request(app)
+          .post(`/api/events/${event1.id}/team/invitations`)
+          .set('Cookie', organizerAuth.cookie)
+          .set('x-csrf-token', organizerAuth.csrf)
+          .send({ email: archivedHostUser.email, role: EventTeamRole.HOST })
+          .expect(201);
+
+        const inviteEmail = sentTeamInvitationEmails.find((e) => e.to === archivedHostUser.email);
+        const rawToken = inviteEmail!.inviteUrl.split('/').pop()!;
+
+        const acceptRes = await request(app)
+          .post(`/api/team/invitations/${rawToken}/accept`)
+          .set('Cookie', archivedHostAuth.cookie)
+          .set('x-csrf-token', archivedHostAuth.csrf)
+          .expect(200);
+
+        archivedLinkId = acceptRes.body.membership.hostLink.id;
+        archivedSlug = acceptRes.body.membership.hostLink.slug;
+        archivedHostMember = await prisma.eventTeamMember.findFirst({
+          where: { eventId: event1.id, userId: archivedHostUser.id },
+        });
+
+        // Record a click while active to generate historical analytics
+        await request(app).get(`/r/${archivedSlug}`).expect(302);
+
+        // Revoke the host to archive their link
+        await request(app)
+          .delete(`/api/events/${event1.id}/team/members/${archivedHostMember.id}`)
+          .set('Cookie', organizerAuth.cookie)
+          .set('x-csrf-token', organizerAuth.csrf)
+          .expect(200);
+      });
+
+      it('2B.1: An ARCHIVED Host link cannot be customized or reactivated through Host-facing endpoints', async () => {
+        // Attempting to customize slug on an archived link fails
+        await request(app)
+          .patch(`/api/host/events/${event1.id}/slug`)
+          .set('Cookie', archivedHostAuth.cookie)
+          .set('x-csrf-token', archivedHostAuth.csrf)
+          .send({ slug: `try-custom-${testRunId}` })
+          .expect(401); // Active Host membership required
+
+        // Attempting to customize slug via management route rejects archived link
+        await request(app)
+          .post(`/api/events/${event1.id}/promotions/links/${archivedLinkId}/slug`)
+          .set('Cookie', organizerAuth.cookie)
+          .set('x-csrf-token', organizerAuth.csrf)
+          .send({ slug: `org-custom-${testRunId}` })
+          .expect(400); // Cannot modify an archived promotional link
+      });
+
+      it('2B.2: An archived link cannot be used to create a duplicate Host link for the same event and Host', async () => {
+        // Re-invite the revoked host
+        await request(app)
+          .post(`/api/events/${event1.id}/team/invitations`)
+          .set('Cookie', organizerAuth.cookie)
+          .set('x-csrf-token', organizerAuth.csrf)
+          .send({ email: archivedHostUser.email, role: EventTeamRole.HOST })
+          .expect(201);
+
+        const newEmail = sentTeamInvitationEmails
+          .slice()
+          .reverse()
+          .find((e) => e.to === archivedHostUser.email);
+        const newToken = newEmail!.inviteUrl.split('/').pop()!;
+
+        const acceptRes = await request(app)
+          .post(`/api/team/invitations/${newToken}/accept`)
+          .set('Cookie', archivedHostAuth.cookie)
+          .set('x-csrf-token', archivedHostAuth.csrf)
+          .expect(200);
+
+        // Verifies the existing link is reused, not duplicated
+        expect(acceptRes.body.membership.hostLink.id).toBe(archivedLinkId);
+
+        const totalLinksForHost = await prisma.promotionLink.count({
+          where: { eventId: event1.id, hostMemberId: acceptRes.body.membership.memberId },
+        });
+        expect(totalLinksForHost).toBe(1);
+      });
+
+      it('2B.3: Existing slug aliases and historical analytics remain preserved', async () => {
+        const link = await prisma.promotionLink.findUnique({
+          where: { id: archivedLinkId },
+          include: { slugRegistry: true },
+        });
+        expect(link).not.toBeNull();
+        expect(link?.slugRegistry.length).toBeGreaterThanOrEqual(1);
+
+        // Historical click remains intact
+        const clicks = await prisma.promotionClick.count({
+          where: { promotionLinkId: archivedLinkId },
+        });
+        expect(clicks).toBeGreaterThanOrEqual(1);
+      });
+
+      it('2B.4: Changing member role from HOST archives the host link', async () => {
+        // Update member role from HOST to ADMIN
+        const member = await prisma.eventTeamMember.findFirst({
+          where: { eventId: event1.id, userId: archivedHostUser.id },
+        });
+        await request(app)
+          .patch(`/api/events/${event1.id}/team/members/${member!.id}`)
+          .set('Cookie', organizerAuth.cookie)
+          .set('x-csrf-token', organizerAuth.csrf)
+          .send({ role: EventTeamRole.ADMIN, permissions: { canViewAnalytics: true } })
+          .expect(200);
+
+        const link = await prisma.promotionLink.findUnique({
+          where: { id: archivedLinkId },
+        });
+        expect(link?.status).toBe('ARCHIVED');
+      });
+    });
+
+    // ==========================================
+    // 2C. Inactive or revoked Host membership
+    // ==========================================
+    describe('2C. Inactive or revoked Host membership', () => {
+      let lifecycleHostUser: any;
+      let lifecycleHostAuth: { cookie: string; csrf: string };
+      let lifecycleMember: any;
+
+      beforeAll(async () => {
+        lifecycleHostUser = await prisma.user.create({
+          data: {
+            email: `lifecycle_host_${testRunId}@outside.vip`,
+            name: 'Lifecycle Host',
+            role: 'ATTENDEE',
+            emailVerified: true,
+            emailVerifiedAt: new Date(),
+          },
+        });
+        createdUserIds.push(lifecycleHostUser.id);
+        lifecycleHostAuth = await createAuth(lifecycleHostUser.id);
+
+        await request(app)
+          .post(`/api/events/${event1.id}/team/invitations`)
+          .set('Cookie', organizerAuth.cookie)
+          .set('x-csrf-token', organizerAuth.csrf)
+          .send({ email: lifecycleHostUser.email, role: EventTeamRole.HOST })
+          .expect(201);
+
+        const email = sentTeamInvitationEmails
+          .slice()
+          .reverse()
+          .find((e) => e.to === lifecycleHostUser.email);
+        const token = email!.inviteUrl.split('/').pop()!;
+
+        await request(app)
+          .post(`/api/team/invitations/${token}/accept`)
+          .set('Cookie', lifecycleHostAuth.cookie)
+          .set('x-csrf-token', lifecycleHostAuth.csrf)
+          .expect(200);
+
+        lifecycleMember = await prisma.eventTeamMember.findFirst({
+          where: { eventId: event1.id, userId: lifecycleHostUser.id },
+        });
+      });
+
+      it('2C.1: INACTIVE Host cannot retrieve Host analytics', async () => {
+        // Set to INACTIVE
+        await request(app)
+          .patch(`/api/events/${event1.id}/team/members/${lifecycleMember.id}`)
+          .set('Cookie', organizerAuth.cookie)
+          .set('x-csrf-token', organizerAuth.csrf)
+          .send({ status: TeamMemberStatus.INACTIVE })
+          .expect(200);
+
+        await request(app)
+          .get(`/api/host/events/${event1.id}/analytics`)
+          .set('Cookie', lifecycleHostAuth.cookie)
+          .expect(403);
+      });
+
+      it('2C.2: INACTIVE Host cannot customize their personal slug', async () => {
+        await request(app)
+          .patch(`/api/host/events/${event1.id}/slug`)
+          .set('Cookie', lifecycleHostAuth.cookie)
+          .set('x-csrf-token', lifecycleHostAuth.csrf)
+          .send({ slug: `inactive-slug-${testRunId}` })
+          .expect(401);
+      });
+
+      it('2C.3: INACTIVE Host does not receive protected Host event/link information', async () => {
+        const res = await request(app)
+          .get('/api/host/events')
+          .set('Cookie', lifecycleHostAuth.cookie)
+          .expect(200);
+
+        // Must not contain event1
+        const found = res.body.events.find((e: any) => e.event.id === event1.id);
+        expect(found).toBeUndefined();
+      });
+
+      it('2C.4: REVOKED Host cannot retrieve Host analytics', async () => {
+        // Revoke member
+        await request(app)
+          .delete(`/api/events/${event1.id}/team/members/${lifecycleMember.id}`)
+          .set('Cookie', organizerAuth.cookie)
+          .set('x-csrf-token', organizerAuth.csrf)
+          .expect(200);
+
+        await request(app)
+          .get(`/api/host/events/${event1.id}/analytics`)
+          .set('Cookie', lifecycleHostAuth.cookie)
+          .expect(403);
+      });
+
+      it('2C.5: REVOKED Host cannot customize personal slug', async () => {
+        await request(app)
+          .patch(`/api/host/events/${event1.id}/slug`)
+          .set('Cookie', lifecycleHostAuth.cookie)
+          .set('x-csrf-token', lifecycleHostAuth.csrf)
+          .send({ slug: `revoked-slug-${testRunId}` })
+          .expect(401);
+      });
+
+      it('2C.6: REVOKED Host receives empty assigned events list', async () => {
+        const res = await request(app)
+          .get('/api/host/events')
+          .set('Cookie', lifecycleHostAuth.cookie)
+          .expect(200);
+
+        expect(res.body.events.length).toBe(0);
+      });
+    });
+
+    // ==========================================
+    // 2D. Active Host membership
+    // ==========================================
+    describe('2D. Active Host membership', () => {
+      let activeHostUser: any;
+      let activeHostAuth: { cookie: string; csrf: string };
+      let activeHostLink: any;
+      let activePrimarySlug: string;
+
+      beforeAll(async () => {
+        activeHostUser = await prisma.user.create({
+          data: {
+            email: `active_host_2d_${testRunId}@outside.vip`,
+            name: 'Active Host 2D',
+            role: 'ATTENDEE',
+            emailVerified: true,
+            emailVerifiedAt: new Date(),
+          },
+        });
+        createdUserIds.push(activeHostUser.id);
+        activeHostAuth = await createAuth(activeHostUser.id);
+
+        await request(app)
+          .post(`/api/events/${event1.id}/team/invitations`)
+          .set('Cookie', organizerAuth.cookie)
+          .set('x-csrf-token', organizerAuth.csrf)
+          .send({ email: activeHostUser.email, role: EventTeamRole.HOST })
+          .expect(201);
+
+        const email = sentTeamInvitationEmails
+          .slice()
+          .reverse()
+          .find((e) => e.to === activeHostUser.email);
+        const token = email!.inviteUrl.split('/').pop()!;
+
+        const acceptRes = await request(app)
+          .post(`/api/team/invitations/${token}/accept`)
+          .set('Cookie', activeHostAuth.cookie)
+          .set('x-csrf-token', activeHostAuth.csrf)
+          .expect(200);
+
+        activeHostLink = acceptRes.body.membership.hostLink;
+        activePrimarySlug = acceptRes.body.membership.hostLink.slug;
+      });
+
+      it('2D.1: Active Host can retrieve assigned events and personal link details', async () => {
+        const res = await request(app)
+          .get('/api/host/events')
+          .set('Cookie', activeHostAuth.cookie)
+          .expect(200);
+
+        expect(res.body.success).toBe(true);
+        const item = res.body.events.find((e: any) => e.event.id === event1.id);
+        expect(item).toBeDefined();
+        expect(item.hostLink.slug).toBe(activePrimarySlug);
+        expect(item.hostLink.status).toBe('ACTIVE');
+      });
+
+      it('2D.2: Active Host retrieves analytics for their own personal link only', async () => {
+        const res = await request(app)
+          .get(`/api/host/events/${event1.id}/analytics`)
+          .set('Cookie', activeHostAuth.cookie)
+          .expect(200);
+
+        expect(res.body.success).toBe(true);
+        expect(res.body.link.id).toBe(activeHostLink.id);
+        expect(res.body.link.primarySlug).toBe(activePrimarySlug);
+        expect(res.body.traffic.totalClicks).toBeDefined();
+        expect(res.body.traffic.uniqueVisitors).toBeDefined();
+        expect(res.body.traffic.dailyVisits).toBeDefined();
+        expect(res.body.traffic.topReferrers).toBeDefined();
+      });
+
+      it('2D.3: Cross-Host Isolation: Host A cannot access Host B link or analytics', async () => {
+        // activeHostUser queries event1 analytics -> gets activeHostLink stats, NOT hostUser's stats
+        const res = await request(app)
+          .get(`/api/host/events/${event1.id}/analytics`)
+          .set('Cookie', activeHostAuth.cookie)
+          .expect(200);
+
+        expect(res.body.link.id).toBe(activeHostLink.id);
+
+        // activeHostUser queries event2 where they are NOT assigned -> 403 Forbidden
+        await request(app)
+          .get(`/api/host/events/${event2.id}/analytics`)
+          .set('Cookie', activeHostAuth.cookie)
+          .expect(403);
+      });
+
+      it('2D.4: Active Host can customize slug and retain previous slugs as aliases', async () => {
+        const initialSlug = activePrimarySlug;
+        const newSlug = `active-2d-new-${testRunId}`;
+
+        const res = await request(app)
+          .patch(`/api/host/events/${event1.id}/slug`)
+          .set('Cookie', activeHostAuth.cookie)
+          .set('x-csrf-token', activeHostAuth.csrf)
+          .send({ slug: newSlug })
+          .expect(200);
+
+        expect(res.body.primarySlug).toBe(newSlug);
+        expect(res.body.previousSlug).toBe(initialSlug);
+
+        // Verify new slug resolves and redirects to event
+        const newRes = await request(app).get(`/r/${newSlug}`).expect(302);
+        expect(newRes.header.location).toContain(`/events/${event1.slug}`);
+
+        // Verify previous slug resolves and redirects to event (alias preserved)
+        const prevRes = await request(app).get(`/r/${initialSlug}`).expect(302);
+        expect(prevRes.header.location).toContain(`/events/${event1.slug}`);
+      });
     });
   });
 });

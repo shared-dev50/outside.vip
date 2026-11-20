@@ -55,8 +55,9 @@ export async function handleShortLinkRedirect(
   // 4. Extract whitelisted marketing query parameters
   const whitelistedParams = extractWhitelistedParams(req.query as Record<string, unknown>);
 
-  // 5. If not a bot, record click and establish persistent attribution
-  if (!isBot) {
+  // 5. If not a bot and link is ACTIVE, record click and establish persistent attribution
+  // Disabled or archived links redirect to public event without recording clicks, visitor-days, or attribution
+  if (!isBot && link.status === 'ACTIVE') {
     const canonicalVisitorId = deriveCanonicalVisitorId(rawVid);
     const visitorIdHash = hashVisitorId(rawVid);
     const referrer = (req.headers['referer'] || req.headers['referrer']) as string | undefined;
@@ -76,16 +77,14 @@ export async function handleShortLinkRedirect(
       console.warn('[Promotions] Click recording error:', err);
     });
 
-    // If link is ACTIVE, establish persistent 30-day attribution
-    if (link.status === 'ACTIVE') {
-      await upsertVisitorAttribution({
-        rawVid,
-        eventId: event.id,
-        promotionLinkId: link.id,
-      }).catch((err) => {
-        console.warn('[Promotions] Attribution upsert error:', err);
-      });
-    }
+    // Establish persistent 30-day attribution
+    await upsertVisitorAttribution({
+      rawVid,
+      eventId: event.id,
+      promotionLinkId: link.id,
+    }).catch((err) => {
+      console.warn('[Promotions] Attribution upsert error:', err);
+    });
   }
 
   // 6. Set Host-Only outside_vid cookie (HttpOnly, SameSite=Lax, Secure, NO Domain)
