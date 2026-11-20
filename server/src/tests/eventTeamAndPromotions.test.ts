@@ -1450,4 +1450,197 @@ describe('Event Teams, Invitations & Host Promotional Tools (Stage 2)', () => {
       });
     });
   });
+
+  // =========================================================================
+  // 8. Stage 3 Integration: Event Admin Permissions & Dual-Role Workspaces
+  // =========================================================================
+  describe('8. Stage 3 Integration: Event Admin Permissions & Dual-Role Workspaces', () => {
+    let limitedAdminUser: any;
+    let limitedAdminAuth: { cookie: string; csrf: string };
+    let dualRoleUser: any;
+    let dualRoleAuth: { cookie: string; csrf: string };
+    let dualRoleEvent: any;
+
+    beforeAll(async () => {
+      // 1. Create limited admin user with canEditDetails: true, but canManageTickets: false
+      limitedAdminUser = await prisma.user.create({
+        data: {
+          email: `limited_admin_${testRunId}@outside.vip`,
+          name: 'Limited Admin',
+          role: 'ATTENDEE',
+          emailVerified: true,
+          emailVerifiedAt: new Date(),
+        },
+      });
+      createdUserIds.push(limitedAdminUser.id);
+      limitedAdminAuth = await createAuth(limitedAdminUser.id);
+
+      await request(app)
+        .post(`/api/events/${event1.id}/team/invitations`)
+        .set('Cookie', organizerAuth.cookie)
+        .set('x-csrf-token', organizerAuth.csrf)
+        .send({
+          email: limitedAdminUser.email,
+          role: EventTeamRole.ADMIN,
+          permissions: {
+            canEditDetails: true,
+            canManageTickets: false,
+            canManagePromotions: false,
+          },
+        })
+        .expect(201);
+
+      const email = sentTeamInvitationEmails
+        .slice()
+        .reverse()
+        .find((e) => e.to === limitedAdminUser.email);
+      const token = email!.inviteUrl.split('/').pop()!;
+
+      await request(app)
+        .post(`/api/team/invitations/${token}/accept`)
+        .set('Cookie', limitedAdminAuth.cookie)
+        .set('x-csrf-token', limitedAdminAuth.csrf)
+        .expect(200);
+
+      // 2. Create dual-role user (Organizer of their own event + Host on event1)
+      dualRoleUser = await prisma.user.create({
+        data: {
+          email: `dual_role_${testRunId}@outside.vip`,
+          name: 'Dual Role User',
+          role: 'ORGANIZER',
+          emailVerified: true,
+          emailVerifiedAt: new Date(),
+        },
+      });
+      createdUserIds.push(dualRoleUser.id);
+      dualRoleAuth = await createAuth(dualRoleUser.id);
+
+      dualRoleEvent = await prisma.event.create({
+        data: {
+          organizerId: dualRoleUser.id,
+          title: `Dual Role Organizer Event - ${testRunId}`,
+          description: 'Organizer event description',
+          coverImageUrl: 'https://example.com/cover.jpg',
+          venueAddress: '500 Dual Way',
+          slug: `dual-role-evt-${testRunId}`,
+          category: 'MUSIC',
+          status: 'PUBLISHED',
+          startAt: new Date(Date.now() + 86400000 * 20),
+          endAt: new Date(Date.now() + 86400000 * 21),
+          venueName: 'Dual Arena',
+          city: 'Nairobi',
+          country: 'KE',
+        },
+      });
+      createdEventIds.push(dualRoleEvent.id);
+
+      // Invite dualRoleUser as HOST on event1
+      await request(app)
+        .post(`/api/events/${event1.id}/team/invitations`)
+        .set('Cookie', organizerAuth.cookie)
+        .set('x-csrf-token', organizerAuth.csrf)
+        .send({
+          email: dualRoleUser.email,
+          role: EventTeamRole.HOST,
+        })
+        .expect(201);
+
+      const hostInviteEmail = sentTeamInvitationEmails
+        .slice()
+        .reverse()
+        .find((e) => e.to === dualRoleUser.email);
+      const hostToken = hostInviteEmail!.inviteUrl.split('/').pop()!;
+
+      await request(app)
+        .post(`/api/team/invitations/${hostToken}/accept`)
+        .set('Cookie', dualRoleAuth.cookie)
+        .set('x-csrf-token', dualRoleAuth.csrf)
+        .expect(200);
+    });
+
+    it('enforces canManageTickets: Admin without canManageTickets cannot modify ticket tiers', async () => {
+      // limitedAdmin attempts to update event details AND ticket tiers
+      await request(app)
+        .put(`/api/organizer/events/${event1.id}`)
+        .set('Cookie', limitedAdminAuth.cookie)
+        .set('x-csrf-token', limitedAdminAuth.csrf)
+        .send({
+          title: `Updated Title By Admin - ${testRunId}`,
+          ticketTiers: [
+            {
+              name: 'Hacked VIP Tier',
+              priceInCents: 10000,
+              totalCapacity: 50,
+            },
+          ],
+        })
+        .expect(403);
+    });
+
+    it('allows Admin with canEditDetails to update event details when ticketTiers are omitted', async () => {
+      const updateRes = await request(app)
+        .put(`/api/organizer/events/${event1.id}`)
+        .set('Cookie', limitedAdminAuth.cookie)
+        .set('x-csrf-token', limitedAdminAuth.csrf)
+        .send({
+          title: `Updated Title By Admin - ${testRunId}`,
+        })
+        .expect(200);
+
+      expect(updateRes.body.data.event.title).toBe(`Updated Title By Admin - ${testRunId}`);
+    });
+
+    it('dual-role user accesses both Organizer workspace and Host workspace independently', async () => {
+      // 1. Organizer workspace: retrieves their owned event
+      const orgRes = await request(app)
+        .get('/api/organizer/events')
+        .set('Cookie', dualRoleAuth.cookie)
+        .expect(200);
+
+      const owned = orgRes.body.data.events.find((e: any) => e.id === dualRoleEvent.id);
+      expect(owned).toBeDefined();
+
+      // 2. Host workspace: retrieves their assigned host event (event1)
+      const hostRes = await request(app)
+        .get('/api/host/events')
+        .set('Cookie', dualRoleAuth.cookie)
+        .expect(200);
+
+      const hosted = hostRes.body.events.find((e: any) => e.event.id === event1.id);
+      expect(hosted).toBeDefined();
+      expect(hosted.hostLink.status).toBe('ACTIVE');
+    });
+
+    it('revoking Host membership removes Host access without affecting Organizer workspace', async () => {
+      const hostMember = await prisma.eventTeamMember.findFirst({
+        where: { eventId: event1.id, userId: dualRoleUser.id },
+      });
+
+      // Revoke host membership on event1
+      await request(app)
+        .delete(`/api/events/${event1.id}/team/members/${hostMember!.id}`)
+        .set('Cookie', organizerAuth.cookie)
+        .set('x-csrf-token', organizerAuth.csrf)
+        .expect(200);
+
+      // Host workspace: event1 is no longer returned
+      const hostRes = await request(app)
+        .get('/api/host/events')
+        .set('Cookie', dualRoleAuth.cookie)
+        .expect(200);
+
+      const hosted = hostRes.body.events.find((e: any) => e.event.id === event1.id);
+      expect(hosted).toBeUndefined();
+
+      // Organizer workspace: owned event remains 100% accessible
+      const orgRes = await request(app)
+        .get('/api/organizer/events')
+        .set('Cookie', dualRoleAuth.cookie)
+        .expect(200);
+
+      const owned = orgRes.body.data.events.find((e: any) => e.id === dualRoleEvent.id);
+      expect(owned).toBeDefined();
+      expect(owned.id).toBe(dualRoleEvent.id);
+    });
+  });
 });

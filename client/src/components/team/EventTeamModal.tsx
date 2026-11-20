@@ -149,6 +149,8 @@ export const EventTeamModal: React.FC<EventTeamModalProps> = ({
     }) => api.team.updateMember(event.id, params.memberId, params.updates),
     onSuccess: (updated) => {
       queryClient.invalidateQueries({ queryKey: ['event-team', event.id] });
+      queryClient.invalidateQueries({ queryKey: ['event-promotion-links', event.id] });
+      queryClient.invalidateQueries({ queryKey: ['event-promotion-analytics', event.id] });
       setEditingMember(null);
       setRoleChangeTarget(null);
       showNotification('success', `Team member ${updated.name || updated.email} updated`);
@@ -162,6 +164,8 @@ export const EventTeamModal: React.FC<EventTeamModalProps> = ({
     mutationFn: (memberId: string) => api.team.revokeMember(event.id, memberId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['event-team', event.id] });
+      queryClient.invalidateQueries({ queryKey: ['event-promotion-links', event.id] });
+      queryClient.invalidateQueries({ queryKey: ['event-promotion-analytics', event.id] });
       setMemberToRevoke(null);
       showNotification('success', 'Team member access revoked and personal links archived');
     },

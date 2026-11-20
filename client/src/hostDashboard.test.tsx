@@ -322,6 +322,30 @@ describe('Stage 3 Implementation 3: Host Dashboard, Personal Promotional Links &
       expect(html).toContain('No Traffic Recorded Yet');
       expect(html).toContain('Share your promotional link on your channels to start discovering your audience');
     });
+
+    it('does not leak stale traffic analytics when active event link does not match cached analytics', () => {
+      // Event 2 is active (hostLink: link-host-amina-2)
+      queryClient.setQueryData(['host-events'], [mockHostAssignedEvents[1]]);
+      // Cache analytics for Event 2, but simulate mismatched/stale data belonging to link-host-amina-1
+      queryClient.setQueryData(
+        ['host-analytics', mockHostAssignedEvents[1].event.id],
+        mockHostAnalytics // belongs to link-host-amina-1 with 450 clicks
+      );
+
+      const html = renderToString(
+        <QueryClientProvider client={queryClient}>
+          <MemoryRouter>
+            <HostDashboardPage />
+          </MemoryRouter>
+        </QueryClientProvider>
+      );
+
+      // Stale traffic data (450 clicks, 310 visitors) must NOT be rendered
+      expect(html).not.toContain('450');
+      expect(html).not.toContain('Repeat visitor frequency');
+      // Instead, loading indicator is safely rendered
+      expect(html).toContain('Loading private traffic analytics...');
+    });
   });
 
   // =========================================================================

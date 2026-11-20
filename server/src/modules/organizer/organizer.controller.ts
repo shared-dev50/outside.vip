@@ -920,6 +920,9 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
 
     if (existingEvent.organizerId !== organizerId && req.user!.role !== 'ADMIN') {
       await resolveEventAuthorization(id, req.user!, 'canEditDetails');
+      if (input.ticketTiers !== undefined) {
+        await resolveEventAuthorization(id, req.user!, 'canManageTickets');
+      }
     }
 
     if (existingEvent.organizerId !== organizerId && req.user!.role === 'ADMIN') {

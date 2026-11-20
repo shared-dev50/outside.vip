@@ -105,7 +105,13 @@ export const HostDashboardPage: React.FC<HostDashboardPageProps> = ({
     enabled: Boolean(activeEvent?.id),
   });
 
-  const traffic = analyticsData?.traffic;
+  // Verify that analyticsData matches the currently active host link to prevent stale data leaking during event switches
+  const isAnalyticsForCurrentEvent = Boolean(
+    !activeHostLink || (analyticsData?.link && analyticsData.link.id === activeHostLink.id)
+  );
+  const isActuallyLoadingAnalytics =
+    isLoadingAnalytics || (Boolean(activeEvent?.id) && !isAnalyticsForCurrentEvent);
+  const traffic = !isActuallyLoadingAnalytics ? analyticsData?.traffic : null;
 
   // Mutation: Customize Slug
   const customizeSlugMutation = useMutation({
@@ -515,7 +521,7 @@ export const HostDashboardPage: React.FC<HostDashboardPageProps> = ({
                   </div>
 
                   {/* Analytics States */}
-                  {isLoadingAnalytics ? (
+                  {isActuallyLoadingAnalytics ? (
                     <div className="py-16 text-center text-stone-500 font-mono text-xs flex items-center justify-center gap-2">
                       <RotateCw className="w-4 h-4 animate-spin text-stone-700" />
                       <span>Loading private traffic analytics...</span>

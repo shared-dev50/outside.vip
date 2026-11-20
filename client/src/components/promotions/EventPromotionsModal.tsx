@@ -173,6 +173,7 @@ export const EventPromotionsModal: React.FC<EventPromotionsModalProps> = ({
     onSuccess: (updated) => {
       queryClient.invalidateQueries({ queryKey: ['event-promotion-links', event.id] });
       queryClient.invalidateQueries({ queryKey: ['event-promotion-analytics', event.id] });
+      queryClient.invalidateQueries({ queryKey: ['event-team', event.id] });
       setLinkToArchive(null);
       showNotification('success', `Promotional link "${updated.name}" updated`);
     },
@@ -187,6 +188,7 @@ export const EventPromotionsModal: React.FC<EventPromotionsModalProps> = ({
     onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ['event-promotion-links', event.id] });
       queryClient.invalidateQueries({ queryKey: ['event-promotion-analytics', event.id] });
+      queryClient.invalidateQueries({ queryKey: ['event-team', event.id] });
       setLinkToCustomizeSlug(null);
       setCustomSlugInput('');
       setSlugError(null);
