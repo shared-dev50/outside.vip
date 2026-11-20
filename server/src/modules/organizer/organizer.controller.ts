@@ -34,7 +34,12 @@ import { extractYouTubeVideoId, normalizeYouTubeUrl } from '../../utils/youtube.
 import { hashEventPassword } from '../events/passwordAccess.service.js';
 import { cancelWaitlistForEventIds, processWaitlistForTier } from '../waitlist/waitlist.service.js';
 import { verifyAndNormalizeLocation } from '../places/places.service.js';
-import { resolveEventAuthorization, hasEventPermission } from '../eventTeam/eventTeam.permissions.js';
+import {
+  resolveEventAuthorization,
+  hasEventPermission,
+  parseAdminPermissions,
+  EventAdminPermissions,
+} from '../eventTeam/eventTeam.permissions.js';
 
 async function saveOrganizerPayoutDetails(
   tx: any,
@@ -311,9 +316,51 @@ export async function getDashboardStats(req: Request, res: Response, next: NextF
 export async function listOrganizerEvents(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const organizerId = req.user!.userId;
+    const isPlatformAdmin = req.user!.role === Role.ADMIN;
+
+    // SEC-14 Part A: Include events where the user holds an active EventTeamMember ADMIN membership
+    // without weakening authorization or exposing owner-only payout details.
+    const adminMembershipsByEventId = new Map<string, EventAdminPermissions>();
+    if (prisma.eventTeamMember && typeof prisma.eventTeamMember.findMany === 'function') {
+      try {
+        const memberships = await prisma.eventTeamMember.findMany({
+          where: {
+            userId: organizerId,
+            role: 'ADMIN',
+            status: 'ACTIVE',
+          },
+          select: {
+            eventId: true,
+            role: true,
+            status: true,
+            permissions: true,
+          },
+        });
+        if (Array.isArray(memberships)) {
+          for (const membership of memberships) {
+            if (membership.role === 'ADMIN' && membership.status === 'ACTIVE') {
+              adminMembershipsByEventId.set(
+                membership.eventId,
+                parseAdminPermissions(membership.permissions)
+              );
+            }
+          }
+        }
+      } catch {
+        // Ignore if eventTeamMember is unavailable in isolated unit test mocks
+      }
+    }
+
+    const adminEventIds = Array.from(adminMembershipsByEventId.keys());
+    const where: Prisma.EventWhereInput =
+      adminEventIds.length > 0
+        ? {
+            OR: [{ organizerId }, { id: { in: adminEventIds } }],
+          }
+        : { organizerId };
 
     const events = await prisma.event.findMany({
-      where: { organizerId },
+      where,
       orderBy: { updatedAt: 'desc' },
       include: {
         ticketTiers: {
@@ -333,21 +380,38 @@ export async function listOrganizerEvents(req: Request, res: Response, next: Nex
       },
     });
 
-    const enhanced = events.map((event) => {
+    const seenEventIds = new Set<string>();
+    const enhanced = [];
+
+    for (const event of events) {
+      if (seenEventIds.has(event.id)) {
+        continue;
+      }
+      seenEventIds.add(event.id);
+
+      const isOwner = event.organizerId === organizerId;
+      const adminPerms = adminMembershipsByEventId.get(event.id);
+      const canSeeOrderFinancials =
+        isOwner || isPlatformAdmin || Boolean(adminPerms?.canViewOrders);
+
       const totalCapacity = event.ticketTiers.reduce((acc, t) => acc + t.totalCapacity, 0);
       const ticketsSold = event.ticketTiers.reduce((acc, t) => acc + t.soldQuantity, 0);
-      const revenueInCents = event.orders.reduce((acc, o) => acc + o.totalInCents, 0);
+      const revenueInCents = canSeeOrderFinancials
+        ? event.orders.reduce((acc, o) => acc + o.totalInCents, 0)
+        : 0;
 
-      // Clean orders array and sensitive fields before returning
+      // Clean orders array and sensitive/owner-only fields before returning
       const { orders: _, passwordHash: __, ...rest } = event;
-      return {
+      enhanced.push({
         ...rest,
+        payoutDetails: null,
+        payoutDetailsId: isOwner ? event.payoutDetailsId : null,
         totalCapacity,
         ticketsSold,
         revenueInCents,
         revenueFormatted: `$${(revenueInCents / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
-      };
-    });
+      });
+    }
 
     res.json({
       success: true,

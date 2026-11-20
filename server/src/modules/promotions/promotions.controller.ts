@@ -4,6 +4,7 @@ import {
   VISITOR_COOKIE_NAME,
   COOKIE_MAX_AGE_SECONDS,
   isBotUserAgent,
+  isValidVisitorToken,
 } from './promotions.constants.js';
 import {
   generateVisitorToken,
@@ -46,9 +47,9 @@ export async function handleShortLinkRedirect(
   const { link, event } = resolved;
 
   // 2. Extract or generate first-party visitor cookie
+  // SEC-13 Part B: Enforce strict visitor token length (16..128) and format without truncating oversized tokens
   const incomingVid = req.cookies?.[VISITOR_COOKIE_NAME];
-  const hadValidVisitorCookie =
-    typeof incomingVid === 'string' && incomingVid.trim().length >= 16;
+  const hadValidVisitorCookie = isValidVisitorToken(incomingVid);
   const rawVid = hadValidVisitorCookie ? incomingVid.trim() : generateVisitorToken();
 
   // 3. Bot Detection

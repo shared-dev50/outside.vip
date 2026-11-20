@@ -14,6 +14,11 @@ import {
   MAX_HISTORICAL_SLUG_ALIASES_PER_LINK,
 } from '../modules/promotions/promotions.constants.js';
 import { deriveCanonicalVisitorId } from '../modules/promotions/promotions.service.js';
+import {
+  parseAdminPermissions,
+  hasEventPermission,
+  resolveEventAuthorization,
+} from '../modules/eventTeam/eventTeam.permissions.js';
 import { getRedisClient } from '../lib/redis.js';
 import { createSession, hashRateLimitIdentifier } from '../lib/session.service.js';
 import { sentTeamInvitationEmails } from '../lib/email.service.js';
@@ -180,9 +185,11 @@ describe('Event Teams, Invitations & Host Promotional Tools (Stage 2)', () => {
     await prisma.eventTeamMember.deleteMany({ where: { eventId: { in: createdEventIds } } });
 
     if (createdEventIds.length > 0) {
+      await prisma.order.deleteMany({ where: { eventId: { in: createdEventIds } } });
       await prisma.event.deleteMany({ where: { id: { in: createdEventIds } } });
     }
     if (createdUserIds.length > 0) {
+      await prisma.organizerPayoutDetails.deleteMany({ where: { userId: { in: createdUserIds } } });
       await prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
     }
   });
@@ -3879,6 +3886,700 @@ describe('Event Teams, Invitations & Host Promotional Tools (Stage 2)', () => {
           where: { promotionLinkId: hostLinkId },
         });
         expect(hostSlugs.filter((s) => !s.isPrimary).length).toBe(MAX_HISTORICAL_SLUG_ALIASES_PER_LINK);
+      });
+    });
+  });
+
+  // ===========================================================================
+  // 12. Stage 6 Implementation 3: Final Security Hardening (SEC-12, SEC-13, SEC-14)
+  // ===========================================================================
+  describe('12. Stage 6 Implementation 3: Final Security Hardening (SEC-12, SEC-13, SEC-14)', () => {
+    let sec12Owner: any;
+    let sec12OwnerAuth: { cookie: string; csrf: string };
+    let sec12Event: any;
+    let sec12UnrelatedEvent: any;
+
+    beforeAll(async () => {
+      sec12Owner = await prisma.user.create({
+        data: {
+          email: `sec12_owner_${testRunId}@outside.vip`,
+          name: 'SEC-12/14 Owner',
+          role: 'ORGANIZER',
+          emailVerified: true,
+          emailVerifiedAt: new Date(),
+        },
+      });
+      createdUserIds.push(sec12Owner.id);
+      sec12OwnerAuth = await createAuth(sec12Owner.id);
+
+      const ownerPayout = await prisma.organizerPayoutDetails.create({
+        data: {
+          userId: sec12Owner.id,
+          orgType: 'Company',
+          registeredName: 'SEC-14 Payout Co',
+          country: 'KE',
+          contactPersonName: 'Owner Contact',
+          contactEmail: sec12Owner.email,
+          accountHolderName: 'SEC-14 Owner',
+          bankName: 'Test Bank',
+          bankCountry: 'KE',
+          accountCurrency: 'USD',
+          accountNumberMasked: '••••1234',
+          accountNumberLast4: '1234',
+          accountNumberEncrypted: 'enc_test_sec14',
+        },
+      });
+
+      sec12Event = await prisma.event.create({
+        data: {
+          organizerId: sec12Owner.id,
+          title: `SEC-12/14 Hardening Event ${testRunId}`,
+          slug: `sec12-hardening-event-${testRunId}`,
+          description: 'Event for Stage 6 Implementation 3 tests',
+          category: 'MUSIC',
+          venueName: 'Hardening Hall',
+          venueAddress: '12 Security St',
+          city: 'Nairobi',
+          startAt: new Date(Date.now() + 86400000 * 40),
+          endAt: new Date(Date.now() + 86400000 * 41),
+          coverImageUrl: 'https://outside.vip/sec12.jpg',
+          status: 'PUBLISHED',
+          payoutDetailsId: ownerPayout.id,
+          ticketTiers: {
+            create: [
+              {
+                name: 'General Admission',
+                priceInCents: 5000,
+                currency: 'USD',
+                totalCapacity: 100,
+                soldQuantity: 2,
+                status: 'ACTIVE',
+              },
+            ],
+          },
+        },
+      });
+      createdEventIds.push(sec12Event.id);
+
+      // Seed a completed order on sec12Event to verify revenue masking for Event Admins
+      await prisma.order.create({
+        data: {
+          orderNumber: `OUT-SEC14-${testRunId}`,
+          idempotencyKey: `idem-sec14-${testRunId}`,
+          eventId: sec12Event.id,
+          customerName: 'Paid Buyer',
+          customerEmail: 'buyer@outside.vip',
+          customerPhone: '+254700000000',
+          totalInCents: 10500,
+          platformFeeInCents: 500,
+          organizerNetInCents: 10000,
+          currency: 'USD',
+          status: 'COMPLETED',
+          expiresAt: new Date(Date.now() + 3600000),
+        },
+      });
+
+      sec12UnrelatedEvent = await prisma.event.create({
+        data: {
+          organizerId: organizerUser.id,
+          title: `SEC-14 Unrelated Event ${testRunId}`,
+          slug: `sec14-unrelated-${testRunId}`,
+          description: 'Event belonging to another organizer',
+          category: 'MUSIC',
+          venueName: 'Other Hall',
+          venueAddress: '99 Other St',
+          city: 'Nairobi',
+          startAt: new Date(Date.now() + 86400000 * 45),
+          endAt: new Date(Date.now() + 86400000 * 46),
+          coverImageUrl: 'https://outside.vip/sec14-other.jpg',
+          status: 'PUBLISHED',
+        },
+      });
+      createdEventIds.push(sec12UnrelatedEvent.id);
+    });
+
+    // =========================================================================
+    // SEC-12: Enforce Refund and Payout Restrictions Server-Side
+    // =========================================================================
+    describe('SEC-12: Server-Side Refund & Payout Permission Restrictions', () => {
+      it('forces canManageRefunds and canManagePayouts to false across invitation creation, legacy acceptance, permission updates, and stored record evaluation while preserving the other 8 permissions and SEC-01 ceiling', async () => {
+        const sec12Admin = await prisma.user.create({
+          data: {
+            email: `sec12_admin_${testRunId}@outside.vip`,
+            name: 'SEC-12 Admin',
+            role: 'ATTENDEE',
+            emailVerified: true,
+            emailVerifiedAt: new Date(),
+          },
+        });
+        createdUserIds.push(sec12Admin.id);
+        const sec12AdminAuth = await createAuth(sec12Admin.id);
+
+        // 1. Owner attempts to invite Admin with ALL 10 permissions set to true
+        const invRes = await request(app)
+          .post(`/api/events/${sec12Event.id}/team/invitations`)
+          .set('Cookie', sec12OwnerAuth.cookie)
+          .set('x-csrf-token', sec12OwnerAuth.csrf)
+          .send({
+            email: sec12Admin.email,
+            role: 'ADMIN',
+            permissions: {
+              canEditDetails: true,
+              canManageTickets: true,
+              canViewOrders: true,
+              canManageTeam: true,
+              canManagePromotions: true,
+              canViewAnalytics: true,
+              canManageRefunds: true,
+              canManagePayouts: true,
+              canCancelEvent: true,
+              canDeleteEvent: true,
+            },
+          })
+          .expect(201);
+
+        const storedInv = await prisma.eventTeamInvitation.findUnique({
+          where: { id: invRes.body.invitation.id },
+        });
+        const invPerms = storedInv?.permissions as Record<string, boolean>;
+        expect(invPerms.canManageRefunds).toBe(false);
+        expect(invPerms.canManagePayouts).toBe(false);
+        // Other 8 permissions preserved
+        expect(invPerms.canEditDetails).toBe(true);
+        expect(invPerms.canManageTickets).toBe(true);
+        expect(invPerms.canViewOrders).toBe(true);
+        expect(invPerms.canManageTeam).toBe(true);
+        expect(invPerms.canManagePromotions).toBe(true);
+        expect(invPerms.canViewAnalytics).toBe(true);
+        expect(invPerms.canCancelEvent).toBe(true);
+        expect(invPerms.canDeleteEvent).toBe(true);
+
+        // 2. Simulate a legacy invitation row in DB with canManageRefunds/canManagePayouts: true
+        await prisma.eventTeamInvitation.update({
+          where: { id: invRes.body.invitation.id },
+          data: {
+            permissions: {
+              ...invPerms,
+              canManageRefunds: true,
+              canManagePayouts: true,
+            },
+          },
+        });
+
+        const inviteEmail = sentTeamInvitationEmails
+          .slice()
+          .reverse()
+          .find((e) => e.to === sec12Admin.email.toLowerCase());
+        const rawToken = inviteEmail!.inviteUrl.split('/').pop()!;
+
+        // Accepting the legacy invitation MUST normalize both to false
+        const acceptRes = await request(app)
+          .post(`/api/team/invitations/${rawToken}/accept`)
+          .set('Cookie', sec12AdminAuth.cookie)
+          .set('x-csrf-token', sec12AdminAuth.csrf)
+          .expect(200);
+
+        const memberId = acceptRes.body.membership.memberId;
+        const acceptedMember = await prisma.eventTeamMember.findUnique({ where: { id: memberId } });
+        const acceptedPerms = acceptedMember?.permissions as Record<string, boolean>;
+        expect(acceptedPerms.canManageRefunds).toBe(false);
+        expect(acceptedPerms.canManagePayouts).toBe(false);
+        expect(acceptedPerms.canEditDetails).toBe(true);
+
+        // 3. Owner updating permissions with canManageRefunds: true & canManagePayouts: true forces both to false
+        const updateRes = await request(app)
+          .patch(`/api/events/${sec12Event.id}/team/members/${memberId}`)
+          .set('Cookie', sec12OwnerAuth.cookie)
+          .set('x-csrf-token', sec12OwnerAuth.csrf)
+          .send({
+            permissions: {
+              canEditDetails: true,
+              canManageTickets: false,
+              canViewOrders: true,
+              canManageTeam: true,
+              canManagePromotions: true,
+              canViewAnalytics: true,
+              canManageRefunds: true,
+              canManagePayouts: true,
+              canCancelEvent: false,
+              canDeleteEvent: false,
+            },
+          })
+          .expect(200);
+
+        expect(updateRes.body.member.permissions.canManageRefunds).toBe(false);
+        expect(updateRes.body.member.permissions.canManagePayouts).toBe(false);
+        expect(updateRes.body.member.permissions.canEditDetails).toBe(true);
+        expect(updateRes.body.member.permissions.canManageTickets).toBe(false);
+
+        // 4. Directly seed an existing stored EventTeamMember row with true values to verify read/auth normalization
+        await prisma.eventTeamMember.update({
+          where: { id: memberId },
+          data: {
+            permissions: {
+              canEditDetails: true,
+              canManageTickets: true,
+              canViewOrders: true,
+              canManageTeam: true,
+              canManagePromotions: true,
+              canViewAnalytics: true,
+              canManageRefunds: true,
+              canManagePayouts: true,
+              canCancelEvent: false,
+              canDeleteEvent: false,
+            },
+          },
+        });
+
+        // Direct helper & authorization evaluation
+        const rawStored = await prisma.eventTeamMember.findUnique({ where: { id: memberId } });
+        expect(parseAdminPermissions(rawStored?.permissions).canManageRefunds).toBe(false);
+        expect(parseAdminPermissions(rawStored?.permissions).canManagePayouts).toBe(false);
+        expect(hasEventPermission(rawStored!, 'canManageRefunds')).toBe(false);
+        expect(hasEventPermission(rawStored!, 'canManagePayouts')).toBe(false);
+        expect(hasEventPermission(rawStored!, 'canEditDetails')).toBe(true);
+
+        await expect(
+          resolveEventAuthorization(
+            sec12Event.id,
+            { userId: sec12Admin.id, role: 'ATTENDEE' },
+            'canManageRefunds'
+          )
+        ).rejects.toThrow(/lack the 'canManageRefunds' permission/i);
+
+        await expect(
+          resolveEventAuthorization(
+            sec12Event.id,
+            { userId: sec12Admin.id, role: 'ATTENDEE' },
+            'canManagePayouts'
+          )
+        ).rejects.toThrow(/lack the 'canManagePayouts' permission/i);
+
+        // Team list endpoint normalizes stored records on load
+        const teamRes = await request(app)
+          .get(`/api/events/${sec12Event.id}/team`)
+          .set('Cookie', sec12OwnerAuth.cookie)
+          .expect(200);
+
+        const listed = teamRes.body.team.members.find((m: any) => m.id === memberId);
+        expect(listed).toBeDefined();
+        expect(listed.permissions.canManageRefunds).toBe(false);
+        expect(listed.permissions.canManagePayouts).toBe(false);
+        expect(listed.permissions.canEditDetails).toBe(true);
+
+        // 5. SEC-01 delegation ceiling remains intact: Event Admin attempting to grant canManageRefunds/canManagePayouts is rejected with 403
+        await request(app)
+          .post(`/api/events/${sec12Event.id}/team/invitations`)
+          .set('Cookie', sec12AdminAuth.cookie)
+          .set('x-csrf-token', sec12AdminAuth.csrf)
+          .send({
+            email: `sec12_escalated_${testRunId}@outside.vip`,
+            role: 'ADMIN',
+            permissions: { canManageRefunds: true },
+          })
+          .expect(403);
+
+        await request(app)
+          .post(`/api/events/${sec12Event.id}/team/invitations`)
+          .set('Cookie', sec12AdminAuth.cookie)
+          .set('x-csrf-token', sec12AdminAuth.csrf)
+          .send({
+            email: `sec12_escalated2_${testRunId}@outside.vip`,
+            role: 'ADMIN',
+            permissions: { canManagePayouts: true },
+          })
+          .expect(403);
+      });
+    });
+
+    // =========================================================================
+    // SEC-13 Part A: Analytics Date Filter Validation
+    // =========================================================================
+    describe('SEC-13 Part A: Analytics Date Filter Validation', () => {
+      it('rejects malformed, impossible, reversed, and excessive analytics date filters with controlled HTTP 400 responses while preserving valid date filters', async () => {
+        // 1. Malformed date strings -> 400 INVALID_DATE_FILTER
+        const malformedRes = await request(app)
+          .get(`/api/events/${sec12Event.id}/promotions/analytics?startDate=not-a-date`)
+          .set('Cookie', sec12OwnerAuth.cookie)
+          .expect(400);
+        expect(malformedRes.body.error.code).toBe('INVALID_DATE_FILTER');
+
+        const slashDateRes = await request(app)
+          .get(`/api/events/${sec12Event.id}/promotions/analytics?endDate=2026/11/20`)
+          .set('Cookie', sec12OwnerAuth.cookie)
+          .expect(400);
+        expect(slashDateRes.body.error.code).toBe('INVALID_DATE_FILTER');
+
+        // 2. Impossible calendar dates (Feb 30, Apr 31, Month 13) -> 400 INVALID_DATE_FILTER (never 500 or silent rollover)
+        for (const impossibleDate of ['2026-02-30', '2026-02-29', '2026-04-31', '2026-13-01']) {
+          const impRes = await request(app)
+            .get(`/api/events/${sec12Event.id}/promotions/analytics?startDate=${impossibleDate}`)
+            .set('Cookie', sec12OwnerAuth.cookie)
+            .expect(400);
+          expect(impRes.body.error.code).toBe('INVALID_DATE_FILTER');
+        }
+
+        // 3. Reversed date range -> 400 INVALID_DATE_RANGE
+        const reversedRes = await request(app)
+          .get(`/api/events/${sec12Event.id}/promotions/analytics?startDate=2026-11-20&endDate=2026-11-10`)
+          .set('Cookie', sec12OwnerAuth.cookie)
+          .expect(400);
+        expect(reversedRes.body.error.code).toBe('INVALID_DATE_RANGE');
+
+        // 4. Excessive date range (> 366 days) -> 400 ANALYTICS_DATE_RANGE_TOO_LARGE
+        const excessiveRes = await request(app)
+          .get(`/api/events/${sec12Event.id}/promotions/analytics?startDate=2025-01-01&endDate=2026-06-01`)
+          .set('Cookie', sec12OwnerAuth.cookie)
+          .expect(400);
+        expect(excessiveRes.body.error.code).toBe('ANALYTICS_DATE_RANGE_TOO_LARGE');
+
+        // 5. Valid ISO date presets and timestamps continue working (200 OK)
+        const now = new Date();
+        const start30d = new Date(now.getTime() - 30 * 86400000);
+        start30d.setUTCHours(0, 0, 0, 0);
+
+        const validRes = await request(app)
+          .get(
+            `/api/events/${sec12Event.id}/promotions/analytics?startDate=${encodeURIComponent(start30d.toISOString())}&endDate=${encodeURIComponent(now.toISOString())}`
+          )
+          .set('Cookie', sec12OwnerAuth.cookie)
+          .expect(200);
+
+        expect(validRes.body.success).toBe(true);
+        expect(validRes.body.analytics.traffic).toBeDefined();
+
+        // 6. Host analytics endpoint also rejects impossible dates with 400
+        const hostBadDateRes = await request(app)
+          .get(`/api/host/events/${event1.id}/analytics?startDate=2026-02-30`)
+          .set('Cookie', hostAuth.cookie)
+          .expect(400);
+        expect(hostBadDateRes.body.error.code).toBe('INVALID_DATE_FILTER');
+      });
+    });
+
+    // =========================================================================
+    // SEC-14 Part A: Event Admin Event Visibility in GET /api/organizer/events
+    // =========================================================================
+    describe('SEC-14 Part A: Event Admin Event Visibility in listOrganizerEvents', () => {
+      it('includes active ADMIN events for Event Admins without exposing owner payout details, excludes revoked/inactive/host memberships, avoids duplicates, and preserves owner & platform admin behavior', async () => {
+        // 1. Active Event Admin with canViewOrders: false
+        const noOrdersAdmin = await prisma.user.create({
+          data: {
+            email: `sec14_admin_no_orders_${testRunId}@outside.vip`,
+            name: 'SEC-14 Admin No Orders',
+            role: 'ATTENDEE',
+            emailVerified: true,
+            emailVerifiedAt: new Date(),
+          },
+        });
+        createdUserIds.push(noOrdersAdmin.id);
+        const noOrdersAdminAuth = await createAuth(noOrdersAdmin.id);
+
+        await prisma.eventTeamMember.create({
+          data: {
+            eventId: sec12Event.id,
+            userId: noOrdersAdmin.id,
+            role: EventTeamRole.ADMIN,
+            status: TeamMemberStatus.ACTIVE,
+            permissions: { canEditDetails: true, canViewOrders: false },
+            invitedById: sec12Owner.id,
+          },
+        });
+
+        const adminEventsRes = await request(app)
+          .get('/api/organizer/events')
+          .set('Cookie', noOrdersAdminAuth.cookie)
+          .expect(200);
+
+        const adminEventIds = adminEventsRes.body.data.events.map((e: any) => e.id);
+        expect(adminEventIds).toContain(sec12Event.id);
+        expect(adminEventIds).not.toContain(sec12UnrelatedEvent.id);
+
+        const visibleEvent = adminEventsRes.body.data.events.find((e: any) => e.id === sec12Event.id);
+        expect(visibleEvent.payoutDetails).toBeNull();
+        expect(visibleEvent.payoutDetailsId).toBeNull();
+        // Revenue is masked to 0 because canViewOrders is false
+        expect(visibleEvent.revenueInCents).toBe(0);
+
+        // Confirm Event Admin did NOT gain owner privileges on sec12Event
+        await request(app)
+          .put(`/api/organizer/events/${sec12Event.id}`)
+          .set('Cookie', noOrdersAdminAuth.cookie)
+          .set('x-csrf-token', noOrdersAdminAuth.csrf)
+          .send({ payoutDetails: null })
+          .expect(403);
+
+        // 2. Active Event Admin with canViewOrders: true sees revenueInCents but STILL never sees payoutDetails/payoutDetailsId
+        const withOrdersAdmin = await prisma.user.create({
+          data: {
+            email: `sec14_admin_orders_${testRunId}@outside.vip`,
+            name: 'SEC-14 Admin With Orders',
+            role: 'ATTENDEE',
+            emailVerified: true,
+            emailVerifiedAt: new Date(),
+          },
+        });
+        createdUserIds.push(withOrdersAdmin.id);
+        const withOrdersAdminAuth = await createAuth(withOrdersAdmin.id);
+
+        await prisma.eventTeamMember.create({
+          data: {
+            eventId: sec12Event.id,
+            userId: withOrdersAdmin.id,
+            role: EventTeamRole.ADMIN,
+            status: TeamMemberStatus.ACTIVE,
+            permissions: { canViewOrders: true },
+            invitedById: sec12Owner.id,
+          },
+        });
+
+        const ordersAdminRes = await request(app)
+          .get('/api/organizer/events')
+          .set('Cookie', withOrdersAdminAuth.cookie)
+          .expect(200);
+
+        const visibleWithOrders = ordersAdminRes.body.data.events.find((e: any) => e.id === sec12Event.id);
+        expect(visibleWithOrders).toBeDefined();
+        expect(visibleWithOrders.revenueInCents).toBe(10500);
+        expect(visibleWithOrders.payoutDetails).toBeNull();
+        expect(visibleWithOrders.payoutDetailsId).toBeNull();
+
+        // 3. Revoked and Inactive Admin memberships and active Host memberships do NOT expose the event
+        const revokedAdmin = await prisma.user.create({
+          data: {
+            email: `sec14_revoked_${testRunId}@outside.vip`,
+            name: 'SEC-14 Revoked Admin',
+            role: 'ATTENDEE',
+            emailVerified: true,
+            emailVerifiedAt: new Date(),
+          },
+        });
+        createdUserIds.push(revokedAdmin.id);
+        const revokedAdminAuth = await createAuth(revokedAdmin.id);
+
+        await prisma.eventTeamMember.create({
+          data: {
+            eventId: sec12Event.id,
+            userId: revokedAdmin.id,
+            role: EventTeamRole.ADMIN,
+            status: TeamMemberStatus.REVOKED,
+            permissions: { canEditDetails: true },
+            invitedById: sec12Owner.id,
+          },
+        });
+
+        const revokedRes = await request(app)
+          .get('/api/organizer/events')
+          .set('Cookie', revokedAdminAuth.cookie)
+          .expect(200);
+        expect(revokedRes.body.data.events.map((e: any) => e.id)).not.toContain(sec12Event.id);
+
+        const inactiveAdmin = await prisma.user.create({
+          data: {
+            email: `sec14_inactive_${testRunId}@outside.vip`,
+            name: 'SEC-14 Inactive Admin',
+            role: 'ATTENDEE',
+            emailVerified: true,
+            emailVerifiedAt: new Date(),
+          },
+        });
+        createdUserIds.push(inactiveAdmin.id);
+        const inactiveAdminAuth = await createAuth(inactiveAdmin.id);
+
+        await prisma.eventTeamMember.create({
+          data: {
+            eventId: sec12Event.id,
+            userId: inactiveAdmin.id,
+            role: EventTeamRole.ADMIN,
+            status: TeamMemberStatus.INACTIVE,
+            permissions: { canEditDetails: true },
+            invitedById: sec12Owner.id,
+          },
+        });
+
+        const inactiveRes = await request(app)
+          .get('/api/organizer/events')
+          .set('Cookie', inactiveAdminAuth.cookie)
+          .expect(200);
+        expect(inactiveRes.body.data.events.map((e: any) => e.id)).not.toContain(sec12Event.id);
+
+        // Active Event Host on event1 does NOT see event1 in /api/organizer/events
+        const hostOrgEventsRes = await request(app)
+          .get('/api/organizer/events')
+          .set('Cookie', hostAuth.cookie)
+          .expect(200);
+        expect(hostOrgEventsRes.body.data.events.map((e: any) => e.id)).not.toContain(event1.id);
+
+        // 4. Duplicate elimination: if owner also has an EventTeamMember ADMIN record for their own event, event appears once
+        await prisma.eventTeamMember.create({
+          data: {
+            eventId: sec12Event.id,
+            userId: sec12Owner.id,
+            role: EventTeamRole.ADMIN,
+            status: TeamMemberStatus.ACTIVE,
+            permissions: { canEditDetails: true },
+            invitedById: sec12Owner.id,
+          },
+        });
+
+        const ownerRes = await request(app)
+          .get('/api/organizer/events')
+          .set('Cookie', sec12OwnerAuth.cookie)
+          .expect(200);
+
+        const ownerMatches = ownerRes.body.data.events.filter((e: any) => e.id === sec12Event.id);
+        expect(ownerMatches.length).toBe(1);
+        expect(ownerMatches[0].revenueInCents).toBe(10500);
+        expect(ownerMatches[0].payoutDetailsId).toBe(sec12Event.payoutDetailsId);
+
+        // 5. Platform ADMIN behavior remains intact
+        const platformAdminUser = await prisma.user.create({
+          data: {
+            email: `sec14_platform_admin_${testRunId}@outside.vip`,
+            name: 'SEC-14 Platform Admin',
+            role: 'ADMIN',
+            emailVerified: true,
+            emailVerifiedAt: new Date(),
+          },
+        });
+        createdUserIds.push(platformAdminUser.id);
+        const platformAdminAuth = await createAuth(platformAdminUser.id);
+
+        const platRes = await request(app)
+          .get('/api/organizer/events')
+          .set('Cookie', platformAdminAuth.cookie)
+          .expect(200);
+        expect(platRes.body.success).toBe(true);
+        expect(Array.isArray(platRes.body.data.events)).toBe(true);
+      });
+    });
+
+    // =========================================================================
+    // SEC-14 Part B: Verified-Email Enforcement
+    // =========================================================================
+    describe('SEC-14 Part B: Verified-Email Enforcement on Team, Host & Promotions Routes', () => {
+      it('denies unverified authenticated users on eventTeam, host, and eventPromotions routes with 403 while keeping public invitation inspection accessible', async () => {
+        // Create an unverified user who even has active memberships on sec12Event to prove middleware blocks before handlers
+        const unverifiedMember = await prisma.user.create({
+          data: {
+            email: `sec14_unverified_member_${testRunId}@outside.vip`,
+            name: 'SEC-14 Unverified Member',
+            role: 'ORGANIZER',
+            emailVerified: false,
+          },
+        });
+        createdUserIds.push(unverifiedMember.id);
+        const unverifiedMemberAuth = await createAuth(unverifiedMember.id);
+
+        await prisma.eventTeamMember.create({
+          data: {
+            eventId: sec12Event.id,
+            userId: unverifiedMember.id,
+            role: EventTeamRole.ADMIN,
+            status: TeamMemberStatus.ACTIVE,
+            permissions: { canManageTeam: true, canManagePromotions: true, canViewAnalytics: true },
+            invitedById: sec12Owner.id,
+          },
+        });
+
+        // 1. Event Team endpoints reject unverified user with 403
+        const teamListRes = await request(app)
+          .get(`/api/events/${sec12Event.id}/team`)
+          .set('Cookie', unverifiedMemberAuth.cookie)
+          .expect(403);
+        expect(teamListRes.body.error.message).toMatch(/Email verification is required/i);
+
+        const teamInviteRes = await request(app)
+          .post(`/api/events/${sec12Event.id}/team/invitations`)
+          .set('Cookie', unverifiedMemberAuth.cookie)
+          .set('x-csrf-token', unverifiedMemberAuth.csrf)
+          .send({ email: `blocked_unverified_${testRunId}@outside.vip`, role: 'HOST' })
+          .expect(403);
+        expect(teamInviteRes.body.error.message).toMatch(/Email verification is required/i);
+
+        // 2. Host Workspace endpoints reject unverified user with 403
+        const hostEventsRes = await request(app)
+          .get('/api/host/events')
+          .set('Cookie', unverifiedMemberAuth.cookie)
+          .expect(403);
+        expect(hostEventsRes.body.error.message).toMatch(/Email verification is required/i);
+
+        const hostAnalyticsRes = await request(app)
+          .get(`/api/host/events/${sec12Event.id}/analytics`)
+          .set('Cookie', unverifiedMemberAuth.cookie)
+          .expect(403);
+        expect(hostAnalyticsRes.body.error.message).toMatch(/Email verification is required/i);
+
+        const hostSlugRes = await request(app)
+          .patch(`/api/host/events/${sec12Event.id}/slug`)
+          .set('Cookie', unverifiedMemberAuth.cookie)
+          .set('x-csrf-token', unverifiedMemberAuth.csrf)
+          .send({ slug: `unverified-slug-${testRunId}` })
+          .expect(403);
+        expect(hostSlugRes.body.error.message).toMatch(/Email verification is required/i);
+
+        // 3. Promotions Management endpoints reject unverified user with 403
+        const promoLinksRes = await request(app)
+          .get(`/api/events/${sec12Event.id}/promotions/links`)
+          .set('Cookie', unverifiedMemberAuth.cookie)
+          .expect(403);
+        expect(promoLinksRes.body.error.message).toMatch(/Email verification is required/i);
+
+        const promoCreateRes = await request(app)
+          .post(`/api/events/${sec12Event.id}/promotions/links`)
+          .set('Cookie', unverifiedMemberAuth.cookie)
+          .set('x-csrf-token', unverifiedMemberAuth.csrf)
+          .send({ name: 'Blocked Campaign', slug: `blocked-camp-${testRunId}` })
+          .expect(403);
+        expect(promoCreateRes.body.error.message).toMatch(/Email verification is required/i);
+
+        const promoAnalyticsRes = await request(app)
+          .get(`/api/events/${sec12Event.id}/promotions/analytics`)
+          .set('Cookie', unverifiedMemberAuth.cookie)
+          .expect(403);
+        expect(promoAnalyticsRes.body.error.message).toMatch(/Email verification is required/i);
+
+        // 4. Verified user continues to access all three route groups normally
+        await request(app)
+          .get(`/api/events/${sec12Event.id}/team`)
+          .set('Cookie', sec12OwnerAuth.cookie)
+          .expect(200);
+        await request(app)
+          .get(`/api/events/${sec12Event.id}/promotions/links`)
+          .set('Cookie', sec12OwnerAuth.cookie)
+          .expect(200);
+        await request(app)
+          .get('/api/host/events')
+          .set('Cookie', hostAuth.cookie)
+          .expect(200);
+
+        // 5. Public invitation inspection remains accessible WITHOUT authentication or verified email
+        const publicInvEmail = `sec14_public_inspect_${testRunId}@outside.vip`;
+        await request(app)
+          .post(`/api/events/${sec12Event.id}/team/invitations`)
+          .set('Cookie', sec12OwnerAuth.cookie)
+          .set('x-csrf-token', sec12OwnerAuth.csrf)
+          .send({ email: publicInvEmail, role: 'HOST' })
+          .expect(201);
+
+        const publicEmailRecord = sentTeamInvitationEmails
+          .slice()
+          .reverse()
+          .find((e) => e.to === publicInvEmail);
+        const publicToken = publicEmailRecord!.inviteUrl.split('/').pop()!;
+
+        const inspectRes = await request(app)
+          .get(`/api/team/invitations/${publicToken}`)
+          .expect(200);
+        expect(inspectRes.body.success).toBe(true);
+        expect(inspectRes.body.invitation.status).toBe('PENDING');
+
+        // And unverified user still cannot accept the invitation
+        await request(app)
+          .post(`/api/team/invitations/${publicToken}/accept`)
+          .set('Cookie', unverifiedMemberAuth.cookie)
+          .set('x-csrf-token', unverifiedMemberAuth.csrf)
+          .expect(403);
       });
     });
   });

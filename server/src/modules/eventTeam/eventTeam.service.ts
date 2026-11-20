@@ -11,6 +11,7 @@ import {
 } from '../../utils/errors.js';
 import {
   EventAdminPermissions,
+  DEFAULT_ADMIN_PERMISSIONS,
   parseAdminPermissions,
   assertAdminPermissionCeiling,
   hasEventPermission,
@@ -956,8 +957,14 @@ export async function updateTeamMember(
     if (updates.status) {
       data.status = updates.status;
     }
-    if (targetRole === EventTeamRole.ADMIN && updates.permissions !== undefined) {
-      data.permissions = (updates.permissions ? parseAdminPermissions(updates.permissions) : null) as any;
+    if (targetRole === EventTeamRole.ADMIN) {
+      if (updates.permissions !== undefined) {
+        data.permissions = (
+          updates.permissions ? parseAdminPermissions(updates.permissions) : { ...DEFAULT_ADMIN_PERMISSIONS }
+        ) as any;
+      } else if (member.permissions) {
+        data.permissions = parseAdminPermissions(member.permissions) as any;
+      }
     } else if (targetRole === EventTeamRole.HOST) {
       data.permissions = Prisma.DbNull;
     }
@@ -1030,7 +1037,13 @@ export async function updateTeamMember(
       }
     }
 
-    return updatedMember;
+    return {
+      ...updatedMember,
+      permissions:
+        updatedMember.role === EventTeamRole.ADMIN
+          ? (parseAdminPermissions(updatedMember.permissions) as any)
+          : null,
+    };
   });
 }
 
@@ -1127,7 +1140,8 @@ export async function listTeamMembers(eventId: string) {
       email: m.user.email,
       role: m.role,
       status: m.status,
-      permissions: m.permissions,
+      permissions:
+        m.role === EventTeamRole.ADMIN ? parseAdminPermissions(m.permissions) : null,
       hostLink: m.hostedLinks[0] ? {
         id: m.hostedLinks[0].id,
         slug: m.hostedLinks[0].slugRegistry[0]?.slug,
@@ -1140,7 +1154,8 @@ export async function listTeamMembers(eventId: string) {
       email: inv.email,
       role: inv.role,
       status: inv.status,
-      permissions: inv.permissions,
+      permissions:
+        inv.role === EventTeamRole.ADMIN ? parseAdminPermissions(inv.permissions) : null,
       expiresAt: inv.expiresAt,
       createdAt: inv.createdAt,
     })),

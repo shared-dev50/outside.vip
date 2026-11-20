@@ -39,6 +39,7 @@ teamRouter.post(
 // ==========================================
 export const hostRouter = Router();
 hostRouter.use(requireAuth);
+hostRouter.use(requireVerifiedEmail);
 
 hostRouter.get('/events', handleListHostEvents);
 hostRouter.get('/events/:eventId/analytics', handleGetHostPromotionalAnalytics);
@@ -49,6 +50,7 @@ hostRouter.patch('/events/:eventId/slug', handleCustomizeHostSlug);
 // ==========================================
 export const eventTeamRouter = Router({ mergeParams: true });
 eventTeamRouter.use(requireAuth);
+eventTeamRouter.use(requireVerifiedEmail);
 
 // Team Members & Invitations
 eventTeamRouter.get('/', handleListTeamMembers);
@@ -63,6 +65,7 @@ eventTeamRouter.delete('/members/:memberId', handleRevokeTeamMember);
 // ==========================================
 export const eventPromotionsRouter = Router({ mergeParams: true });
 eventPromotionsRouter.use(requireAuth);
+eventPromotionsRouter.use(requireVerifiedEmail);
 
 eventPromotionsRouter.get('/links', handleGetEventPromotionalLinks);
 eventPromotionsRouter.post('/links', handleCreateCampaignLink);

@@ -11,6 +11,8 @@ import {
   isValidSlugFormat,
   RESERVED_SLUGS,
   MAX_HISTORICAL_SLUG_ALIASES_PER_LINK,
+  MAX_ANALYTICS_DATE_RANGE_DAYS,
+  MAX_ANALYTICS_DATE_RANGE_MS,
 } from './promotions.constants.js';
 
 export interface CreateCampaignLinkParams {
@@ -368,6 +370,130 @@ export async function getEventPromotionalLinks(eventId: string) {
   });
 }
 
+const ISO_DATE_OR_DATETIME_REGEX =
+  /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?(Z|([+-])(\d{2}):(\d{2}))?)?$/;
+
+/**
+ * Parses and validates a single analytics date filter parameter (ISO-8601 date or timestamp).
+ * Rejects malformed strings, non-strings, and impossible calendar dates (such as 2026-02-30)
+ * with a controlled HTTP 400 BadRequestError before reaching database queries.
+ */
+export function parseSingleAnalyticsDate(
+  raw: unknown,
+  paramName: 'startDate' | 'endDate'
+): Date | undefined {
+  if (raw === undefined || raw === null || raw === '') {
+    return undefined;
+  }
+
+  if (raw instanceof Date) {
+    if (Number.isNaN(raw.getTime())) {
+      throw new BadRequestError(`Invalid ${paramName} parameter.`, 'INVALID_DATE_FILTER');
+    }
+    return raw;
+  }
+
+  if (typeof raw !== 'string') {
+    throw new BadRequestError(`Invalid ${paramName} parameter.`, 'INVALID_DATE_FILTER');
+  }
+
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed.length > 64) {
+    throw new BadRequestError(`Invalid ${paramName} parameter.`, 'INVALID_DATE_FILTER');
+  }
+
+  const match = ISO_DATE_OR_DATETIME_REGEX.exec(trimmed);
+  if (!match) {
+    throw new BadRequestError(
+      `Invalid ${paramName} format. Expected an ISO-8601 date (YYYY-MM-DD) or timestamp.`,
+      'INVALID_DATE_FILTER'
+    );
+  }
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+
+  if (year < 2000 || year > 2100 || month < 1 || month > 12 || day < 1 || day > 31) {
+    throw new BadRequestError(
+      `Impossible calendar date in ${paramName}.`,
+      'INVALID_DATE_FILTER'
+    );
+  }
+
+  // Verify calendar date does not roll over (e.g., 2026-02-30 or 2026-04-31)
+  const calendarCheck = new Date(Date.UTC(year, month - 1, day));
+  if (
+    calendarCheck.getUTCFullYear() !== year ||
+    calendarCheck.getUTCMonth() !== month - 1 ||
+    calendarCheck.getUTCDate() !== day
+  ) {
+    throw new BadRequestError(
+      `Impossible calendar date in ${paramName}.`,
+      'INVALID_DATE_FILTER'
+    );
+  }
+
+  if (match[4] !== undefined) {
+    const hours = Number(match[4]);
+    const minutes = Number(match[5]);
+    const seconds = Number(match[6]);
+    if (hours > 23 || minutes > 59 || seconds > 59) {
+      throw new BadRequestError(
+        `Invalid time component in ${paramName}.`,
+        'INVALID_DATE_FILTER'
+      );
+    }
+  }
+
+  if (match[10] !== undefined) {
+    const tzHours = Number(match[10]);
+    const tzMinutes = Number(match[11]);
+    if (tzHours > 23 || tzMinutes > 59) {
+      throw new BadRequestError(
+        `Invalid timezone offset in ${paramName}.`,
+        'INVALID_DATE_FILTER'
+      );
+    }
+  }
+
+  const parsed = new Date(trimmed);
+  if (Number.isNaN(parsed.getTime())) {
+    throw new BadRequestError(`Invalid ${paramName} parameter.`, 'INVALID_DATE_FILTER');
+  }
+
+  return parsed;
+}
+
+/**
+ * Validates startDate and endDate analytics filters, enforcing valid calendar dates,
+ * chronological ordering (startDate <= endDate), and a maximum 366-day query window.
+ */
+export function parseAndValidateAnalyticsDateRange(
+  rawStartDate: unknown,
+  rawEndDate: unknown
+): { startDate?: Date; endDate?: Date } {
+  const startDate = parseSingleAnalyticsDate(rawStartDate, 'startDate');
+  const endDate = parseSingleAnalyticsDate(rawEndDate, 'endDate');
+
+  if (startDate && endDate) {
+    if (startDate.getTime() > endDate.getTime()) {
+      throw new BadRequestError(
+        'startDate must be before or equal to endDate.',
+        'INVALID_DATE_RANGE'
+      );
+    }
+    if (endDate.getTime() - startDate.getTime() > MAX_ANALYTICS_DATE_RANGE_MS) {
+      throw new BadRequestError(
+        `Analytics date range cannot exceed ${MAX_ANALYTICS_DATE_RANGE_DAYS} days.`,
+        'ANALYTICS_DATE_RANGE_TOO_LARGE'
+      );
+    }
+  }
+
+  return { startDate, endDate };
+}
+
 /**
  * Returns traffic-only promotional analytics for an event or specific campaign.
  * STRICT: Excludes all sales, revenue, tickets, and conversions.
@@ -380,7 +506,11 @@ export async function getEventPromotionalAnalytics(
     endDate?: Date;
   } = {}
 ) {
-  const { linkId, startDate, endDate } = options;
+  const { linkId } = options;
+  const { startDate, endDate } = parseAndValidateAnalyticsDateRange(
+    options.startDate,
+    options.endDate
+  );
 
   // 1. Where clauses for clicks and visitor-days
   const clickWhere: Prisma.PromotionClickWhereInput = { eventId };
@@ -391,8 +521,9 @@ export async function getEventPromotionalAnalytics(
     dayWhere.promotionLinkId = linkId;
   }
 
+  let dateFilter: Prisma.DateTimeFilter | undefined;
   if (startDate || endDate) {
-    const dateFilter: Prisma.DateTimeFilter = {};
+    dateFilter = {};
     if (startDate) dateFilter.gte = startDate;
     if (endDate) dateFilter.lte = endDate;
 
@@ -484,10 +615,16 @@ export async function getEventPromotionalAnalytics(
     const linkStats = await Promise.all(
       links.map(async (l) => {
         const clicks = await prisma.promotionClick.count({
-          where: { promotionLinkId: l.id },
+          where: {
+            promotionLinkId: l.id,
+            ...(dateFilter ? { clickedAt: dateFilter } : {}),
+          },
         });
         const visitors = await prisma.promotionVisitorDay.findMany({
-          where: { promotionLinkId: l.id },
+          where: {
+            promotionLinkId: l.id,
+            ...(dateFilter ? { visitDate: dateFilter } : {}),
+          },
           select: { canonicalVisitorId: true },
           distinct: ['canonicalVisitorId'],
         });
@@ -525,8 +662,17 @@ export async function getEventPromotionalAnalytics(
  */
 export async function getHostPromotionalAnalytics(
   eventId: string,
-  userId: string
+  userId: string,
+  options: {
+    startDate?: Date;
+    endDate?: Date;
+  } = {}
 ) {
+  const { startDate, endDate } = parseAndValidateAnalyticsDateRange(
+    options.startDate,
+    options.endDate
+  );
+
   // Find host member record
   const hostMember = await prisma.eventTeamMember.findUnique({
     where: {
@@ -561,19 +707,35 @@ export async function getHostPromotionalAnalytics(
 
   const primarySlug = hostLink.slugRegistry[0]?.slug || null;
 
+  let dateFilter: Prisma.DateTimeFilter | undefined;
+  if (startDate || endDate) {
+    dateFilter = {};
+    if (startDate) dateFilter.gte = startDate;
+    if (endDate) dateFilter.lte = endDate;
+  }
+
   // Query stats strictly scoped to hostLink.id
   const totalClicks = await prisma.promotionClick.count({
-    where: { promotionLinkId: hostLink.id },
+    where: {
+      promotionLinkId: hostLink.id,
+      ...(dateFilter ? { clickedAt: dateFilter } : {}),
+    },
   });
 
   const uniqueVisitorRows = await prisma.promotionVisitorDay.findMany({
-    where: { promotionLinkId: hostLink.id },
+    where: {
+      promotionLinkId: hostLink.id,
+      ...(dateFilter ? { visitDate: dateFilter } : {}),
+    },
     select: { canonicalVisitorId: true },
     distinct: ['canonicalVisitorId'],
   });
 
   const dailyVisitorDays = await prisma.promotionVisitorDay.findMany({
-    where: { promotionLinkId: hostLink.id },
+    where: {
+      promotionLinkId: hostLink.id,
+      ...(dateFilter ? { visitDate: dateFilter } : {}),
+    },
     orderBy: { visitDate: 'asc' },
   });
 
@@ -599,6 +761,7 @@ export async function getHostPromotionalAnalytics(
     where: {
       promotionLinkId: hostLink.id,
       referrer: { not: null },
+      ...(dateFilter ? { clickedAt: dateFilter } : {}),
     },
     _count: { _all: true },
     orderBy: { _count: { referrer: 'desc' } },

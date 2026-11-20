@@ -4,16 +4,25 @@ import { prisma } from '../../db/prisma.js';
 import { env } from '../../config/env.js';
 import { getRedisClient } from '../../lib/redis.js';
 import { hashRateLimitIdentifier } from '../../lib/session.service.js';
+import { BadRequestError } from '../../utils/errors.js';
 import {
   ATTRIBUTION_WINDOW_MS,
   CLICK_DEDUP_WINDOW_SECONDS,
   ALLOWED_QUERY_PARAMS,
+  CLICK_ID_QUERY_PARAMS,
   COOKIELESS_CLICK_RETRY_DEDUP_WINDOW_MS,
   COOKIELESS_LINK_BURST_MAX,
   COOKIELESS_LINK_BURST_WINDOW_MS,
   COOKIELESS_IP_SUSTAINED_MAX,
   COOKIELESS_IP_SUSTAINED_WINDOW_MS,
+  MAX_UTM_PARAM_LENGTH,
+  MAX_CLICK_ID_PARAM_LENGTH,
+  MAX_REFERRER_LENGTH,
+  MAX_USER_AGENT_LENGTH,
   isBotUserAgent,
+  isValidSlugFormat,
+  isValidVisitorToken,
+  sanitizeOptionalMetadataField,
 } from './promotions.constants.js';
 
 export interface ResolveSlugResult {
@@ -66,8 +75,11 @@ export interface UpsertAttributionParams {
  * across HMAC key rotations.
  */
 export function deriveCanonicalVisitorId(rawVid: string): string {
-  if (!rawVid || typeof rawVid !== 'string') {
-    throw new Error('rawVid is required to derive canonicalVisitorId');
+  if (!isValidVisitorToken(rawVid)) {
+    throw new BadRequestError(
+      'Invalid or malformed visitor identity token.',
+      'INVALID_VISITOR_TOKEN'
+    );
   }
   return crypto
     .createHash('sha256')
@@ -83,8 +95,11 @@ export function hashVisitorId(
   key = env.PROMOTION_ATTRIBUTION_HMAC_KEY,
   version = env.PROMOTION_ATTRIBUTION_KEY_VERSION
 ): string {
-  if (!rawVid || typeof rawVid !== 'string') {
-    throw new Error('rawVid is required to compute visitorIdHash');
+  if (!isValidVisitorToken(rawVid)) {
+    throw new BadRequestError(
+      'Invalid or malformed visitor identity token.',
+      'INVALID_VISITOR_TOKEN'
+    );
   }
   const hmac = crypto
     .createHmac('sha256', key)
@@ -101,15 +116,22 @@ export function generateVisitorToken(): string {
 }
 
 /**
- * Filters an incoming query object to only retain whitelisted marketing/tracking params.
+ * Filters an incoming query object to only retain whitelisted marketing/tracking params
+ * that conform to field-specific maximum length and character bounds.
+ * Oversized or malformed values are safely omitted without truncation.
  */
 export function extractWhitelistedParams(
   query: Record<string, unknown>
 ): Record<string, string> {
   const result: Record<string, string> = {};
   for (const [key, value] of Object.entries(query)) {
-    if (ALLOWED_QUERY_PARAMS.has(key) && typeof value === 'string' && value.trim()) {
-      result[key] = value.trim();
+    if (!ALLOWED_QUERY_PARAMS.has(key)) continue;
+    const maxLen = CLICK_ID_QUERY_PARAMS.has(key)
+      ? MAX_CLICK_ID_PARAM_LENGTH
+      : MAX_UTM_PARAM_LENGTH;
+    const sanitized = sanitizeOptionalMetadataField(value, maxLen);
+    if (sanitized !== null) {
+      result[key] = sanitized;
     }
   }
   return result;
@@ -123,6 +145,7 @@ export async function resolvePromotionSlug(
 ): Promise<ResolveSlugResult | null> {
   if (!rawSlug || typeof rawSlug !== 'string') return null;
   const normalizedSlug = rawSlug.trim().toLowerCase();
+  if (!isValidSlugFormat(normalizedSlug)) return null;
 
   const registry = await prisma.promotionSlugRegistry.findUnique({
     where: { slug: normalizedSlug },
@@ -190,8 +213,9 @@ export async function shouldRecordCookielessResolverAnalytics(params: {
 }): Promise<boolean> {
   const { ip, promotionLinkId, slug, userAgent } = params;
   const ipHash = hashRateLimitIdentifier(ip || 'unknown');
-  const slugHash = hashRateLimitIdentifier((slug || '').toLowerCase());
-  const uaHash = hashRateLimitIdentifier((userAgent || 'unknown').trim().toLowerCase());
+  const slugHash = hashRateLimitIdentifier((slug || '').slice(0, 64).toLowerCase());
+  const safeUa = sanitizeOptionalMetadataField(userAgent, MAX_USER_AGENT_LENGTH) || 'unknown';
+  const uaHash = hashRateLimitIdentifier(safeUa.toLowerCase());
 
   try {
     const redis = getRedisClient();
@@ -289,23 +313,27 @@ export async function recordPromotionClick(
     }
   }
 
-  // 3. Insert raw PromotionClick record
+  // 3. Insert raw PromotionClick record with bounded optional metadata
+  const safeReferrer = sanitizeOptionalMetadataField(referrer, MAX_REFERRER_LENGTH);
+  const safeUserAgent = sanitizeOptionalMetadataField(userAgent, MAX_USER_AGENT_LENGTH);
+  const safeUtmParams = extractWhitelistedParams(utmParams as Record<string, unknown>);
+
   await prisma.promotionClick.create({
     data: {
       eventId,
       promotionLinkId,
       visitorIdHash: visitorIdHash || null,
       canonicalVisitorId: canonicalVisitorId || null,
-      referrer: referrer || null,
-      userAgent: userAgent || null,
-      utmSource: utmParams.utm_source || null,
-      utmMedium: utmParams.utm_medium || null,
-      utmCampaign: utmParams.utm_campaign || null,
-      utmTerm: utmParams.utm_term || null,
-      utmContent: utmParams.utm_content || null,
-      fbclid: utmParams.fbclid || null,
-      gclid: utmParams.gclid || null,
-      ttclid: utmParams.ttclid || null,
+      referrer: safeReferrer,
+      userAgent: safeUserAgent,
+      utmSource: safeUtmParams.utm_source || null,
+      utmMedium: safeUtmParams.utm_medium || null,
+      utmCampaign: safeUtmParams.utm_campaign || null,
+      utmTerm: safeUtmParams.utm_term || null,
+      utmContent: safeUtmParams.utm_content || null,
+      fbclid: safeUtmParams.fbclid || null,
+      gclid: safeUtmParams.gclid || null,
+      ttclid: safeUtmParams.ttclid || null,
     },
   });
 

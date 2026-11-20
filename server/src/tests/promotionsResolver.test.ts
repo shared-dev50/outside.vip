@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import request from 'supertest';
 import { app } from '../app.js';
@@ -10,10 +11,17 @@ import {
   ATTRIBUTION_WINDOW_MS,
   COOKIELESS_LINK_BURST_MAX,
   COOKIELESS_IP_SUSTAINED_MAX,
+  MAX_VISITOR_TOKEN_LENGTH,
+  MAX_UTM_PARAM_LENGTH,
+  MAX_CLICK_ID_PARAM_LENGTH,
+  MAX_REFERRER_LENGTH,
+  MAX_USER_AGENT_LENGTH,
+  isValidVisitorToken,
 } from '../modules/promotions/promotions.constants.js';
 import {
   deriveCanonicalVisitorId,
   hashVisitorId,
+  extractWhitelistedParams,
   upsertVisitorAttribution,
   pruneExpiredPromotionClicks,
 } from '../modules/promotions/promotions.service.js';
@@ -1151,7 +1159,11 @@ describe('Promotions & Short-Link Resolver System (Stage 1)', () => {
       expect(visitorDays).toBe(1);
 
       // 3. Verify no permanent IP-based visitor identity was stored in PostgreSQL
-      const ipBasedCanonical = deriveCanonicalVisitorId(testIp);
+      expect(() => deriveCanonicalVisitorId(testIp)).toThrow(/Invalid or malformed visitor identity token/i);
+      const ipBasedCanonical = crypto
+        .createHash('sha256')
+        .update(`outside_canonical_vid_v1:${testIp}`)
+        .digest('hex');
       const ipHash = hashRateLimitIdentifier(testIp);
       const ipStoredCount = await prisma.promotionVisitorAttribution.count({
         where: {
@@ -1431,6 +1443,167 @@ describe('Promotions & Short-Link Resolver System (Stage 1)', () => {
         where: { promotionLinkId: link6.id },
       });
       expect(link6Clicks).toBe(1 + COOKIELESS_LINK_BURST_MAX); // Still 4!
+    });
+  });
+
+  // ===========================================================================
+  // 7. Stage 6 Implementation 3: SEC-13 Visitor Cookie & Request Metadata Boundaries
+  // ===========================================================================
+  describe('7. Stage 6 Implementation 3: SEC-13 Visitor Cookie & Request Metadata Boundaries', () => {
+    let sec13LinkId: string;
+    const sec13Slug = `sec13-meta-${testRunId}`;
+
+    beforeAll(async () => {
+      const link = await prisma.promotionLink.create({
+        data: {
+          eventId: event1Id,
+          type: 'CAMPAIGN',
+          status: 'ACTIVE',
+          name: 'SEC-13 Boundary Test Link',
+          createdById: organizerId,
+          slugRegistry: {
+            create: [{ slug: sec13Slug, isPrimary: true }],
+          },
+        },
+      });
+      sec13LinkId = link.id;
+      createdPromotionLinkIds.push(link.id);
+    });
+
+    it('SEC-13 Part B: rejects oversized and malformed outside_vid tokens without silent truncation and never leaks raw tokens in errors', async () => {
+      const validVictimToken = 'a1b2c3d4e5f60718293a4b5c6d7e8f90';
+      const oversizedPrefixedToken = `${validVictimToken}${'x'.repeat(MAX_VISITOR_TOKEN_LENGTH)}`;
+      const malformedToken = 'bad token with spaces & <script>';
+      const shortToken = 'short_123';
+
+      expect(isValidVisitorToken(validVictimToken)).toBe(true);
+      expect(isValidVisitorToken(oversizedPrefixedToken)).toBe(false);
+      expect(isValidVisitorToken(malformedToken)).toBe(false);
+      expect(isValidVisitorToken(shortToken)).toBe(false);
+
+      // Direct derivation functions MUST reject oversized/malformed tokens and never leak them in error messages
+      for (const bad of [oversizedPrefixedToken, malformedToken, shortToken]) {
+        try {
+          deriveCanonicalVisitorId(bad);
+          expect.unreachable('Expected deriveCanonicalVisitorId to throw');
+        } catch (err: any) {
+          expect(err.code).toBe('INVALID_VISITOR_TOKEN');
+          expect(String(err.message)).not.toContain(bad);
+        }
+        try {
+          hashVisitorId(bad);
+          expect.unreachable('Expected hashVisitorId to throw');
+        } catch (err: any) {
+          expect(err.code).toBe('INVALID_VISITOR_TOKEN');
+          expect(String(err.message)).not.toContain(bad);
+        }
+      }
+
+      // Resolver MUST NOT truncate oversizedPrefixedToken to validVictimToken or echo it back in Set-Cookie
+      const victimCanonicalId = deriveCanonicalVisitorId(validVictimToken);
+      const res = await request(app)
+        .get(`/r/${sec13Slug}`)
+        .set('X-Forwarded-For', '198.51.100.210')
+        .set('Cookie', `${VISITOR_COOKIE_NAME}=${oversizedPrefixedToken}`)
+        .expect(302);
+
+      const setCookie = String(res.header['set-cookie']);
+      expect(setCookie).toMatch(/outside_vid=[a-f0-9]{32}/);
+      expect(setCookie).not.toContain(oversizedPrefixedToken);
+      expect(setCookie).not.toContain(validVictimToken);
+
+      // Verify NO attribution record was created under the victim's truncated canonical ID
+      const victimAttr = await prisma.promotionVisitorAttribution.findUnique({
+        where: {
+          canonicalVisitorId_eventId: {
+            canonicalVisitorId: victimCanonicalId,
+            eventId: event1Id,
+          },
+        },
+      });
+      expect(victimAttr).toBeNull();
+    });
+
+    it('SEC-13 Part C: safely omits oversized UTM, click ID, Referrer, and User-Agent metadata while preserving valid metadata', async () => {
+      const validVid = `vid_sec13_meta_${testRunId}_1234567890`;
+      const validCanonicalId = deriveCanonicalVisitorId(validVid);
+      const oversizedUtm = 'u'.repeat(MAX_UTM_PARAM_LENGTH + 20);
+      const oversizedFbclid = 'f'.repeat(MAX_CLICK_ID_PARAM_LENGTH + 20);
+      const oversizedReferrer = `https://example.com/${'r'.repeat(MAX_REFERRER_LENGTH)}`;
+      const oversizedUa = `Mozilla/5.0 ${'a'.repeat(MAX_USER_AGENT_LENGTH)}`;
+
+      // Unit-level check on extractWhitelistedParams
+      const extracted = extractWhitelistedParams({
+        utm_source: 'instagram',
+        utm_campaign: oversizedUtm,
+        utm_medium: 'story\x00evil',
+        fbclid: oversizedFbclid,
+        gclid: 'valid_gclid_12345',
+      });
+      expect(extracted).toEqual({
+        utm_source: 'instagram',
+        gclid: 'valid_gclid_12345',
+      });
+
+      // End-to-end resolver check with mixed valid + oversized metadata
+      const res = await request(app)
+        .get(`/r/${sec13Slug}?utm_source=instagram&utm_campaign=${oversizedUtm}&fbclid=${oversizedFbclid}&gclid=valid_gclid_abc`)
+        .set('Cookie', `${VISITOR_COOKIE_NAME}=${validVid}`)
+        .set('Referer', oversizedReferrer)
+        .set('User-Agent', oversizedUa)
+        .expect(302);
+
+      // Valid params are forwarded; oversized params are omitted (not truncated)
+      expect(res.header.location).toContain('utm_source=instagram');
+      expect(res.header.location).toContain('gclid=valid_gclid_abc');
+      expect(res.header.location).not.toContain('utm_campaign=');
+      expect(res.header.location).not.toContain('fbclid=');
+
+      // Verify recorded PromotionClick omitted oversized fields while recording valid fields
+      const click = await prisma.promotionClick.findFirst({
+        where: {
+          promotionLinkId: sec13LinkId,
+          canonicalVisitorId: validCanonicalId,
+        },
+      });
+      expect(click).not.toBeNull();
+      expect(click?.utmSource).toBe('instagram');
+      expect(click?.gclid).toBe('valid_gclid_abc');
+      expect(click?.utmCampaign).toBeNull();
+      expect(click?.fbclid).toBeNull();
+      expect(click?.referrer).toBeNull();
+      expect(click?.userAgent).toBeNull();
+
+      // Normal valid metadata continues to be recorded completely
+      const validVid2 = `vid_sec13_valid_${testRunId}_abcdef1234`;
+      const validCanonicalId2 = deriveCanonicalVisitorId(validVid2);
+      const normalReferer = 'https://instagram.com/outsidevip';
+      const normalUa = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) Safari/605.1.15';
+
+      await request(app)
+        .get(`/r/${sec13Slug}?utm_source=tiktok&utm_medium=bio&utm_campaign=launch2026&utm_content=hero&utm_term=vip`)
+        .set('Cookie', `${VISITOR_COOKIE_NAME}=${validVid2}`)
+        .set('Referer', normalReferer)
+        .set('User-Agent', normalUa)
+        .expect(302);
+
+      const click2 = await prisma.promotionClick.findFirst({
+        where: {
+          promotionLinkId: sec13LinkId,
+          canonicalVisitorId: validCanonicalId2,
+        },
+      });
+      expect(click2).not.toBeNull();
+      expect(click2?.utmSource).toBe('tiktok');
+      expect(click2?.utmMedium).toBe('bio');
+      expect(click2?.utmCampaign).toBe('launch2026');
+      expect(click2?.utmContent).toBe('hero');
+      expect(click2?.utmTerm).toBe('vip');
+      expect(click2?.referrer).toBe(normalReferer);
+      expect(click2?.userAgent).toBe(normalUa);
+
+      // Oversized slug (> 64 chars) cleanly returns 404 without database error
+      await request(app).get(`/r/${'a'.repeat(100)}`).expect(404);
     });
   });
 });

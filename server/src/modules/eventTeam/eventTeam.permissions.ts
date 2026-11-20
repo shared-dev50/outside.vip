@@ -43,7 +43,13 @@ export function parseAdminPermissions(raw?: unknown): EventAdminPermissions {
   if (!result.success) {
     return { ...DEFAULT_ADMIN_PERMISSIONS };
   }
-  return result.data;
+  // SEC-12: Authoritatively enforce server-side that canManageRefunds (unimplemented for Event Admins)
+  // and canManagePayouts (owner-only) are always false, regardless of submitted input or stored JSON.
+  return {
+    ...result.data,
+    canManageRefunds: false,
+    canManagePayouts: false,
+  };
 }
 
 

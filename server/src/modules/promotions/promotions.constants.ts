@@ -58,6 +58,61 @@ export const COOKIELESS_IP_SUSTAINED_MAX = 15;
 export const COOKIELESS_IP_SUSTAINED_WINDOW_MS = 60 * 1000; // 60 seconds
 
 /**
+ * SEC-13: Input Validation & Resource-Boundary Constants
+ * - Visitor token format: 16 to 128 URL-safe ASCII characters ([A-Za-z0-9_-])
+ * - UTM parameters (utm_source, utm_medium, utm_campaign, utm_term, utm_content): max 128 characters
+ * - Ad platform click IDs (fbclid, gclid, ttclid): max 256 characters
+ * - HTTP Referrer and User-Agent metadata: max 512 characters
+ * - Promotional analytics date-filter range: max 366 days
+ */
+export const MIN_VISITOR_TOKEN_LENGTH = 16;
+export const MAX_VISITOR_TOKEN_LENGTH = 128;
+export const VISITOR_TOKEN_FORMAT_REGEX = /^[A-Za-z0-9_-]{16,128}$/;
+
+export const MAX_UTM_PARAM_LENGTH = 128;
+export const MAX_CLICK_ID_PARAM_LENGTH = 256;
+export const MAX_REFERRER_LENGTH = 512;
+export const MAX_USER_AGENT_LENGTH = 512;
+
+export const MAX_ANALYTICS_DATE_RANGE_DAYS = 366;
+export const MAX_ANALYTICS_DATE_RANGE_MS = MAX_ANALYTICS_DATE_RANGE_DAYS * 24 * 60 * 60 * 1000;
+
+export const CLICK_ID_QUERY_PARAMS = new Set(['fbclid', 'gclid', 'ttclid']);
+
+/**
+ * Validates that an incoming visitor cookie token conforms to the expected
+ * length (16..128) and URL-safe character format without silently truncating oversized tokens.
+ */
+export function isValidVisitorToken(rawVid: unknown): rawVid is string {
+  if (typeof rawVid !== 'string') return false;
+  const trimmed = rawVid.trim();
+  if (
+    trimmed.length < MIN_VISITOR_TOKEN_LENGTH ||
+    trimmed.length > MAX_VISITOR_TOKEN_LENGTH
+  ) {
+    return false;
+  }
+  return VISITOR_TOKEN_FORMAT_REGEX.test(trimmed);
+}
+
+/**
+ * Validates an optional untrusted request metadata field (such as Referrer, User-Agent, or UTM).
+ * Returns the trimmed string if non-empty, within maxLength, and free of control characters;
+ * otherwise safely omits it (returns null) without silently truncating.
+ */
+export function sanitizeOptionalMetadataField(
+  value: unknown,
+  maxLength: number
+): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > maxLength) return null;
+  // Reject ASCII control characters (0x00-0x1F and 0x7F)
+  if (/[\x00-\x1F\x7F]/.test(trimmed)) return null;
+  return trimmed;
+}
+
+/**
  * Whitelisted marketing and tracking query parameters to forward on short-link redirect.
  * All other query parameters are stripped to protect against query parameter pollution.
  */
@@ -119,7 +174,8 @@ const BOT_USER_AGENT_PATTERN =
 
 export function isBotUserAgent(userAgent?: string | null): boolean {
   if (!userAgent || typeof userAgent !== 'string') return false;
-  return BOT_USER_AGENT_PATTERN.test(userAgent.trim());
+  const bounded = userAgent.trim().slice(0, MAX_USER_AGENT_LENGTH);
+  return BOT_USER_AGENT_PATTERN.test(bounded);
 }
 
 /**

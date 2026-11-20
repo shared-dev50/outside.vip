@@ -10,6 +10,7 @@ import {
   getEventPromotionalLinks,
   getEventPromotionalAnalytics,
   getHostPromotionalAnalytics,
+  parseAndValidateAnalyticsDateRange,
 } from './promotions.management.service.js';
 
 /**
@@ -159,12 +160,17 @@ export async function handleGetEventPromotionalAnalytics(
     await resolveEventAuthorization(eventId, user, 'canViewAnalytics');
 
     const { linkId, startDate, endDate } = req.query;
+    if (linkId !== undefined && typeof linkId !== 'string') {
+      throw new BadRequestError('Invalid linkId parameter.', 'INVALID_LINK_ID');
+    }
 
-    const start = startDate ? new Date(startDate as string) : undefined;
-    const end = endDate ? new Date(endDate as string) : undefined;
+    const { startDate: start, endDate: end } = parseAndValidateAnalyticsDateRange(
+      startDate,
+      endDate
+    );
 
     const analytics = await getEventPromotionalAnalytics(eventId, {
-      linkId: linkId as string | undefined,
+      linkId: linkId || undefined,
       startDate: start,
       endDate: end,
     });
@@ -192,7 +198,14 @@ export async function handleGetHostPromotionalAnalytics(
     if (!user) throw new UnauthorizedError('Authentication required');
 
     const eventId = req.params.eventId;
-    const analytics = await getHostPromotionalAnalytics(eventId, user.userId);
+    const { startDate, endDate } = parseAndValidateAnalyticsDateRange(
+      req.query.startDate,
+      req.query.endDate
+    );
+    const analytics = await getHostPromotionalAnalytics(eventId, user.userId, {
+      startDate,
+      endDate,
+    });
 
     res.json({
       success: true,
