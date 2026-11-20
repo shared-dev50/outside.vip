@@ -1,7 +1,7 @@
 import { api } from "@/lib/api";
 import { OrderStatus } from "@/types";
 import { useQuery } from "@tanstack/react-query";
-import { AlertCircle } from "lucide-react";
+import { AlertCircle, ChevronDown, Search, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
@@ -11,7 +11,7 @@ export const OrdersPage: React.FC = () => {
   const initialStatus = (searchParams.get("status") as OrderStatus) || undefined;
   const initialEventId = searchParams.get("eventid") || "";
   const initialSearch = searchParams.get("search") || "";
-  const initialPage = Math.max(1, parseInt(searchParams.get("page") || "1", 10) || 1,);
+  const initialPage = Math.max(1, parseInt(searchParams.get("page") || "1", 10) || 1);
   const initialSortBy = searchParams.get("sort") || "date_asc";
 
   const [searchTerm, setSearchTerm] = useState(initialSearch);
@@ -24,31 +24,35 @@ export const OrdersPage: React.FC = () => {
     const params = new URLSearchParams();
 
     if (selectedStatus) params.set("status", selectedStatus);
-    if (eventId.trim()) params.set("eventid", searchTerm.trim());
+    if (eventId.trim()) params.set("eventid", eventId.trim());
     if (searchTerm.trim()) params.set("search", searchTerm.trim());
     if (sortBy && sortBy !== "date_asc") params.set("sort", sortBy);
     if (currentPage > 1) params.set("page", currentPage.toString());
     setSearchParams(params, { replace: true });
-  }, [searchTerm, selectedStatus, sortBy, currentPage, setSearchParams]);
+  }, [searchTerm, eventId, selectedStatus, sortBy, currentPage, setSearchParams]);
 
   const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ['events-discover', searchTerm, selectedStatus, sortBy, currentPage],
+    queryKey: ["organizer-orders", searchTerm, eventId, selectedStatus, sortBy, currentPage],
     queryFn: () =>
       api.organizer.getOrders({
         status: selectedStatus,
-        eventId,
+        eventId: eventId.trim() || undefined,
         search: searchTerm.trim() || undefined,
         page: currentPage,
         limit: 12,
-        sortOrder: 'asc',
+        sortOrder: "asc",
       }),
   });
 
-  const order = data?.orders;
-  console.log(order);
+  const orders = data?.orders;
 
   const handleSearchChange = (term: string) => {
     setSearchTerm(term);
+    setCurrentPage(1);
+  };
+
+  const handleStatusChange = (status: OrderStatus | undefined) => {
+    setSelectedStatus(status);
     setCurrentPage(1);
   };
 
@@ -58,23 +62,22 @@ export const OrdersPage: React.FC = () => {
   };
 
   const clearFilters = () => {
-    setSearchTerm('');
+    setSearchTerm("");
+    setEventId("");
     setSelectedStatus(undefined);
-    setSortBy('date_asc');
+    setSortBy("date_asc");
     setCurrentPage(1);
   };
 
-  const events = data?.orders || [];
   const pagination = data?.pagination;
   const totalPages = pagination?.totalPages || 1;
-  const totalEvents = pagination?.total ?? events.length;
+  const totalOrders = pagination?.total ?? (orders?.length ?? 0);
 
-  void setEventId;
   void refetch;
   void handleSortChange;
   void clearFilters;
   void totalPages;
-  void totalEvents;
+  void totalOrders;
 
   if (isLoading) {
     return (
@@ -90,7 +93,8 @@ export const OrdersPage: React.FC = () => {
       </div>
     );
   }
-  if (error || !order) {
+
+  if (error || !orders) {
     return (
       <div className="min-h-screen bg-[#08090C] text-white flex items-center justify-center p-4">
         <div className="max-w-md w-full bg-[#0E1015] border border-white/10 rounded-2xl p-8 text-center space-y-4">
@@ -103,17 +107,51 @@ export const OrdersPage: React.FC = () => {
       </div>
     );
   }
+
   return (
     <div className="p-6 space-y-6">
       <div className="flex justify-between items-center">
         <h1 className="text-2xl font-bold">Orders</h1>
-        <input
-          type="text"
-          placeholder="Search by name or order #..."
-          value={searchTerm}
-          onChange={(e) => handleSearchChange(e.target.value)}
-          className="input input-bordered w-64"
-        />
+      </div>
+      <div className="flex items-center gap-3 w-full lg:w-auto">
+        <div className="relative flex-1 lg:w-64">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-stone-400" />
+          <input
+            type="text"
+            placeholder="Search by name or order #..."
+            value={searchTerm}
+            onChange={(e) => handleSearchChange(e.target.value)}
+            className="input input-bordered w-64"
+          />
+          {searchTerm && (
+            <button
+              onClick={() => handleSearchChange("")}
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-stone-400 hover:text-stone-700"
+              aria-label="Clear search input"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          )}
+        </div>
+
+        <div className="relative">
+          <select
+            value={selectedStatus || ""}
+            onChange={(e) =>
+              handleStatusChange((e.target.value as OrderStatus) || undefined)
+            }
+            className="appearance-none font-sans text-sm sm:text-base font-semibold text-stone-900 bg-white border border-stone-300 rounded-lg pl-4 pr-10 py-2 sm:py-2.5 shadow-2xs hover:border-stone-900 focus:outline-none focus:border-stone-900 transition-colors cursor-pointer"
+            aria-label="Filter orders by status"
+          >
+            <option value="">All Statuses</option>
+            <option value="COMPLETED">Paid</option>
+            <option value="PENDING">Pending</option>
+            <option value="REFUNDED">Refunded</option>
+            <option value="CANCELLED">Cancelled</option>
+            <option value="EXPIRED">Expired</option>
+          </select>
+          <ChevronDown className="absolute right-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-stone-500 pointer-events-none" />
+        </div>
       </div>
       <div className="overflow-x-auto">
         <table className="table table-zebra w-full">
@@ -158,30 +196,17 @@ export const OrdersPage: React.FC = () => {
           </thead>
 
           <tbody>
-            {order?.map(order => (
+            {orders.map((order) => (
               <tr key={order.id}>
                 <td>{order.orderNumber}</td>
                 <td>{order.createdAt}</td>
                 <td>{order.event.title}</td>
                 <td>{order.ticketsCount}</td>
-                <td>$ {Number(order.totalInCents * order.ticketsCount).toFixed(2)}</td>
+                <td>
+                  $ {Number(order.totalInCents * order.ticketsCount).toFixed(2)}
+                </td>
               </tr>
             ))}
-
-            <tr>
-              <td>OUT-2026-89413</td>
-              <td>27-April-2026</td>
-              <td>SOL FEST: Under The Baobab Tree</td>
-              <td>$5</td>
-              <td>$100</td>
-            </tr>
-            <tr>
-              <td>OUT-2026-89414</td>
-              <td>26-June-2026</td>
-              <td>ALTE CRUISE: Sunset Rooftop Session</td>
-              <td>$2</td>
-              <td>$40</td>
-            </tr>
           </tbody>
         </table>
       </div>
