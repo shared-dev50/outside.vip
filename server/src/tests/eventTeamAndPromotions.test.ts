@@ -8,7 +8,9 @@ import {
   TEAM_INVITE_CREATE_ACTOR_MAX_PER_HOUR,
   TEAM_INVITE_CREATE_EVENT_MAX_PER_HOUR,
   TEAM_INVITE_RESEND_ACTOR_MAX_PER_HOUR,
+  TEAM_INVITE_RESEND_EVENT_MAX_PER_HOUR,
   TEAM_INVITE_INSPECT_IP_BURST_MAX,
+  TEAM_INVITE_INSPECT_IP_SUSTAINED_MAX,
   MAX_HISTORICAL_SLUG_ALIASES_PER_LINK,
 } from '../modules/promotions/promotions.constants.js';
 import { deriveCanonicalVisitorId } from '../modules/promotions/promotions.service.js';
@@ -3471,6 +3473,170 @@ describe('Event Teams, Invitations & Host Promotional Tools (Stage 2)', () => {
         expect(ownerResend.body.success).toBe(true);
         expect(ownerResend.body.invitation.token).toBeUndefined();
       });
+
+      it('enforces event-wide hourly resend limit (TEAM_INVITE_RESEND_EVENT_MAX_PER_HOUR = 25) across multiple authorized actors while isolating other events and ignoring unauthorized/invalid requests', async () => {
+        const redis = getRedisClient();
+
+        // Create a dedicated secondary event owned by sec10Organizer to verify event-scope isolation
+        const sec10Event2 = await prisma.event.create({
+          data: {
+            organizerId: sec10Organizer.id,
+            title: `SEC-10 Secondary Resend Scope Event ${testRunId}`,
+            slug: `sec10-resend-scope-2-${testRunId}`,
+            description: 'Secondary event for resend event-scope isolation test',
+            category: 'MUSIC',
+            venueName: 'SEC-10 Hall 2',
+            venueAddress: '20 Security Blvd',
+            city: 'Nairobi',
+            startAt: new Date(Date.now() + 86400000 * 35),
+            endAt: new Date(Date.now() + 86400000 * 36),
+            coverImageUrl: 'https://outside.vip/sec10-2.jpg',
+            status: 'PUBLISHED',
+          },
+        });
+        createdEventIds.push(sec10Event2.id);
+
+        // Reset actor and event resend counters for clean multi-actor evaluation
+        const event1ResendKey = `ratelimit:team_invite_resend:event:${sec10Event.id}`;
+        const event2ResendKey = `ratelimit:team_invite_resend:event:${sec10Event2.id}`;
+        const orgActorKey = `ratelimit:team_invite_resend:actor:${sec10Organizer.id}`;
+        const admin1ActorKey = `ratelimit:team_invite_resend:actor:${sec10Admin1.id}`;
+        const admin2ActorKey = `ratelimit:team_invite_resend:actor:${sec10Admin2.id}`;
+        await redis.del(event1ResendKey, event2ResendKey, orgActorKey, admin1ActorKey, admin2ActorKey);
+
+        // 1. Seed 27 distinct PENDING invitations on sec10Event (avoiding 60s per-invitation cooldown)
+        //    plus 1 REVOKED invitation on sec10Event and 1 PENDING invitation on sec10Event2
+        const pendingInvitations: string[] = [];
+        for (let i = 1; i <= 27; i++) {
+          const inv = await prisma.eventTeamInvitation.create({
+            data: {
+              eventId: sec10Event.id,
+              email: `sec10_evt_resend_${i}_${testRunId}@outside.vip`,
+              role: EventTeamRole.HOST,
+              tokenHash: `hash_evt_resend_${i}_${testRunId}`,
+              status: TeamInvitationStatus.PENDING,
+              invitedByUserId: sec10Organizer.id,
+              expiresAt: new Date(Date.now() + 7 * 86400000),
+            },
+          });
+          pendingInvitations.push(inv.id);
+        }
+
+        const revokedInv = await prisma.eventTeamInvitation.create({
+          data: {
+            eventId: sec10Event.id,
+            email: `sec10_evt_revoked_${testRunId}@outside.vip`,
+            role: EventTeamRole.HOST,
+            tokenHash: `hash_evt_revoked_${testRunId}`,
+            status: TeamInvitationStatus.REVOKED,
+            invitedByUserId: sec10Organizer.id,
+            expiresAt: new Date(Date.now() + 7 * 86400000),
+          },
+        });
+
+        const otherEventInv = await prisma.eventTeamInvitation.create({
+          data: {
+            eventId: sec10Event2.id,
+            email: `sec10_evt2_pending_${testRunId}@outside.vip`,
+            role: EventTeamRole.HOST,
+            tokenHash: `hash_evt2_pending_${testRunId}`,
+            status: TeamInvitationStatus.PENDING,
+            invitedByUserId: sec10Organizer.id,
+            expiresAt: new Date(Date.now() + 7 * 86400000),
+          },
+        });
+
+        // 2. Verify unauthorized (403) and invalid (404 / 400 non-PENDING) requests do NOT consume event or actor quota
+        await request(app)
+          .post(`/api/events/${sec10Event.id}/team/invitations/${pendingInvitations[0]}/resend`)
+          .set('Cookie', outsiderAuth.cookie)
+          .set('x-csrf-token', outsiderAuth.csrf)
+          .expect(403);
+
+        await request(app)
+          .post(`/api/events/${sec10Event.id}/team/invitations/00000000-0000-0000-0000-000000000000/resend`)
+          .set('Cookie', sec10OrganizerAuth.cookie)
+          .set('x-csrf-token', sec10OrganizerAuth.csrf)
+          .expect(404);
+
+        await request(app)
+          .post(`/api/events/${sec10Event.id}/team/invitations/${revokedInv.id}/resend`)
+          .set('Cookie', sec10OrganizerAuth.cookie)
+          .set('x-csrf-token', sec10OrganizerAuth.csrf)
+          .expect(400);
+
+        expect(await redis.get(event1ResendKey)).toBeNull();
+        expect(await redis.get(orgActorKey)).toBeNull();
+
+        // 3. Distribute 25 valid resends across 3 independently authorized actors on sec10Event:
+        //    - sec10Organizer: 9 resends (invitations 0..8)   [under 10/hr actor limit]
+        //    - sec10Admin1:    9 resends (invitations 9..17)  [under 10/hr actor limit]
+        //    - sec10Admin2:    7 resends (invitations 18..24) [under 10/hr actor limit]
+        //    Total = 25 resends on sec10Event (== TEAM_INVITE_RESEND_EVENT_MAX_PER_HOUR)
+        const actors = [
+          { auth: sec10OrganizerAuth, slice: pendingInvitations.slice(0, 9) },
+          { auth: sec10Admin1Auth, slice: pendingInvitations.slice(9, 18) },
+          { auth: sec10Admin2Auth, slice: pendingInvitations.slice(18, 25) },
+        ];
+
+        let totalSucceeded = 0;
+        for (const { auth, slice } of actors) {
+          for (const invId of slice) {
+            await request(app)
+              .post(`/api/events/${sec10Event.id}/team/invitations/${invId}/resend`)
+              .set('Cookie', auth.cookie)
+              .set('x-csrf-token', auth.csrf)
+              .expect(200);
+            totalSucceeded++;
+          }
+        }
+        expect(totalSucceeded).toBe(TEAM_INVITE_RESEND_EVENT_MAX_PER_HOUR); // 25
+
+        // 4. The 26th valid resend on sec10Event by sec10Admin2 (who only used 7 of 10 personal actor resends)
+        //    is rejected with HTTP 429, TEAM_INVITATION_RESEND_RATE_LIMIT, and Retry-After header
+        const overLimitAdmin2Res = await request(app)
+          .post(`/api/events/${sec10Event.id}/team/invitations/${pendingInvitations[25]}/resend`)
+          .set('Cookie', sec10Admin2Auth.cookie)
+          .set('x-csrf-token', sec10Admin2Auth.csrf)
+          .expect(429);
+
+        expect(overLimitAdmin2Res.body.error.code).toBe('TEAM_INVITATION_RESEND_RATE_LIMIT');
+        expect(Number(overLimitAdmin2Res.header['retry-after'])).toBeGreaterThan(0);
+
+        // 5. Confirm different authorized actors (sec10Organizer and sec10Admin1, each at 9 of 10 actor resends)
+        //    also cannot bypass the event-wide limit on sec10Event
+        const overLimitOrgRes = await request(app)
+          .post(`/api/events/${sec10Event.id}/team/invitations/${pendingInvitations[25]}/resend`)
+          .set('Cookie', sec10OrganizerAuth.cookie)
+          .set('x-csrf-token', sec10OrganizerAuth.csrf)
+          .expect(429);
+
+        expect(overLimitOrgRes.body.error.code).toBe('TEAM_INVITATION_RESEND_RATE_LIMIT');
+        expect(Number(overLimitOrgRes.header['retry-after'])).toBeGreaterThan(0);
+
+        const overLimitAdmin1Res = await request(app)
+          .post(`/api/events/${sec10Event.id}/team/invitations/${pendingInvitations[26]}/resend`)
+          .set('Cookie', sec10Admin1Auth.cookie)
+          .set('x-csrf-token', sec10Admin1Auth.csrf)
+          .expect(429);
+
+        expect(overLimitAdmin1Res.body.error.code).toBe('TEAM_INVITATION_RESEND_RATE_LIMIT');
+        expect(Number(overLimitAdmin1Res.header['retry-after'])).toBeGreaterThan(0);
+
+        // 6. Confirm event-scope isolation: another event (sec10Event2) remains eligible for resends!
+        //    Reset sec10Organizer's actor counter to ensure actor quota is available and resend on sec10Event2
+        await redis.del(orgActorKey);
+        const otherEventRes = await request(app)
+          .post(`/api/events/${sec10Event2.id}/team/invitations/${otherEventInv.id}/resend`)
+          .set('Cookie', sec10OrganizerAuth.cookie)
+          .set('x-csrf-token', sec10OrganizerAuth.csrf)
+          .expect(200);
+
+        expect(otherEventRes.body.success).toBe(true);
+        expect(otherEventRes.body.invitation.id).toBe(otherEventInv.id);
+
+        await redis.del(event1ResendKey, event2ResendKey, orgActorKey, admin1ActorKey, admin2ActorKey);
+      });
     });
 
     // =========================================================================
@@ -3512,6 +3678,95 @@ describe('Event Teams, Invitations & Host Promotional Tools (Stage 2)', () => {
         expect(spoofedRes.body.error.code).toBe('TEAM_INVITATION_INSPECT_RATE_LIMIT');
 
         await redis.del(burstKey, sustainedKey);
+      });
+
+      it('enforces 15-minute IP sustained rate limit (TEAM_INVITE_INSPECT_IP_SUSTAINED_MAX = 60) independently of the 1-minute burst counter, isolates different IPs, blocks X-Forwarded-For spoofing, and never leaks tokens', async () => {
+        const redis = getRedisClient();
+        const sustainedClientIp = '203.0.113.88';
+        const otherClientIp = '203.0.113.89';
+        const sustainedIpHash = hashRateLimitIdentifier(sustainedClientIp);
+        const otherIpHash = hashRateLimitIdentifier(otherClientIp);
+
+        const burstKey = `ratelimit:team_invite_inspect:burst:${sustainedIpHash}`;
+        const sustainedKey = `ratelimit:team_invite_inspect:sustained:${sustainedIpHash}`;
+        const otherBurstKey = `ratelimit:team_invite_inspect:burst:${otherIpHash}`;
+        const otherSustainedKey = `ratelimit:team_invite_inspect:sustained:${otherIpHash}`;
+
+        await redis.del(burstKey, sustainedKey, otherBurstKey, otherSustainedKey);
+
+        // Create a real invitation to inspect so we test valid token inspection across 60 requests
+        const targetEmail = `sec10_sustained_inspect_${testRunId}@outside.vip`;
+        await request(app)
+          .post(`/api/events/${sec10Event.id}/team/invitations`)
+          .set('Cookie', sec10OrganizerAuth.cookie)
+          .set('x-csrf-token', sec10OrganizerAuth.csrf)
+          .send({ email: targetEmail, role: 'HOST' })
+          .expect(201);
+
+        const inviteEmail = sentTeamInvitationEmails
+          .slice()
+          .reverse()
+          .find((e) => e.to === targetEmail);
+        const validToken = inviteEmail!.inviteUrl.split('/').pop()!;
+
+        // 1. Execute 60 real inspection requests across 3 simulated 1-minute burst windows
+        //    (20 requests per minute * 3 minutes = 60 requests within the 15-minute sustained window).
+        //    Between each batch of 20, expire only the 1-minute burst key while leaving the 15-minute sustained key intact.
+        const batches = TEAM_INVITE_INSPECT_IP_SUSTAINED_MAX / TEAM_INVITE_INSPECT_IP_BURST_MAX; // 60 / 20 = 3
+        let totalAllowed = 0;
+
+        for (let batch = 0; batch < batches; batch++) {
+          await redis.del(burstKey); // Simulate advancing 1 minute so burst window resets while 15m sustained window persists
+          for (let reqIdx = 0; reqIdx < TEAM_INVITE_INSPECT_IP_BURST_MAX; reqIdx++) {
+            const okRes = await request(app)
+              .get(`/api/team/invitations/${validToken}`)
+              .set('X-Forwarded-For', sustainedClientIp)
+              .expect(200);
+            expect(okRes.body.success).toBe(true);
+            totalAllowed++;
+          }
+        }
+        expect(totalAllowed).toBe(TEAM_INVITE_INSPECT_IP_SUSTAINED_MAX); // 60
+
+        // 2. Advance the 1-minute burst window one more time so burst counter is 0 (burst limit permits),
+        //    proving the 61st request is rejected specifically by the 15-minute sustained counter!
+        await redis.del(burstKey);
+        expect(await redis.get(burstKey)).toBeNull();
+        expect(Number(await redis.get(sustainedKey))).toBe(TEAM_INVITE_INSPECT_IP_SUSTAINED_MAX);
+
+        const blocked61Res = await request(app)
+          .get(`/api/team/invitations/${validToken}`)
+          .set('X-Forwarded-For', sustainedClientIp)
+          .expect(429);
+
+        expect(blocked61Res.body.error.code).toBe('TEAM_INVITATION_INSPECT_RATE_LIMIT');
+        const retryAfterSeconds = Number(blocked61Res.header['retry-after']);
+        // Retry-After reflects the remaining 15-minute (900s) sustained window (> 60s, not the 60s burst window)
+        expect(retryAfterSeconds).toBeGreaterThan(60);
+        expect(retryAfterSeconds).toBeLessThanOrEqual(900);
+
+        // Confirm no invitation token is exposed in the 429 error response
+        expect(JSON.stringify(blocked61Res.body)).not.toContain(validToken);
+
+        // 3. Confirm spoofed client-prepended X-Forwarded-For values cannot evade the sustained IP limit
+        const spoofedSustainedRes = await request(app)
+          .get(`/api/team/invitations/${validToken}`)
+          .set('X-Forwarded-For', `198.51.100.250, ${sustainedClientIp}`)
+          .expect(429);
+
+        expect(spoofedSustainedRes.body.error.code).toBe('TEAM_INVITATION_INSPECT_RATE_LIMIT');
+        expect(JSON.stringify(spoofedSustainedRes.body)).not.toContain(validToken);
+
+        // 4. Confirm a different trusted client IP has an independent quota and succeeds (200 OK)
+        const otherIpRes = await request(app)
+          .get(`/api/team/invitations/${validToken}`)
+          .set('X-Forwarded-For', otherClientIp)
+          .expect(200);
+
+        expect(otherIpRes.body.success).toBe(true);
+        expect(otherIpRes.body.invitation.status).toBe('PENDING');
+
+        await redis.del(burstKey, sustainedKey, otherBurstKey, otherSustainedKey);
       });
     });
 

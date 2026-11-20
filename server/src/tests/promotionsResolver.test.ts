@@ -9,6 +9,7 @@ import {
   COOKIE_MAX_AGE_SECONDS,
   ATTRIBUTION_WINDOW_MS,
   COOKIELESS_LINK_BURST_MAX,
+  COOKIELESS_IP_SUSTAINED_MAX,
 } from '../modules/promotions/promotions.constants.js';
 import {
   deriveCanonicalVisitorId,
@@ -1283,6 +1284,153 @@ describe('Promotions & Short-Link Resolver System (Stage 1)', () => {
       });
       expect(afterClicks).toBe(beforeClicks);
       expect(afterVisitorDays).toBe(beforeVisitorDays);
+    });
+
+    it('enforces global per-IP cookie-less ceiling (COOKIELESS_IP_SUSTAINED_MAX = 15) shared across distinct promotional links while preserving 302 redirects, cookie issuance, bot exclusion, valid-cookie traffic, and per-link limits', async () => {
+      const redis = getRedisClient();
+      const globalTestIp = '198.51.100.200';
+      const otherClientIp = '198.51.100.201';
+      const globalIpHash = hashRateLimitIdentifier(globalTestIp);
+      const otherIpHash = hashRateLimitIdentifier(otherClientIp);
+
+      await redis.del(
+        `ratelimit:cookieless_ip:${globalIpHash}`,
+        `ratelimit:cookieless_ip:${otherIpHash}`
+      );
+
+      // Create 6 distinct promotional links (links 0..4 will each receive 3 cookie-less clicks = 15 total;
+      // link 5 will have 0 prior clicks and will be used to test the 16th request hitting the global IP ceiling)
+      const multiLinks: Array<{ id: string; slug: string }> = [];
+      for (let i = 1; i <= 6; i++) {
+        const slug = `sec10-global-ip-link-${i}-${testRunId}`;
+        const link = await prisma.promotionLink.create({
+          data: {
+            eventId: event1Id,
+            type: 'CAMPAIGN',
+            status: 'ACTIVE',
+            name: `SEC-10 Global IP Link ${i}`,
+            createdById: organizerId,
+            slugRegistry: {
+              create: [{ slug, isPrimary: true }],
+            },
+          },
+        });
+        createdPromotionLinkIds.push(link.id);
+        multiLinks.push({ id: link.id, slug });
+        await redis.del(
+          `ratelimit:cookieless_link:${globalIpHash}:${link.id}`,
+          `ratelimit:cookieless_link:${otherIpHash}:${link.id}`
+        );
+      }
+
+      // 1. Confirm bot requests from globalTestIp do NOT consume the global 15-request human quota
+      for (let b = 0; b < 6; b++) {
+        await request(app)
+          .get(`/r/${multiLinks[b].slug}`)
+          .set('X-Forwarded-For', globalTestIp)
+          .set('User-Agent', 'Twitterbot/1.0')
+          .expect(302);
+      }
+      expect(await redis.get(`ratelimit:cookieless_ip:${globalIpHash}`)).toBeNull();
+
+      // 2. Send 15 eligible cookie-less human requests from globalTestIp across links 0..4
+      //    (3 distinct User-Agents per link * 5 links = 15 requests == COOKIELESS_IP_SUSTAINED_MAX)
+      const threeUAs = [
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_1) AppleWebKit/537.36 Chrome/121.0',
+        'Mozilla/5.0 (iPhone; CPU iPhone OS 17_1 like Mac OS X) Mobile/15E148 Safari/604.1',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0',
+      ];
+
+      for (let linkIdx = 0; linkIdx < 5; linkIdx++) {
+        for (let uaIdx = 0; uaIdx < COOKIELESS_LINK_BURST_MAX; uaIdx++) {
+          const res = await request(app)
+            .get(`/r/${multiLinks[linkIdx].slug}`)
+            .set('X-Forwarded-For', globalTestIp)
+            .set('User-Agent', threeUAs[uaIdx])
+            .expect(302);
+          expect(res.header.location).toContain(`/events/promo-fest-1-${testRunId}`);
+          expect(String(res.header['set-cookie'])).toContain(`${VISITOR_COOKIE_NAME}=`);
+        }
+      }
+
+      // Confirm all 15 eligible requests recorded analytics (3 per link across links 0..4)
+      const firstFiveLinkIds = multiLinks.slice(0, 5).map((l) => l.id);
+      const recordedClicksFirst15 = await prisma.promotionClick.count({
+        where: { promotionLinkId: { in: firstFiveLinkIds } },
+      });
+      const recordedVisitorDaysFirst15 = await prisma.promotionVisitorDay.count({
+        where: { promotionLinkId: { in: firstFiveLinkIds } },
+      });
+      expect(recordedClicksFirst15).toBe(COOKIELESS_IP_SUSTAINED_MAX); // 15
+      expect(recordedVisitorDaysFirst15).toBe(COOKIELESS_IP_SUSTAINED_MAX); // 15
+
+      // 3. Send the 16th cookie-less request from globalTestIp to multiLinks[5] (a brand-new 6th link with 0 clicks).
+      //    Confirm the global per-IP ceiling is shared across links: analytics writes are skipped,
+      //    while normal HTTP 302 redirect and visitor cookie issuance are preserved!
+      const link6 = multiLinks[5];
+      const req16Res = await request(app)
+        .get(`/r/${link6.slug}`)
+        .set('X-Forwarded-For', globalTestIp)
+        .set('User-Agent', threeUAs[0])
+        .expect(302);
+
+      expect(req16Res.header.location).toContain(`/events/promo-fest-1-${testRunId}`);
+      expect(String(req16Res.header['set-cookie'])).toContain(`${VISITOR_COOKIE_NAME}=`);
+
+      let link6Clicks = await prisma.promotionClick.count({
+        where: { promotionLinkId: link6.id },
+      });
+      let link6VisitorDays = await prisma.promotionVisitorDay.count({
+        where: { promotionLinkId: link6.id },
+      });
+      expect(link6Clicks).toBe(0);
+      expect(link6VisitorDays).toBe(0);
+
+      // 4. Confirm valid-cookie requests from the globally throttled IP (globalTestIp) remain unaffected
+      const validVid = `vid_global_ip_valid_cookie_${testRunId}_abcdef`;
+      await request(app)
+        .get(`/r/${link6.slug}`)
+        .set('X-Forwarded-For', globalTestIp)
+        .set('User-Agent', threeUAs[0])
+        .set('Cookie', `${VISITOR_COOKIE_NAME}=${validVid}`)
+        .expect(302);
+
+      link6Clicks = await prisma.promotionClick.count({
+        where: { promotionLinkId: link6.id },
+      });
+      expect(link6Clicks).toBe(1);
+
+      // 5. Confirm a different client IP (otherClientIp) has an independent quota and that the per-link
+      //    3-per-minute limit (COOKIELESS_LINK_BURST_MAX = 3) still operates independently on link6
+      for (let i = 0; i < COOKIELESS_LINK_BURST_MAX; i++) {
+        await request(app)
+          .get(`/r/${link6.slug}`)
+          .set('X-Forwarded-For', otherClientIp)
+          .set('User-Agent', threeUAs[i])
+          .expect(302);
+      }
+
+      // 1 valid-cookie click + 3 cookie-less clicks from otherClientIp = 4 clicks on link6
+      link6Clicks = await prisma.promotionClick.count({
+        where: { promotionLinkId: link6.id },
+      });
+      expect(link6Clicks).toBe(1 + COOKIELESS_LINK_BURST_MAX); // 4
+
+      // 4th cookie-less click from otherClientIp on link6 (when otherClientIp's global count is only 3 of 15)
+      // is suppressed by the per-link 3/min burst limit while still redirecting 302
+      const linkBurstRes = await request(app)
+        .get(`/r/${link6.slug}`)
+        .set('X-Forwarded-For', otherClientIp)
+        .set('User-Agent', 'Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:123.0) Gecko/20100101 Firefox/123.0')
+        .expect(302);
+
+      expect(linkBurstRes.header.location).toContain(`/events/promo-fest-1-${testRunId}`);
+      expect(String(linkBurstRes.header['set-cookie'])).toContain(`${VISITOR_COOKIE_NAME}=`);
+
+      link6Clicks = await prisma.promotionClick.count({
+        where: { promotionLinkId: link6.id },
+      });
+      expect(link6Clicks).toBe(1 + COOKIELESS_LINK_BURST_MAX); // Still 4!
     });
   });
 });
