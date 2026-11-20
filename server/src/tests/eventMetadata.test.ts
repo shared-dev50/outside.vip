@@ -1,10 +1,17 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   buildEventSocialMetadata,
   renderCrawlerHtml,
   escapeHtml,
 } from '../modules/events/eventMetadata.service.js';
 import { isBotUserAgent } from '../modules/promotions/promotions.constants.js';
+import {
+  handlePublicEventCrawler,
+  getEventSocialMetadata,
+} from '../modules/events/events.controller.js';
+import { prisma } from '../db/prisma.js';
+import { EventStatus } from '@prisma/client';
+import { NotFoundError } from '../utils/errors.js';
 
 describe('Outside.vip — Event Social Preview Metadata & Crawler Handling', () => {
   const publicEvent = {
@@ -15,7 +22,7 @@ describe('Outside.vip — Event Social Preview Metadata & Crawler Handling', () 
     description: '<p>Join thousands of music lovers under the stars at Carnivore Grounds Nairobi.</p>',
     coverImageUrl: 'https://images.unsplash.com/photo-1514525253161-7a46d19cd819',
     isPasswordProtected: false,
-    status: 'PUBLISHED',
+    status: EventStatus.PUBLISHED,
   };
 
   // =========================================================================
@@ -95,9 +102,9 @@ describe('Outside.vip — Event Social Preview Metadata & Crawler Handling', () 
   });
 
   // =========================================================================
-  // 2. Crawler-Readable HTML Document Rendering & XSS Safety
+  // 2. Crawler-Readable HTML Document Rendering & Refresh Tag Control
   // =========================================================================
-  describe('2. Crawler-Readable HTML Rendering', () => {
+  describe('2. Crawler-Readable HTML Rendering & Refresh Behavior', () => {
     it('renders standards-compliant HTML containing all required Open Graph and Twitter Card tags', () => {
       const meta = buildEventSocialMetadata(publicEvent, { baseUrl: 'https://outside.vip' });
       const html = renderCrawlerHtml(meta, {
@@ -123,9 +130,27 @@ describe('Outside.vip — Event Social Preview Metadata & Crawler Handling', () 
       expect(html).toContain('<meta name="twitter:description" content="The biggest outdoor bass music festival in East Africa." />');
       expect(html).toContain('<meta name="twitter:image" content="https://images.unsplash.com/photo-1514525253161-7a46d19cd819" />');
 
-      // Refresh Redirect & Canonical Link
-      expect(html).toContain('<meta http-equiv="refresh" content="0; url=https://outside.vip/events/safari-sound-clash" />');
+      // Canonical Link
       expect(html).toContain('<link rel="canonical" href="https://outside.vip/events/safari-sound-clash" />');
+    });
+
+    it('renders http-equiv refresh ONLY when redirectUrl is explicitly provided', () => {
+      const meta = buildEventSocialMetadata(publicEvent, { baseUrl: 'https://outside.vip' });
+      const htmlWithRedirect = renderCrawlerHtml(meta, {
+        redirectUrl: 'https://outside.vip/events/safari-sound-clash',
+      });
+
+      expect(htmlWithRedirect).toContain(
+        '<meta http-equiv="refresh" content="0; url=https://outside.vip/events/safari-sound-clash" />'
+      );
+    });
+
+    it('OMITS http-equiv refresh completely when redirectUrl is omitted (prevents event-page self-redirect loops)', () => {
+      const meta = buildEventSocialMetadata(publicEvent, { baseUrl: 'https://outside.vip' });
+      const htmlWithoutRedirect = renderCrawlerHtml(meta);
+
+      expect(htmlWithoutRedirect).not.toContain('http-equiv="refresh"');
+      expect(htmlWithoutRedirect).not.toContain('http-equiv');
     });
 
     it('safely escapes HTML characters in titles and descriptions to prevent XSS injection', () => {
@@ -203,5 +228,342 @@ describe('Outside.vip — Event Social Preview Metadata & Crawler Handling', () 
       expect(isBotUserAgent('')).toBe(false);
     });
   });
-});
 
+  // =========================================================================
+  // 4. Vercel Rewrite Regex Validation (No PCRE inline (?i) flag)
+  // =========================================================================
+  describe('4. Vercel Rewrite Regex Validation', () => {
+    const vercelRegex = new RegExp(
+      '.*([bB][oO][tT]|[cC][rR][aA][wW][lL]|[sS][pP][iI][dD][eE][rR]|[sS][lL][uU][rR][pP]|[fF]acebook[eE]xternal[hH]it|[wW]hats[aA]pp|[tT]elegram[bB]ot|[tT]witter[bB]ot|[lL]inked[iI]n[bB]ot|[sS]lack[bB]ot|[dD]iscord[bB]ot|[bB]ing[pP]review|[gG]oogle-[sS]tructured-[dD]ata-[tT]esting-[tT]ool|[aA]pple[bB]ot|[sS]napchat|[pP]interest|[mM]eta-[eE]xternal[aA]gent).*'
+    );
+
+    it('matches all known crawler user agents without requiring PCRE flags', () => {
+      const crawlers = [
+        'Twitterbot/1.0',
+        'twitterbot/1.0',
+        'facebookexternalhit/1.1',
+        'FacebookExternalHit/1.1',
+        'WhatsApp/2.21.12.21 A',
+        'whatsapp/2.21.12.21 A',
+        'TelegramBot (like TwitterBot)',
+        'LinkedInBot/1.0',
+        'Slackbot-LinkExpanding 1.0',
+        'Discordbot/2.0',
+        'BingPreview/1.0b',
+        'Googlebot/2.1',
+        'bingbot/2.0',
+        'Applebot/0.1',
+        'applebot/0.1',
+        'Snapchat/11.0',
+        'Pinterest/0.2',
+        'Meta-ExternalAgent/1.0',
+        'meta-externalagent/1.0',
+        'Slurp',
+        'slurp',
+        'Baiduspider/2.0',
+        'google-structured-data-testing-tool',
+        'YandexBot/3.0',
+      ];
+
+      for (const ua of crawlers) {
+        expect(vercelRegex.test(ua), `Expected crawler "${ua}" to match Vercel regex`).toBe(true);
+      }
+    });
+
+    it('never matches normal human browser User-Agent strings', () => {
+      const browsers = [
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36 Edg/121.0.0.0',
+        'Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1',
+        'Mozilla/5.0 (iPad; CPU OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0',
+        'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.6167.101 Mobile Safari/537.36',
+      ];
+
+      for (const ua of browsers) {
+        expect(vercelRegex.test(ua), `Expected browser "${ua}" NOT to match Vercel regex`).toBe(false);
+      }
+    });
+  });
+
+  // =========================================================================
+  // 5. Unpublished / Draft Event Privacy & Protection
+  // =========================================================================
+  describe('5. Unpublished / Draft Event Protection', () => {
+    beforeEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it('handlePublicEventCrawler returns 404 HTML without event metadata when event is DRAFT', async () => {
+      vi.spyOn(prisma.event, 'findFirst').mockResolvedValueOnce({
+        id: 'evt_draft_1',
+        slug: 'super-secret-draft',
+        title: 'Super Secret Draft Party',
+        tagline: 'Should not leak',
+        description: 'Classified details',
+        coverImageUrl: 'https://outside.vip/secret.jpg',
+        isPasswordProtected: false,
+        status: EventStatus.DRAFT,
+      } as any);
+
+      let statusCode = 0;
+      let contentType = '';
+      let sentBody = '';
+
+      const req: any = { params: { slug: 'super-secret-draft' } };
+      const res: any = {
+        status: (code: number) => {
+          statusCode = code;
+          return res;
+        },
+        type: (type: string) => {
+          contentType = type;
+          return res;
+        },
+        send: (body: string) => {
+          sentBody = body;
+          return res;
+        },
+      };
+      const next = vi.fn();
+
+      await handlePublicEventCrawler(req, res, next);
+
+      expect(statusCode).toBe(404);
+      expect(contentType).toBe('html');
+      expect(sentBody).toContain('Event Not Found');
+      expect(sentBody).not.toContain('Super Secret Draft Party');
+      expect(sentBody).not.toContain('Classified details');
+      expect(sentBody).not.toContain('https://outside.vip/secret.jpg');
+    });
+
+    it('handlePublicEventCrawler returns 404 HTML when event is ARCHIVED', async () => {
+      vi.spyOn(prisma.event, 'findFirst').mockResolvedValueOnce({
+        id: 'evt_archived_1',
+        slug: 'old-party',
+        title: 'Old Party 2020',
+        tagline: 'Archived',
+        description: 'Past event',
+        coverImageUrl: null,
+        isPasswordProtected: false,
+        status: EventStatus.ARCHIVED,
+      } as any);
+
+      let statusCode = 0;
+      let sentBody = '';
+      const req: any = { params: { slug: 'old-party' } };
+      const res: any = {
+        status: (code: number) => {
+          statusCode = code;
+          return res;
+        },
+        type: () => res,
+        send: (body: string) => {
+          sentBody = body;
+          return res;
+        },
+      };
+      const next = vi.fn();
+
+      await handlePublicEventCrawler(req, res, next);
+
+      expect(statusCode).toBe(404);
+      expect(sentBody).toContain('Event Not Found');
+      expect(sentBody).not.toContain('Old Party 2020');
+    });
+
+    it('handlePublicEventCrawler returns 404 HTML when event is CANCELLED', async () => {
+      vi.spyOn(prisma.event, 'findFirst').mockResolvedValueOnce({
+        id: 'evt_cancelled_1',
+        slug: 'cancelled-event',
+        title: 'Cancelled Festival 2026',
+        tagline: 'Cancelled',
+        description: 'No longer taking place',
+        coverImageUrl: null,
+        isPasswordProtected: false,
+        status: EventStatus.CANCELLED,
+      } as any);
+
+      let statusCode = 0;
+      let sentBody = '';
+      const req: any = { params: { slug: 'cancelled-event' } };
+      const res: any = {
+        status: (code: number) => {
+          statusCode = code;
+          return res;
+        },
+        type: () => res,
+        send: (body: string) => {
+          sentBody = body;
+          return res;
+        },
+      };
+      const next = vi.fn();
+
+      await handlePublicEventCrawler(req, res, next);
+
+      expect(statusCode).toBe(404);
+      expect(sentBody).toContain('Event Not Found');
+      expect(sentBody).not.toContain('Cancelled Festival 2026');
+    });
+
+    it('handlePublicEventCrawler returns 404 HTML when event does not exist', async () => {
+      vi.spyOn(prisma.event, 'findFirst').mockResolvedValueOnce(null);
+
+      let statusCode = 0;
+      let sentBody = '';
+      const req: any = { params: { slug: 'non-existent' } };
+      const res: any = {
+        status: (code: number) => {
+          statusCode = code;
+          return res;
+        },
+        type: () => res,
+        send: (body: string) => {
+          sentBody = body;
+          return res;
+        },
+      };
+      const next = vi.fn();
+
+      await handlePublicEventCrawler(req, res, next);
+
+      expect(statusCode).toBe(404);
+      expect(sentBody).toContain('Event Not Found');
+    });
+
+    it('handlePublicEventCrawler returns 200 HTML with metadata and NO refresh tag for PUBLISHED events', async () => {
+      vi.spyOn(prisma.event, 'findFirst').mockResolvedValueOnce({
+        id: 'evt_published_1',
+        slug: 'safari-sound-clash',
+        title: 'Safari Sound Clash 2026',
+        tagline: 'Bass Festival',
+        description: 'Carnivore Nairobi',
+        coverImageUrl: 'https://images.unsplash.com/photo-1514525253161-7a46d19cd819',
+        isPasswordProtected: false,
+        status: EventStatus.PUBLISHED,
+      } as any);
+
+      let statusCode = 0;
+      let contentType = '';
+      let sentBody = '';
+      const req: any = { params: { slug: 'safari-sound-clash' } };
+      const res: any = {
+        status: (code: number) => {
+          statusCode = code;
+          return res;
+        },
+        type: (type: string) => {
+          contentType = type;
+          return res;
+        },
+        send: (body: string) => {
+          sentBody = body;
+          return res;
+        },
+      };
+      const next = vi.fn();
+
+      await handlePublicEventCrawler(req, res, next);
+
+      expect(statusCode).toBe(200);
+      expect(contentType).toBe('html');
+      expect(sentBody).toContain('Safari Sound Clash 2026');
+      expect(sentBody).toContain('og:title');
+      // Crucial: direct event crawler responses MUST NOT include a self-referencing refresh tag
+      expect(sentBody).not.toContain('http-equiv="refresh"');
+    });
+
+    it('getEventSocialMetadata throws NotFoundError when event is DRAFT', async () => {
+      vi.spyOn(prisma.event, 'findFirst').mockResolvedValueOnce({
+        id: 'evt_draft_2',
+        slug: 'confidential-event',
+        title: 'Confidential Event',
+        status: EventStatus.DRAFT,
+      } as any);
+
+      const req: any = { params: { slug: 'confidential-event' } };
+      const res: any = { json: vi.fn() };
+      let capturedError: any = null;
+      const next = (err: any) => {
+        capturedError = err;
+      };
+
+      await getEventSocialMetadata(req, res, next);
+
+      expect(capturedError).toBeInstanceOf(NotFoundError);
+      expect(capturedError?.message).toBe('Event not found');
+    });
+
+    it('getEventSocialMetadata throws NotFoundError when event is ARCHIVED', async () => {
+      vi.spyOn(prisma.event, 'findFirst').mockResolvedValueOnce({
+        id: 'evt_arch_2',
+        slug: 'archived-event',
+        title: 'Archived Event',
+        status: EventStatus.ARCHIVED,
+      } as any);
+
+      const req: any = { params: { slug: 'archived-event' } };
+      const res: any = { json: vi.fn() };
+      let capturedError: any = null;
+      const next = (err: any) => {
+        capturedError = err;
+      };
+
+      await getEventSocialMetadata(req, res, next);
+
+      expect(capturedError).toBeInstanceOf(NotFoundError);
+      expect(capturedError?.message).toBe('Event not found');
+    });
+
+    it('getEventSocialMetadata throws NotFoundError when event is CANCELLED', async () => {
+      vi.spyOn(prisma.event, 'findFirst').mockResolvedValueOnce({
+        id: 'evt_canc_2',
+        slug: 'cancelled-event',
+        title: 'Cancelled Event',
+        status: EventStatus.CANCELLED,
+      } as any);
+
+      const req: any = { params: { slug: 'cancelled-event' } };
+      const res: any = { json: vi.fn() };
+      let capturedError: any = null;
+      const next = (err: any) => {
+        capturedError = err;
+      };
+
+      await getEventSocialMetadata(req, res, next);
+
+      expect(capturedError).toBeInstanceOf(NotFoundError);
+      expect(capturedError?.message).toBe('Event not found');
+    });
+
+    it('getEventSocialMetadata returns metadata when event is PUBLISHED', async () => {
+      vi.spyOn(prisma.event, 'findFirst').mockResolvedValueOnce({
+        id: 'evt_pub_2',
+        slug: 'live-event',
+        title: 'Live Event 2026',
+        tagline: 'Great vibes',
+        description: 'Come through',
+        coverImageUrl: 'https://outside.vip/live.jpg',
+        isPasswordProtected: false,
+        status: EventStatus.PUBLISHED,
+      } as any);
+
+      const req: any = { params: { slug: 'live-event' } };
+      let jsonPayload: any = null;
+      const res: any = {
+        json: (payload: any) => {
+          jsonPayload = payload;
+        },
+      };
+      const next = vi.fn();
+
+      await getEventSocialMetadata(req, res, next);
+
+      expect(jsonPayload).not.toBeNull();
+      expect(jsonPayload.success).toBe(true);
+      expect(jsonPayload.metadata.title).toBe('Live Event 2026 | Outside.vip');
+      expect(next).not.toHaveBeenCalled();
+    });
+  });
+});

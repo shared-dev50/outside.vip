@@ -103,7 +103,10 @@ export function renderCrawlerHtml(
   const escapedImage = escapeHtml(metadata.imageUrl);
   const escapedUrl = escapeHtml(metadata.url);
   const escapedSiteName = escapeHtml(metadata.siteName);
-  const redirectTarget = options?.redirectUrl ? escapeHtml(options.redirectUrl) : escapedUrl;
+  const targetUrl = options?.redirectUrl ? escapeHtml(options.redirectUrl) : escapedUrl;
+  const refreshTag = options?.redirectUrl
+    ? `\n  <!-- Refresh Redirect for Short-Link Resolvers -->\n  <meta http-equiv="refresh" content="0; url=${escapeHtml(options.redirectUrl)}" />`
+    : '';
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -127,15 +130,12 @@ export function renderCrawlerHtml(
   <meta name="twitter:url" content="${escapedUrl}" />
   <meta name="twitter:title" content="${escapedTitle}" />
   <meta name="twitter:description" content="${escapedDesc}" />
-  <meta name="twitter:image" content="${escapedImage}" />
-
-  <!-- Refresh Redirect for Crawlers/Browsers -->
-  <meta http-equiv="refresh" content="0; url=${redirectTarget}" />
+  <meta name="twitter:image" content="${escapedImage}" />${refreshTag}
 </head>
 <body style="font-family: sans-serif; background: #FAF8F5; color: #1c1917; padding: 2rem;">
   <h2>${escapedTitle}</h2>
   <p>${escapedDesc}</p>
-  <p><a href="${redirectTarget}">Continue to Event &rarr;</a></p>
+  <p><a href="${targetUrl}">Continue to Event &rarr;</a></p>
 </body>
 </html>`;
 }

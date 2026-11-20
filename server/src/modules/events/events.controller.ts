@@ -575,7 +575,8 @@ export async function handlePublicEventCrawler(
       },
     });
 
-    if (!event || event.status === EventStatus.ARCHIVED) {
+    // Only PUBLISHED events are publicly discoverable and expose crawler metadata
+    if (!event || event.status !== EventStatus.PUBLISHED) {
       res.status(404).type('html').send(
         '<!DOCTYPE html><html><head><title>Event Not Found | Outside.vip</title></head><body><h1>Event Not Found</h1></body></html>'
       );
@@ -584,18 +585,12 @@ export async function handlePublicEventCrawler(
 
     const baseUrl = (env.CLIENT_URL || 'https://outside.vip').replace(/\/+$/, '');
     const clientEventUrl = `${baseUrl}/events/${encodeURIComponent(event.slug)}`;
-    const userAgent = req.headers['user-agent'] as string | undefined;
 
-    // Build social metadata
+    // Build social preview metadata
     const metadata = buildEventSocialMetadata(event, { baseUrl });
 
-    if (isBotUserAgent(userAgent)) {
-      res.status(200).type('html').send(renderCrawlerHtml(metadata, { redirectUrl: clientEventUrl }));
-      return;
-    }
-
-    // Direct browser hit on backend redirects to client SPA
-    res.redirect(302, clientEventUrl);
+    // Render loop-free crawler HTML (no self-refresh tag on /events/:slug)
+    res.status(200).type('html').send(renderCrawlerHtml(metadata));
   } catch (err) {
     next(err);
   }
@@ -627,7 +622,8 @@ export async function getEventSocialMetadata(
       },
     });
 
-    if (!event || event.status === EventStatus.ARCHIVED) {
+    // Only PUBLISHED events expose public social preview metadata
+    if (!event || event.status !== EventStatus.PUBLISHED) {
       throw new NotFoundError('Event not found');
     }
 

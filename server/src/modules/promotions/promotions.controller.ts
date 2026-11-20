@@ -91,20 +91,23 @@ export async function handleShortLinkRedirect(
     });
   }
 
-  // 6. Set Host-Only outside_vid cookie (HttpOnly, SameSite=Lax, Secure, NO Domain)
-  const isProduction = env.NODE_ENV === 'production';
-  const cookieParts = [
-    `${VISITOR_COOKIE_NAME}=${encodeURIComponent(rawVid)}`,
-    'Path=/',
-    `Max-Age=${COOKIE_MAX_AGE_SECONDS}`,
-    'HttpOnly',
-    'SameSite=Lax',
-  ];
-  if (isProduction) {
-    cookieParts.push('Secure');
-  }
+  // 6. Set Host-Only outside_vid cookie for human visitors (HttpOnly, SameSite=Lax, Secure, NO Domain)
+  // Social crawlers and bots do not receive attribution cookies
+  if (!isBot) {
+    const isProduction = env.NODE_ENV === 'production';
+    const cookieParts = [
+      `${VISITOR_COOKIE_NAME}=${encodeURIComponent(rawVid)}`,
+      'Path=/',
+      `Max-Age=${COOKIE_MAX_AGE_SECONDS}`,
+      'HttpOnly',
+      'SameSite=Lax',
+    ];
+    if (isProduction) {
+      cookieParts.push('Secure');
+    }
 
-  res.append('Set-Cookie', cookieParts.join('; '));
+    res.append('Set-Cookie', cookieParts.join('; '));
+  }
 
   // 7. Construct destination event URL with whitelisted query parameters
   const eventIdentifier = event.slug || event.id;
@@ -114,8 +117,8 @@ export async function handleShortLinkRedirect(
   const queryString = searchParams.toString();
   const redirectUrl = queryString ? `${targetPath}?${queryString}` : targetPath;
 
-  // 8. If bot crawler, respond with 302 Location AND crawler-readable HTML metadata body
-  if (isBot) {
+  // 8. If bot crawler and event is PUBLISHED, respond with 302 Location AND crawler-readable HTML metadata body
+  if (isBot && event.status === 'PUBLISHED') {
     const metadata = buildEventSocialMetadata(
       {
         title: event.title,

@@ -32,11 +32,14 @@ describe('Promotions & Short-Link Resolver System (Stage 1)', () => {
   let hostLink1Id: string;
   let campaignLink1Id: string;
   let campaignLink2Id: string;
+  let draftEventId: string;
+  let draftCampaignLinkId: string;
 
   const primaryHostSlug = `test-host-${testRunId}`;
   const historicalHostSlug = `test-host-old-${testRunId}`;
   const primaryCampaignSlug = `test-camp-${testRunId}`;
   const event2CampaignSlug = `test-evt2-${testRunId}`;
+  const draftCampaignSlug = `test-draft-${testRunId}`;
 
   beforeAll(async () => {
     // 1. Create Organizer
@@ -189,6 +192,42 @@ describe('Promotions & Short-Link Resolver System (Stage 1)', () => {
     });
     campaignLink2Id = campLink2.id;
     createdPromotionLinkIds.push(campLink2.id);
+
+    // 11. Create Draft Event and Campaign PromotionLink (for unpublished crawler test)
+    const draftEvt = await prisma.event.create({
+      data: {
+        organizerId,
+        title: `Draft Fest ${testRunId}`,
+        description: 'Super Confidential Draft Details',
+        coverImageUrl: 'https://example.com/draft-poster.jpg',
+        venueAddress: '789 Secret Cave',
+        slug: `draft-fest-${testRunId}`,
+        category: 'MUSIC',
+        status: 'DRAFT',
+        startAt: new Date(Date.now() + 86400000 * 30),
+        endAt: new Date(Date.now() + 86400000 * 31),
+        venueName: 'Secret Venue',
+        city: 'Nairobi',
+        country: 'KE',
+      },
+    });
+    draftEventId = draftEvt.id;
+    createdEventIds.push(draftEvt.id);
+
+    const draftCampLink = await prisma.promotionLink.create({
+      data: {
+        eventId: draftEventId,
+        type: 'CAMPAIGN',
+        status: 'ACTIVE',
+        name: 'Draft Campaign Link',
+        createdById: organizerId,
+        slugRegistry: {
+          create: [{ slug: draftCampaignSlug, isPrimary: true }],
+        },
+      },
+    });
+    draftCampaignLinkId = draftCampLink.id;
+    createdPromotionLinkIds.push(draftCampLink.id);
   });
 
   afterAll(async () => {
@@ -415,17 +454,40 @@ describe('Promotions & Short-Link Resolver System (Stage 1)', () => {
   });
 
   describe('3. Bot Filtering & Click Deduplication', () => {
-    it('redirects bots without inserting PromotionClick, PromotionVisitorAttribution, or PromotionVisitorDay records', async () => {
+    it('redirects bots without inserting PromotionClick, PromotionVisitorAttribution, or PromotionVisitorDay records and renders preview HTML without cookies', async () => {
       const botVid = 'vid_bot_crawler_token_1122334455667788';
       const botCanonicalId = deriveCanonicalVisitorId(botVid);
 
       const res = await request(app)
         .get(`/r/${primaryCampaignSlug}`)
         .set('User-Agent', 'Twitterbot/1.0')
-        .set('Cookie', `${VISITOR_COOKIE_NAME}=${botVid}`)
         .expect(302);
 
+      // Verify 302 redirect location points to public event
       expect(res.header.location).toContain(`/events/promo-fest-1-${testRunId}`);
+
+      // Verify NO outside_vid Set-Cookie header is returned for bots
+      const setCookie = res.header['set-cookie'];
+      if (setCookie) {
+        const joined = Array.isArray(setCookie) ? setCookie.join('; ') : String(setCookie);
+        expect(joined).not.toContain(VISITOR_COOKIE_NAME);
+      } else {
+        expect(setCookie).toBeUndefined();
+      }
+
+      // Verify crawler HTML body contains Open Graph & Twitter Card tags
+      expect(res.text).toContain('<!DOCTYPE html>');
+      expect(res.text).toContain(`Promo Fest 1 ${testRunId} | Outside.vip`);
+      expect(res.text).toContain('<meta property="og:type" content="website" />');
+      expect(res.text).toContain(
+        `/events/promo-fest-1-${testRunId}`
+      );
+      expect(res.text).toContain('<link rel="canonical" href="');
+      expect(res.text).toContain('<meta property="og:url" content="');
+      expect(res.text).toContain('<meta name="twitter:card" content="summary_large_image" />');
+      expect(res.text).toContain(
+        `<meta http-equiv="refresh" content="0; url=/events/promo-fest-1-${testRunId}" />`
+      );
 
       // Verify no attribution was created
       const botAttr = await prisma.promotionVisitorAttribution.findUnique({
@@ -437,6 +499,76 @@ describe('Promotions & Short-Link Resolver System (Stage 1)', () => {
         },
       });
       expect(botAttr).toBeNull();
+
+      // Verify no click record was created
+      const clickCount = await prisma.promotionClick.count({
+        where: {
+          promotionLinkId: campaignLink1Id,
+          userAgent: 'Twitterbot/1.0',
+        },
+      });
+      expect(clickCount).toBe(0);
+
+      // Verify no visitor-day record was created
+      const dayCount = await prisma.promotionVisitorDay.count({
+        where: {
+          promotionLinkId: campaignLink1Id,
+          canonicalVisitorId: botCanonicalId,
+        },
+      });
+      expect(dayCount).toBe(0);
+    });
+
+    it('redirects crawler for unpublished (DRAFT) event without returning metadata, cookies, or attribution records', async () => {
+      const res = await request(app)
+        .get(`/r/${draftCampaignSlug}`)
+        .set('User-Agent', 'Twitterbot/1.0')
+        .expect(302);
+
+      // Verify redirect points to the draft event slug
+      expect(res.header.location).toContain(`/events/draft-fest-${testRunId}`);
+
+      // Verify NO outside_vid Set-Cookie header is returned
+      const setCookie = res.header['set-cookie'];
+      if (setCookie) {
+        const joined = Array.isArray(setCookie) ? setCookie.join('; ') : String(setCookie);
+        expect(joined).not.toContain(VISITOR_COOKIE_NAME);
+      } else {
+        expect(setCookie).toBeUndefined();
+      }
+
+      // Verify response body does NOT contain social preview metadata tags
+      expect(res.text).not.toContain('<meta property="og:title"');
+      expect(res.text).not.toContain('<meta name="twitter:title"');
+      expect(res.text).not.toContain('Draft Fest');
+      expect(res.text).not.toContain('Super Confidential Draft Details');
+      expect(res.text).not.toContain('draft-poster.jpg');
+
+      // Verify following redirect to /events/:slug with crawler returns 404 (no leak)
+      const destRes = await request(app)
+        .get(`/events/draft-fest-${testRunId}`)
+        .set('User-Agent', 'Twitterbot/1.0')
+        .expect(404);
+
+      expect(destRes.text).toContain('Event Not Found');
+      expect(destRes.text).not.toContain('Draft Fest');
+      expect(destRes.text).not.toContain('Super Confidential Draft Details');
+
+      // Verify no click, attribution, or visitor-day records exist
+      const clickCount = await prisma.promotionClick.count({
+        where: { promotionLinkId: draftCampaignLinkId },
+      });
+      expect(clickCount).toBe(0);
+
+      const attrCount = await prisma.promotionVisitorAttribution.count({
+        where: { promotionLinkId: draftCampaignLinkId },
+      });
+      expect(attrCount).toBe(0);
+
+      const dayCount = await prisma.promotionVisitorDay.count({
+        where: { promotionLinkId: draftCampaignLinkId },
+      });
+      expect(dayCount).toBe(0);
     });
 
     it('deduplicates rapid repeat clicks from the same visitor within 15 minutes', async () => {

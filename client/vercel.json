@@ -11,7 +11,7 @@
         {
           "type": "header",
           "key": "user-agent",
-          "value": "(?i).*(bot|crawl|spider|slurp|facebookexternalhit|whatsapp|telegrambot|twitterbot|linkedinbot|slackbot|discordbot|bingpreview|google-structured-data-testing-tool|applebot|snapchat|pinterest|meta-externalagent).*"
+          "value": ".*([bB][oO][tT]|[cC][rR][aA][wW][lL]|[sS][pP][iI][dD][eE][rR]|[sS][lL][uU][rR][pP]|[fF]acebook[eE]xternal[hH]it|[wW]hats[aA]pp|[tT]elegram[bB]ot|[tT]witter[bB]ot|[lL]inked[iI]n[bB]ot|[sS]lack[bB]ot|[dD]iscord[bB]ot|[bB]ing[pP]review|[gG]oogle-[sS]tructured-[dD]ata-[tT]esting-[tT]ool|[aA]pple[bB]ot|[sS]napchat|[pP]interest|[mM]eta-[eE]xternal[aA]gent).*"
         }
       ],
       "destination": "https://outside-vip.onrender.com/events/:slug*"
