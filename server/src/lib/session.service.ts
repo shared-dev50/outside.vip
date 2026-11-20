@@ -600,3 +600,82 @@ export async function checkRedisRateLimit(
     wrapRedisError(err);
   }
 }
+
+/**
+ * Derives a non-reversible SHA-256 hash for rate-limit key components
+ * (such as normalized client IPs or User-Agent strings) so raw personal
+ * identifiers are never persisted in Redis keys.
+ */
+export function hashRateLimitIdentifier(raw: string): string {
+  return crypto
+    .createHash('sha256')
+    .update(`outside_ratelimit_v1:${(raw || 'unknown').trim()}`)
+    .digest('hex')
+    .slice(0, 32);
+}
+
+/**
+ * Increments a Redis rate-limit counter with TTL and returns whether the request
+ * is allowed along with the current count and remaining Retry-After seconds.
+ */
+export async function checkRedisRateLimitWithRetryAfter(
+  key: string,
+  maxRequests: number,
+  windowMs: number
+): Promise<{ allowed: boolean; count: number; retryAfterSeconds: number }> {
+  try {
+    const redis = getRedisClient();
+    const fullKey = `ratelimit:${key}`;
+    const count = await redis.incrWithTtl(fullKey, windowMs);
+    if (count <= maxRequests) {
+      return { allowed: true, count, retryAfterSeconds: 0 };
+    }
+    const pttl = await redis.pttl(fullKey);
+    const retryAfterSeconds =
+      pttl > 0
+        ? Math.max(1, Math.ceil(pttl / 1000))
+        : Math.max(1, Math.ceil(windowMs / 1000));
+    return { allowed: false, count, retryAfterSeconds };
+  } catch (err) {
+    wrapRedisError(err);
+  }
+}
+
+/**
+ * Atomically acquires a fixed-duration cooldown lock in Redis using SET ... NX PX.
+ * Prevents concurrent duplicate requests from bypassing cooldown enforcement.
+ */
+export async function acquireRedisCooldown(
+  key: string,
+  cooldownMs: number
+): Promise<{ allowed: boolean; retryAfterSeconds: number }> {
+  try {
+    const redis = getRedisClient();
+    const fullKey = `cooldown:${key}`;
+    const acquired = await redis.setNxPx(fullKey, '1', cooldownMs);
+    if (acquired) {
+      return { allowed: true, retryAfterSeconds: 0 };
+    }
+    const pttl = await redis.pttl(fullKey);
+    const retryAfterSeconds =
+      pttl > 0
+        ? Math.max(1, Math.ceil(pttl / 1000))
+        : Math.max(1, Math.ceil(cooldownMs / 1000));
+    return { allowed: false, retryAfterSeconds };
+  } catch (err) {
+    wrapRedisError(err);
+  }
+}
+
+/**
+ * Releases a previously acquired Redis cooldown key (e.g., if a downstream
+ * rate limit rejected the request before the action was executed).
+ */
+export async function releaseRedisCooldown(key: string): Promise<void> {
+  try {
+    const redis = getRedisClient();
+    await redis.del(`cooldown:${key}`);
+  } catch {
+    // Best-effort cleanup
+  }
+}

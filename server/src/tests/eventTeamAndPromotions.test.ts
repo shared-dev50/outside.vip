@@ -3,10 +3,17 @@ import request from 'supertest';
 import { app } from '../app.js';
 import { prisma } from '../db/prisma.js';
 import { EventTeamRole, TeamMemberStatus, TeamInvitationStatus } from '@prisma/client';
-import { VISITOR_COOKIE_NAME } from '../modules/promotions/promotions.constants.js';
+import {
+  VISITOR_COOKIE_NAME,
+  TEAM_INVITE_CREATE_ACTOR_MAX_PER_HOUR,
+  TEAM_INVITE_CREATE_EVENT_MAX_PER_HOUR,
+  TEAM_INVITE_RESEND_ACTOR_MAX_PER_HOUR,
+  TEAM_INVITE_INSPECT_IP_BURST_MAX,
+  MAX_HISTORICAL_SLUG_ALIASES_PER_LINK,
+} from '../modules/promotions/promotions.constants.js';
 import { deriveCanonicalVisitorId } from '../modules/promotions/promotions.service.js';
 import { getRedisClient } from '../lib/redis.js';
-import { createSession } from '../lib/session.service.js';
+import { createSession, hashRateLimitIdentifier } from '../lib/session.service.js';
 import { sentTeamInvitationEmails } from '../lib/email.service.js';
 
 describe('Event Teams, Invitations & Host Promotional Tools (Stage 2)', () => {
@@ -3183,6 +3190,440 @@ describe('Event Teams, Invitations & Host Promotional Tools (Stage 2)', () => {
         expect(cleanDelRes.body.success).toBe(true);
         const deletedCheck = await prisma.event.findUnique({ where: { id: cleanEvent.id } });
         expect(deletedCheck).toBeNull();
+      });
+    });
+  });
+
+  // ===========================================================================
+  // 11. Stage 6 Implementation 2.3: SEC-10 Rate Limiting & Abuse Protection
+  // ===========================================================================
+  describe('11. Stage 6 Implementation 2.3: SEC-10 Rate Limiting & Abuse Protection', () => {
+    let sec10Organizer: any;
+    let sec10OrganizerAuth: { cookie: string; csrf: string };
+    let sec10Admin1: any;
+    let sec10Admin1Auth: { cookie: string; csrf: string };
+    let sec10Admin2: any;
+    let sec10Admin2Auth: { cookie: string; csrf: string };
+    let sec10Host: any;
+    let sec10HostAuth: { cookie: string; csrf: string };
+    let sec10Event: any;
+
+    beforeAll(async () => {
+      sec10Organizer = await prisma.user.create({
+        data: {
+          email: `sec10_org_${testRunId}@outside.vip`,
+          name: 'SEC-10 Organizer',
+          role: 'ORGANIZER',
+          emailVerified: true,
+          emailVerifiedAt: new Date(),
+        },
+      });
+      createdUserIds.push(sec10Organizer.id);
+      sec10OrganizerAuth = await createAuth(sec10Organizer.id);
+
+      sec10Event = await prisma.event.create({
+        data: {
+          organizerId: sec10Organizer.id,
+          title: `SEC-10 Abuse Protection Event ${testRunId}`,
+          slug: `sec10-abuse-event-${testRunId}`,
+          description: 'Event for SEC-10 rate limit tests',
+          category: 'MUSIC',
+          venueName: 'SEC-10 Arena',
+          venueAddress: '10 Security Blvd',
+          city: 'Nairobi',
+          startAt: new Date(Date.now() + 86400000 * 30),
+          endAt: new Date(Date.now() + 86400000 * 31),
+          coverImageUrl: 'https://outside.vip/sec10.jpg',
+          status: 'PUBLISHED',
+        },
+      });
+      createdEventIds.push(sec10Event.id);
+
+      sec10Admin1 = await prisma.user.create({
+        data: {
+          email: `sec10_admin1_${testRunId}@outside.vip`,
+          name: 'SEC-10 Admin 1',
+          role: 'ATTENDEE',
+          emailVerified: true,
+          emailVerifiedAt: new Date(),
+        },
+      });
+      createdUserIds.push(sec10Admin1.id);
+      sec10Admin1Auth = await createAuth(sec10Admin1.id);
+
+      await prisma.eventTeamMember.create({
+        data: {
+          eventId: sec10Event.id,
+          userId: sec10Admin1.id,
+          role: EventTeamRole.ADMIN,
+          status: TeamMemberStatus.ACTIVE,
+          permissions: { canManageTeam: true, canManagePromotions: true },
+          invitedById: sec10Organizer.id,
+        },
+      });
+
+      sec10Admin2 = await prisma.user.create({
+        data: {
+          email: `sec10_admin2_${testRunId}@outside.vip`,
+          name: 'SEC-10 Admin 2',
+          role: 'ATTENDEE',
+          emailVerified: true,
+          emailVerifiedAt: new Date(),
+        },
+      });
+      createdUserIds.push(sec10Admin2.id);
+      sec10Admin2Auth = await createAuth(sec10Admin2.id);
+
+      await prisma.eventTeamMember.create({
+        data: {
+          eventId: sec10Event.id,
+          userId: sec10Admin2.id,
+          role: EventTeamRole.ADMIN,
+          status: TeamMemberStatus.ACTIVE,
+          permissions: { canManageTeam: true, canManagePromotions: true },
+          invitedById: sec10Organizer.id,
+        },
+      });
+
+      sec10Host = await prisma.user.create({
+        data: {
+          email: `sec10_host_${testRunId}@outside.vip`,
+          name: 'SEC-10 Host',
+          role: 'ATTENDEE',
+          emailVerified: true,
+          emailVerifiedAt: new Date(),
+        },
+      });
+      createdUserIds.push(sec10Host.id);
+      sec10HostAuth = await createAuth(sec10Host.id);
+    });
+
+    // =========================================================================
+    // Part A: Invitation creation rate limiting
+    // =========================================================================
+    describe('Part A: Invitation Creation Rate Limiting', () => {
+      it('does not consume rate-limit quota for unauthorized or invalid invitation requests', async () => {
+        const redis = getRedisClient();
+        await redis.del(
+          `ratelimit:team_invite_create:actor:${sec10Organizer.id}`,
+          `ratelimit:team_invite_create:event:${sec10Event.id}`
+        );
+
+        // Unauthorized caller (outsiderAuth) attempting to invite on sec10Event -> 403
+        await request(app)
+          .post(`/api/events/${sec10Event.id}/team/invitations`)
+          .set('Cookie', outsiderAuth.cookie)
+          .set('x-csrf-token', outsiderAuth.csrf)
+          .send({ email: `unauth_${testRunId}@outside.vip`, role: 'HOST' })
+          .expect(403);
+
+        // Invalid payload by authorized organizer -> 400
+        await request(app)
+          .post(`/api/events/${sec10Event.id}/team/invitations`)
+          .set('Cookie', sec10OrganizerAuth.cookie)
+          .set('x-csrf-token', sec10OrganizerAuth.csrf)
+          .send({ email: 'not-an-email', role: 'HOST' })
+          .expect(400);
+
+        const actorCount = await redis.get(`ratelimit:team_invite_create:actor:${sec10Organizer.id}`);
+        const eventCount = await redis.get(`ratelimit:team_invite_create:event:${sec10Event.id}`);
+        expect(actorCount).toBeNull();
+        expect(eventCount).toBeNull();
+      });
+
+      it('enforces per-actor and per-event hourly invitation creation rate limits with HTTP 429 and Retry-After', async () => {
+        const redis = getRedisClient();
+        const actorKey = `ratelimit:team_invite_create:actor:${sec10Admin1.id}`;
+        const eventKey = `ratelimit:team_invite_create:event:${sec10Event.id}`;
+        await redis.del(actorKey, eventKey);
+
+        // Pre-seed actor counter to 1 below limit (19 of 20)
+        await redis.setPx(actorKey, String(TEAM_INVITE_CREATE_ACTOR_MAX_PER_HOUR - 1), 3600000);
+
+        // 20th invitation succeeds
+        await request(app)
+          .post(`/api/events/${sec10Event.id}/team/invitations`)
+          .set('Cookie', sec10Admin1Auth.cookie)
+          .set('x-csrf-token', sec10Admin1Auth.csrf)
+          .send({
+            email: `sec10_allowed_20_${testRunId}@outside.vip`,
+            role: 'HOST',
+          })
+          .expect(201);
+
+        // 21st invitation by same actor is rejected with 429 and Retry-After header
+        const blockedActorRes = await request(app)
+          .post(`/api/events/${sec10Event.id}/team/invitations`)
+          .set('Cookie', sec10Admin1Auth.cookie)
+          .set('x-csrf-token', sec10Admin1Auth.csrf)
+          .send({
+            email: `sec10_blocked_21_${testRunId}@outside.vip`,
+            role: 'HOST',
+          })
+          .expect(429);
+
+        expect(blockedActorRes.body.error.code).toBe('TEAM_INVITATION_RATE_LIMIT');
+        expect(Number(blockedActorRes.header['retry-after'])).toBeGreaterThan(0);
+
+        // Event-level limit across actors: pre-seed event counter to TEAM_INVITE_CREATE_EVENT_MAX_PER_HOUR (40)
+        await redis.setPx(eventKey, String(TEAM_INVITE_CREATE_EVENT_MAX_PER_HOUR), 3600000);
+
+        // Different authorized actor (sec10Admin2) is rejected by event-wide ceiling
+        const blockedEventRes = await request(app)
+          .post(`/api/events/${sec10Event.id}/team/invitations`)
+          .set('Cookie', sec10Admin2Auth.cookie)
+          .set('x-csrf-token', sec10Admin2Auth.csrf)
+          .send({
+            email: `sec10_blocked_evt_${testRunId}@outside.vip`,
+            role: 'HOST',
+          })
+          .expect(429);
+
+        expect(blockedEventRes.body.error.code).toBe('TEAM_INVITATION_RATE_LIMIT');
+        expect(Number(blockedEventRes.header['retry-after'])).toBeGreaterThan(0);
+
+        // Clean up counters for subsequent tests
+        await redis.del(actorKey, eventKey, `ratelimit:team_invite_create:actor:${sec10Admin2.id}`);
+      });
+    });
+
+    // =========================================================================
+    // Part B: Invitation resend cooldown and rate limiting
+    // =========================================================================
+    describe('Part B: Invitation Resend Cooldown & Rate Limiting', () => {
+      let pendingInviteId: string;
+
+      beforeAll(async () => {
+        const res = await request(app)
+          .post(`/api/events/${sec10Event.id}/team/invitations`)
+          .set('Cookie', sec10OrganizerAuth.cookie)
+          .set('x-csrf-token', sec10OrganizerAuth.csrf)
+          .send({
+            email: `sec10_resend_target_${testRunId}@outside.vip`,
+            role: 'HOST',
+          })
+          .expect(201);
+        pendingInviteId = res.body.invitation.id;
+      });
+
+      it('enforces atomic 60-second per-invitation resend cooldown under sequential and concurrent requests', async () => {
+        const redis = getRedisClient();
+        await redis.del(`cooldown:team_invite_resend:inv:${pendingInviteId}`);
+
+        // Fire 4 concurrent resend requests for the same invitation
+        const responses = await Promise.all(
+          Array.from({ length: 4 }, () =>
+            request(app)
+              .post(`/api/events/${sec10Event.id}/team/invitations/${pendingInviteId}/resend`)
+              .set('Cookie', sec10OrganizerAuth.cookie)
+              .set('x-csrf-token', sec10OrganizerAuth.csrf)
+          )
+        );
+
+        const successes = responses.filter((r) => r.status === 200);
+        const throttled = responses.filter((r) => r.status === 429);
+
+        // Exactly ONE request acquires the atomic cooldown lock; the other 3 receive 429
+        expect(successes.length).toBe(1);
+        expect(throttled.length).toBe(3);
+
+        for (const t of throttled) {
+          expect(t.body.error.code).toBe('TEAM_INVITATION_RESEND_COOLDOWN');
+          expect(Number(t.header['retry-after'])).toBeGreaterThan(0);
+        }
+
+        // Subsequent sequential retry within 60s also fails with 429
+        const seqRes = await request(app)
+          .post(`/api/events/${sec10Event.id}/team/invitations/${pendingInviteId}/resend`)
+          .set('Cookie', sec10OrganizerAuth.cookie)
+          .set('x-csrf-token', sec10OrganizerAuth.csrf)
+          .expect(429);
+
+        expect(seqRes.body.error.code).toBe('TEAM_INVITATION_RESEND_COOLDOWN');
+        expect(Number(seqRes.header['retry-after'])).toBeGreaterThan(0);
+      });
+
+      it('enforces per-actor hourly resend rate limit and releases invitation cooldown when actor limit blocks resend', async () => {
+        const redis = getRedisClient();
+        const cooldownKey = `cooldown:team_invite_resend:inv:${pendingInviteId}`;
+        const actorResendKey = `ratelimit:team_invite_resend:actor:${sec10Admin1.id}`;
+        await redis.del(cooldownKey, actorResendKey);
+
+        // Pre-seed sec10Admin1's resend counter to TEAM_INVITE_RESEND_ACTOR_MAX_PER_HOUR (10)
+        await redis.setPx(actorResendKey, String(TEAM_INVITE_RESEND_ACTOR_MAX_PER_HOUR), 3600000);
+
+        const blockedRes = await request(app)
+          .post(`/api/events/${sec10Event.id}/team/invitations/${pendingInviteId}/resend`)
+          .set('Cookie', sec10Admin1Auth.cookie)
+          .set('x-csrf-token', sec10Admin1Auth.csrf)
+          .expect(429);
+
+        expect(blockedRes.body.error.code).toBe('TEAM_INVITATION_RESEND_RATE_LIMIT');
+        expect(Number(blockedRes.header['retry-after'])).toBeGreaterThan(0);
+
+        // Verify the invitation cooldown was released so the event owner can still resend it!
+        const ownerResend = await request(app)
+          .post(`/api/events/${sec10Event.id}/team/invitations/${pendingInviteId}/resend`)
+          .set('Cookie', sec10OrganizerAuth.cookie)
+          .set('x-csrf-token', sec10OrganizerAuth.csrf)
+          .expect(200);
+
+        expect(ownerResend.body.success).toBe(true);
+        expect(ownerResend.body.invitation.token).toBeUndefined();
+      });
+    });
+
+    // =========================================================================
+    // Part C: Public invitation inspection rate limiting
+    // =========================================================================
+    describe('Part C: Public Invitation Inspection Rate Limiting', () => {
+      it('enforces IP burst rate limit on GET /api/team/invitations/:token with HTTP 429 and Retry-After without leaking token existence', async () => {
+        const redis = getRedisClient();
+        const testClientIp = '203.0.113.77';
+        const ipHash = hashRateLimitIdentifier(testClientIp);
+        const burstKey = `ratelimit:team_invite_inspect:burst:${ipHash}`;
+        const sustainedKey = `ratelimit:team_invite_inspect:sustained:${ipHash}`;
+        await redis.del(burstKey, sustainedKey);
+
+        // Pre-seed burst counter to 1 below limit (19 of 20)
+        await redis.setPx(burstKey, String(TEAM_INVITE_INSPECT_IP_BURST_MAX - 1), 60000);
+
+        // 20th request from this IP is allowed through rate limiter (returns 404 for unknown token)
+        await request(app)
+          .get('/api/team/invitations/0000000000000000000000000000000000000000000000000000000000000000')
+          .set('X-Forwarded-For', testClientIp)
+          .expect(404);
+
+        // 21st request from this IP is rejected with 429 Too Many Requests and Retry-After
+        const throttledRes = await request(app)
+          .get('/api/team/invitations/0000000000000000000000000000000000000000000000000000000000000000')
+          .set('X-Forwarded-For', testClientIp)
+          .expect(429);
+
+        expect(throttledRes.body.error.code).toBe('TEAM_INVITATION_INSPECT_RATE_LIMIT');
+        expect(Number(throttledRes.header['retry-after'])).toBeGreaterThan(0);
+
+        // Verify spoofing an extra left-most X-Forwarded-For hop cannot bypass Express trust proxy = 1
+        const spoofedRes = await request(app)
+          .get('/api/team/invitations/0000000000000000000000000000000000000000000000000000000000000000')
+          .set('X-Forwarded-For', `198.51.100.99, ${testClientIp}`)
+          .expect(429);
+
+        expect(spoofedRes.body.error.code).toBe('TEAM_INVITATION_INSPECT_RATE_LIMIT');
+
+        await redis.del(burstKey, sustainedKey);
+      });
+    });
+
+    // =========================================================================
+    // Part D: Bound immutable promotional slug alias accumulation
+    // =========================================================================
+    describe('Part D: Promotional Slug Historical Alias Limit', () => {
+      it('bounds historical slug aliases at MAX_HISTORICAL_SLUG_ALIASES_PER_LINK (10) for Campaign links even under concurrent requests', async () => {
+        const initialSlug = `sec10-camp-init-${testRunId}`;
+        const createRes = await request(app)
+          .post(`/api/events/${sec10Event.id}/promotions/links`)
+          .set('Cookie', sec10OrganizerAuth.cookie)
+          .set('x-csrf-token', sec10OrganizerAuth.csrf)
+          .send({
+            name: 'SEC-10 Alias Limit Campaign',
+            slug: initialSlug,
+          })
+          .expect(201);
+
+        const campLinkId = createRes.body.link.id;
+
+        // Perform 9 sequential slug customizations -> creates 9 historical aliases (slugs 0..8) + 1 active primary (slug 9)
+        for (let i = 1; i <= MAX_HISTORICAL_SLUG_ALIASES_PER_LINK - 1; i++) {
+          await request(app)
+            .post(`/api/events/${sec10Event.id}/promotions/links/${campLinkId}/slug`)
+            .set('Cookie', sec10OrganizerAuth.cookie)
+            .set('x-csrf-token', sec10OrganizerAuth.csrf)
+            .send({ slug: `sec10-camp-v${i}-${testRunId}` })
+            .expect(200);
+        }
+
+        // Fire 4 concurrent requests competing for the 10th and final allowed historical alias slot!
+        const concurrentResponses = await Promise.all(
+          [10, 11, 12, 13].map((idx) =>
+            request(app)
+              .post(`/api/events/${sec10Event.id}/promotions/links/${campLinkId}/slug`)
+              .set('Cookie', sec10OrganizerAuth.cookie)
+              .set('x-csrf-token', sec10OrganizerAuth.csrf)
+              .send({ slug: `sec10-camp-v${idx}-${testRunId}` })
+          )
+        );
+
+        const succeeded = concurrentResponses.filter((r) => r.status === 200);
+        const conflicts = concurrentResponses.filter((r) => r.status === 409);
+
+        // Advisory lock serializes concurrent mutations: exactly 1 succeeds (reaching 10 historical aliases) and 3 fail with 409
+        expect(succeeded.length).toBe(1);
+        expect(conflicts.length).toBe(3);
+        for (const c of conflicts) {
+          expect(c.body.error.code).toBe('PROMOTION_SLUG_ALIAS_LIMIT_REACHED');
+          expect(c.body.error.message).toMatch(/maximum limit of 10 historical URL aliases/i);
+        }
+
+        // Verify database contains exactly 10 historical aliases (isPrimary: false) and 1 primary slug (11 total)
+        const allSlugs = await prisma.promotionSlugRegistry.findMany({
+          where: { promotionLinkId: campLinkId },
+        });
+        expect(allSlugs.length).toBe(MAX_HISTORICAL_SLUG_ALIASES_PER_LINK + 1);
+        expect(allSlugs.filter((s) => !s.isPrimary).length).toBe(MAX_HISTORICAL_SLUG_ALIASES_PER_LINK);
+        expect(allSlugs.filter((s) => s.isPrimary).length).toBe(1);
+
+        // Verify initial historical alias still resolves via /r/:slug
+        await request(app).get(`/r/${initialSlug}`).expect(302);
+      });
+
+      it('enforces the same MAX_HISTORICAL_SLUG_ALIASES_PER_LINK (10) limit on Host personal slug customization', async () => {
+        // Invite and accept sec10Host on sec10Event
+        await request(app)
+          .post(`/api/events/${sec10Event.id}/team/invitations`)
+          .set('Cookie', sec10OrganizerAuth.cookie)
+          .set('x-csrf-token', sec10OrganizerAuth.csrf)
+          .send({ email: sec10Host.email, role: 'HOST' })
+          .expect(201);
+
+        const inviteEmail = sentTeamInvitationEmails
+          .slice()
+          .reverse()
+          .find((e) => e.to === sec10Host.email.toLowerCase());
+        const rawToken = inviteEmail!.inviteUrl.split('/').pop()!;
+
+        const acceptRes = await request(app)
+          .post(`/api/team/invitations/${rawToken}/accept`)
+          .set('Cookie', sec10HostAuth.cookie)
+          .set('x-csrf-token', sec10HostAuth.csrf)
+          .expect(200);
+
+        const hostLinkId = acceptRes.body.membership.hostLink.id;
+
+        // Perform 10 valid Host slug customizations
+        for (let i = 1; i <= MAX_HISTORICAL_SLUG_ALIASES_PER_LINK; i++) {
+          await request(app)
+            .patch(`/api/host/events/${sec10Event.id}/slug`)
+            .set('Cookie', sec10HostAuth.cookie)
+            .set('x-csrf-token', sec10HostAuth.csrf)
+            .send({ slug: `sec10-host-v${i}-${testRunId}` })
+            .expect(200);
+        }
+
+        // 11th Host slug customization is rejected with 409 Conflict
+        const overLimitRes = await request(app)
+          .patch(`/api/host/events/${sec10Event.id}/slug`)
+          .set('Cookie', sec10HostAuth.cookie)
+          .set('x-csrf-token', sec10HostAuth.csrf)
+          .send({ slug: `sec10-host-v11-${testRunId}` })
+          .expect(409);
+
+        expect(overLimitRes.body.error.code).toBe('PROMOTION_SLUG_ALIAS_LIMIT_REACHED');
+
+        const hostSlugs = await prisma.promotionSlugRegistry.findMany({
+          where: { promotionLinkId: hostLinkId },
+        });
+        expect(hostSlugs.filter((s) => !s.isPrimary).length).toBe(MAX_HISTORICAL_SLUG_ALIASES_PER_LINK);
       });
     });
   });

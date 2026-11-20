@@ -7,6 +7,7 @@ import {
   NotFoundError,
   ForbiddenError,
   ConflictError,
+  TooManyRequestsError,
 } from '../../utils/errors.js';
 import {
   EventAdminPermissions,
@@ -15,7 +16,22 @@ import {
   hasEventPermission,
 } from './eventTeam.permissions.js';
 import { sendTeamInvitationEmail } from '../../lib/email.service.js';
-import { isValidSlugFormat, RESERVED_SLUGS } from '../promotions/promotions.constants.js';
+import {
+  checkRedisRateLimitWithRetryAfter,
+  acquireRedisCooldown,
+  releaseRedisCooldown,
+} from '../../lib/session.service.js';
+import {
+  isValidSlugFormat,
+  RESERVED_SLUGS,
+  TEAM_INVITE_CREATE_ACTOR_MAX_PER_HOUR,
+  TEAM_INVITE_CREATE_EVENT_MAX_PER_HOUR,
+  TEAM_INVITE_CREATE_WINDOW_MS,
+  TEAM_INVITE_RESEND_COOLDOWN_MS,
+  TEAM_INVITE_RESEND_ACTOR_MAX_PER_HOUR,
+  TEAM_INVITE_RESEND_EVENT_MAX_PER_HOUR,
+  TEAM_INVITE_RESEND_WINDOW_MS,
+} from '../promotions/promotions.constants.js';
 
 export interface TeamActorContext {
   userId: string;
@@ -202,6 +218,48 @@ export async function inviteTeamMember(params: InviteTeamMemberParams) {
   if (pendingInvitation) {
     throw new ConflictError(
       'An active pending invitation already exists for this email. Use resend instead.'
+    );
+  }
+
+  // 4b. SEC-10 Part A: Enforce actor-scoped and event-scoped invitation creation rate limits
+  // Evaluated after authorization and validation so invalid or unauthorized requests cannot exhaust quota
+  const actorCreateRate = await checkRedisRateLimitWithRetryAfter(
+    `team_invite_create:actor:${invitedByUserId}`,
+    TEAM_INVITE_CREATE_ACTOR_MAX_PER_HOUR,
+    TEAM_INVITE_CREATE_WINDOW_MS
+  );
+  if (!actorCreateRate.allowed) {
+    console.warn('[EventTeam] Invitation creation actor rate limit exceeded', {
+      event: 'RATE_LIMIT_TRIGGERED',
+      scope: 'team_invite_create_actor',
+      actorUserId: invitedByUserId,
+      eventId,
+      retryAfterSeconds: actorCreateRate.retryAfterSeconds,
+    });
+    throw new TooManyRequestsError(
+      'Too many team invitations created recently. Please wait before sending more invitations.',
+      'TEAM_INVITATION_RATE_LIMIT',
+      actorCreateRate.retryAfterSeconds
+    );
+  }
+
+  const eventCreateRate = await checkRedisRateLimitWithRetryAfter(
+    `team_invite_create:event:${eventId}`,
+    TEAM_INVITE_CREATE_EVENT_MAX_PER_HOUR,
+    TEAM_INVITE_CREATE_WINDOW_MS
+  );
+  if (!eventCreateRate.allowed) {
+    console.warn('[EventTeam] Invitation creation event rate limit exceeded', {
+      event: 'RATE_LIMIT_TRIGGERED',
+      scope: 'team_invite_create_event',
+      actorUserId: invitedByUserId,
+      eventId,
+      retryAfterSeconds: eventCreateRate.retryAfterSeconds,
+    });
+    throw new TooManyRequestsError(
+      'This event has reached its hourly team invitation limit. Please wait before sending more invitations.',
+      'TEAM_INVITATION_RATE_LIMIT',
+      eventCreateRate.retryAfterSeconds
     );
   }
 
@@ -645,6 +703,72 @@ export async function resendTeamInvitation(
     if (invitation.role === EventTeamRole.ADMIN || invitation.permissions) {
       assertAdminPermissionCeiling(actor.permissions, invitation.permissions);
     }
+  }
+
+  // SEC-10 Part B: Enforce atomic per-invitation 60s resend cooldown + actor and event resend rate limits
+  const cooldownKey = `team_invite_resend:inv:${invitation.id}`;
+  const cooldown = await acquireRedisCooldown(cooldownKey, TEAM_INVITE_RESEND_COOLDOWN_MS);
+  if (!cooldown.allowed) {
+    console.warn('[EventTeam] Invitation resend cooldown triggered', {
+      event: 'RATE_LIMIT_TRIGGERED',
+      scope: 'team_invite_resend_cooldown',
+      invitationId: invitation.id,
+      eventId,
+      actorUserId: actor?.userId,
+      retryAfterSeconds: cooldown.retryAfterSeconds,
+    });
+    throw new TooManyRequestsError(
+      `Please wait at least ${cooldown.retryAfterSeconds} seconds before resending this invitation.`,
+      'TEAM_INVITATION_RESEND_COOLDOWN',
+      cooldown.retryAfterSeconds
+    );
+  }
+
+  const actorUserId = actor?.userId || invitation.invitedByUserId;
+  if (actorUserId) {
+    const actorResendRate = await checkRedisRateLimitWithRetryAfter(
+      `team_invite_resend:actor:${actorUserId}`,
+      TEAM_INVITE_RESEND_ACTOR_MAX_PER_HOUR,
+      TEAM_INVITE_RESEND_WINDOW_MS
+    );
+    if (!actorResendRate.allowed) {
+      await releaseRedisCooldown(cooldownKey);
+      console.warn('[EventTeam] Invitation resend actor rate limit exceeded', {
+        event: 'RATE_LIMIT_TRIGGERED',
+        scope: 'team_invite_resend_actor',
+        invitationId: invitation.id,
+        eventId,
+        actorUserId,
+        retryAfterSeconds: actorResendRate.retryAfterSeconds,
+      });
+      throw new TooManyRequestsError(
+        'Too many invitation resend requests. Please wait before trying again.',
+        'TEAM_INVITATION_RESEND_RATE_LIMIT',
+        actorResendRate.retryAfterSeconds
+      );
+    }
+  }
+
+  const eventResendRate = await checkRedisRateLimitWithRetryAfter(
+    `team_invite_resend:event:${eventId}`,
+    TEAM_INVITE_RESEND_EVENT_MAX_PER_HOUR,
+    TEAM_INVITE_RESEND_WINDOW_MS
+  );
+  if (!eventResendRate.allowed) {
+    await releaseRedisCooldown(cooldownKey);
+    console.warn('[EventTeam] Invitation resend event rate limit exceeded', {
+      event: 'RATE_LIMIT_TRIGGERED',
+      scope: 'team_invite_resend_event',
+      invitationId: invitation.id,
+      eventId,
+      actorUserId,
+      retryAfterSeconds: eventResendRate.retryAfterSeconds,
+    });
+    throw new TooManyRequestsError(
+      'Too many invitation resend requests for this event. Please wait before trying again.',
+      'TEAM_INVITATION_RESEND_RATE_LIMIT',
+      eventResendRate.retryAfterSeconds
+    );
   }
 
   const rawToken = crypto.randomBytes(32).toString('hex');

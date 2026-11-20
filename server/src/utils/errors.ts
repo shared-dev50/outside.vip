@@ -44,8 +44,15 @@ export class ConflictError extends AppError {
 }
 
 export class TooManyRequestsError extends AppError {
-  constructor(message = 'Too many requests. Please try again later.', code = 'TOO_MANY_REQUESTS') {
+  public readonly retryAfterSeconds?: number;
+
+  constructor(
+    message = 'Too many requests. Please try again later.',
+    code = 'TOO_MANY_REQUESTS',
+    retryAfterSeconds?: number
+  ) {
     super(message, 429, true, code);
+    this.retryAfterSeconds = retryAfterSeconds;
   }
 }
 

@@ -9,6 +9,55 @@ export const ATTRIBUTION_WINDOW_MS = 30 * 24 * 60 * 60 * 1000; // 30 days in mil
 export const CLICK_DEDUP_WINDOW_SECONDS = 15 * 60; // 15 minutes in seconds
 
 /**
+ * SEC-10 Part A: Event Team Invitation Creation Rate Limits
+ * - Per authenticated actor across all events: 20 new invitations per hour
+ * - Per event across all authorized actors: 40 new invitations per hour
+ */
+export const TEAM_INVITE_CREATE_ACTOR_MAX_PER_HOUR = 20;
+export const TEAM_INVITE_CREATE_EVENT_MAX_PER_HOUR = 40;
+export const TEAM_INVITE_CREATE_WINDOW_MS = 60 * 60 * 1000; // 1 hour
+
+/**
+ * SEC-10 Part B: Event Team Invitation Resend Cooldown & Rate Limits
+ * - Minimum per-invitation resend cooldown: 60 seconds (enforced atomically via Redis SET NX PX)
+ * - Per authenticated actor across all events: 10 resend requests per hour
+ * - Per event across all authorized actors: 25 resend requests per hour
+ */
+export const TEAM_INVITE_RESEND_COOLDOWN_MS = 60 * 1000; // 60 seconds
+export const TEAM_INVITE_RESEND_ACTOR_MAX_PER_HOUR = 10;
+export const TEAM_INVITE_RESEND_EVENT_MAX_PER_HOUR = 25;
+export const TEAM_INVITE_RESEND_WINDOW_MS = 60 * 60 * 1000; // 1 hour
+
+/**
+ * SEC-10 Part C: Public Event Team Invitation Inspection Rate Limits
+ * - Burst limit per trusted IP: 20 requests per minute
+ * - Sustained limit per trusted IP: 60 requests per 15 minutes
+ */
+export const TEAM_INVITE_INSPECT_IP_BURST_MAX = 20;
+export const TEAM_INVITE_INSPECT_IP_BURST_WINDOW_MS = 60 * 1000; // 1 minute
+export const TEAM_INVITE_INSPECT_IP_SUSTAINED_MAX = 60;
+export const TEAM_INVITE_INSPECT_IP_SUSTAINED_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
+
+/**
+ * SEC-10 Part D: Maximum Historical Promotional Slug Aliases per PromotionLink
+ * - Each link has 1 active primary slug (isPrimary = true) and up to 10 historical aliases (isPrimary = false),
+ *   for an effective maximum of 11 total slugs registered across the link's lifetime.
+ */
+export const MAX_HISTORICAL_SLUG_ALIASES_PER_LINK = 10;
+
+/**
+ * SEC-10 Part E: Cookie-less Promotional Resolver Abuse Protection
+ * - 30-second duplicate/retry deduplication per (ipHash, promotionLinkId, slugHash, uaHash)
+ * - Per-(ipHash, promotionLinkId) burst ceiling: 3 cookie-less clicks recorded per 60 seconds
+ * - Per-ipHash global resolver ceiling: 15 cookie-less clicks recorded per 60 seconds across all links
+ */
+export const COOKIELESS_CLICK_RETRY_DEDUP_WINDOW_MS = 30 * 1000; // 30 seconds
+export const COOKIELESS_LINK_BURST_MAX = 3;
+export const COOKIELESS_LINK_BURST_WINDOW_MS = 60 * 1000; // 60 seconds
+export const COOKIELESS_IP_SUSTAINED_MAX = 15;
+export const COOKIELESS_IP_SUSTAINED_WINDOW_MS = 60 * 1000; // 60 seconds
+
+/**
  * Whitelisted marketing and tracking query parameters to forward on short-link redirect.
  * All other query parameters are stripped to protect against query parameter pollution.
  */

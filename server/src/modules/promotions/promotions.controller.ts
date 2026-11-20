@@ -13,6 +13,7 @@ import {
   resolvePromotionSlug,
   recordPromotionClick,
   upsertVisitorAttribution,
+  shouldRecordCookielessResolverAnalytics,
 } from './promotions.service.js';
 import {
   buildEventSocialMetadata,
@@ -45,12 +46,10 @@ export async function handleShortLinkRedirect(
   const { link, event } = resolved;
 
   // 2. Extract or generate first-party visitor cookie
-  let rawVid = req.cookies?.[VISITOR_COOKIE_NAME];
-  if (!rawVid || typeof rawVid !== 'string' || rawVid.trim().length < 16) {
-    rawVid = generateVisitorToken();
-  } else {
-    rawVid = rawVid.trim();
-  }
+  const incomingVid = req.cookies?.[VISITOR_COOKIE_NAME];
+  const hadValidVisitorCookie =
+    typeof incomingVid === 'string' && incomingVid.trim().length >= 16;
+  const rawVid = hadValidVisitorCookie ? incomingVid.trim() : generateVisitorToken();
 
   // 3. Bot Detection
   const userAgent = req.headers['user-agent'] as string | undefined;
@@ -62,35 +61,46 @@ export async function handleShortLinkRedirect(
   // 5. If not a bot and link is ACTIVE, record click and establish persistent attribution
   // Disabled or archived links redirect to public event without recording clicks, visitor-days, or attribution
   if (!isBot && link.status === 'ACTIVE') {
-    const canonicalVisitorId = deriveCanonicalVisitorId(rawVid);
-    const visitorIdHash = hashVisitorId(rawVid);
-    const referrer = (req.headers['referer'] || req.headers['referrer']) as string | undefined;
+    const allowAnalytics = hadValidVisitorCookie
+      ? true
+      : await shouldRecordCookielessResolverAnalytics({
+          ip: req.ip || req.socket?.remoteAddress || 'unknown',
+          promotionLinkId: link.id,
+          slug: resolved.slug,
+          userAgent,
+        });
 
-    // Record click with 15-minute deduplication
-    const isNewClick = await recordPromotionClick({
-      rawVid,
-      canonicalVisitorId,
-      visitorIdHash,
-      eventId: event.id,
-      promotionLinkId: link.id,
-      referrer,
-      userAgent,
-      utmParams: whitelistedParams,
-      isBot: false,
-    }).catch((err) => {
-      console.warn('[Promotions] Click recording error:', err);
-      return false;
-    });
+    if (allowAnalytics) {
+      const canonicalVisitorId = deriveCanonicalVisitorId(rawVid);
+      const visitorIdHash = hashVisitorId(rawVid);
+      const referrer = (req.headers['referer'] || req.headers['referrer']) as string | undefined;
 
-    // Establish persistent 30-day attribution
-    await upsertVisitorAttribution({
-      rawVid,
-      eventId: event.id,
-      promotionLinkId: link.id,
-      incrementClickCount: isNewClick,
-    }).catch((err) => {
-      console.warn('[Promotions] Attribution upsert error:', err);
-    });
+      // Record click with 15-minute deduplication
+      const isNewClick = await recordPromotionClick({
+        rawVid,
+        canonicalVisitorId,
+        visitorIdHash,
+        eventId: event.id,
+        promotionLinkId: link.id,
+        referrer,
+        userAgent,
+        utmParams: whitelistedParams,
+        isBot: false,
+      }).catch((err) => {
+        console.warn('[Promotions] Click recording error:', err);
+        return false;
+      });
+
+      // Establish persistent 30-day attribution
+      await upsertVisitorAttribution({
+        rawVid,
+        eventId: event.id,
+        promotionLinkId: link.id,
+        incrementClickCount: isNewClick,
+      }).catch((err) => {
+        console.warn('[Promotions] Attribution upsert error:', err);
+      });
+    }
   }
 
   // 6. Set Host-Only outside_vid cookie for human visitors (HttpOnly, SameSite=Lax, Secure, NO Domain)

@@ -10,6 +10,7 @@ import {
 import {
   isValidSlugFormat,
   RESERVED_SLUGS,
+  MAX_HISTORICAL_SLUG_ALIASES_PER_LINK,
 } from './promotions.constants.js';
 
 export interface CreateCampaignLinkParams {
@@ -236,8 +237,53 @@ export async function customizePromotionSlug(params: CustomizeSlugParams) {
     throw new ConflictError(`Slug '${normalizedSlug}' is already in use by another link.`);
   }
 
-  // Execute primary slug switch in a transaction
+  // Execute primary slug switch in an advisory-locked transaction to prevent concurrent alias limit bypass
   return await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+    await tx.$executeRaw`
+      SELECT pg_advisory_xact_lock(
+        (hashtext('promotion_slug_customize')::BIGINT << 32) | (hashtext(${link.id})::BIGINT & 4294967295)
+      )
+    `;
+
+    const lockedLink = await tx.promotionLink.findUnique({
+      where: { id: link.id },
+      include: { slugRegistry: true },
+    });
+
+    if (!lockedLink) {
+      throw new NotFoundError('Promotion link not found');
+    }
+
+    if (lockedLink.status === PromotionLinkStatus.ARCHIVED) {
+      throw new BadRequestError('Cannot modify an archived promotional link');
+    }
+
+    const lockedPrimary = lockedLink.slugRegistry.find((s) => s.isPrimary);
+    if (lockedPrimary && lockedPrimary.slug === normalizedSlug) {
+      return {
+        success: true,
+        primarySlug: normalizedSlug,
+        linkId: link.id,
+        unchanged: true,
+      };
+    }
+
+    const existingSlugInTx = await tx.promotionSlugRegistry.findUnique({
+      where: { slug: normalizedSlug },
+    });
+
+    if (existingSlugInTx && existingSlugInTx.promotionLinkId !== link.id) {
+      throw new ConflictError(`Slug '${normalizedSlug}' is already in use by another link.`);
+    }
+
+    const historicalAliasCount = lockedLink.slugRegistry.filter((s) => !s.isPrimary).length;
+    if (historicalAliasCount >= MAX_HISTORICAL_SLUG_ALIASES_PER_LINK) {
+      throw new ConflictError(
+        `This promotional link has reached its maximum limit of ${MAX_HISTORICAL_SLUG_ALIASES_PER_LINK} historical URL aliases. Existing shared URLs remain active, but no additional custom slugs can be created for this link.`,
+        'PROMOTION_SLUG_ALIAS_LIMIT_REACHED'
+      );
+    }
+
     // 1. Demote current primary slug(s) to historical alias(es)
     await tx.promotionSlugRegistry.updateMany({
       where: {
@@ -250,7 +296,7 @@ export async function customizePromotionSlug(params: CustomizeSlugParams) {
     });
 
     // 2. Upsert or insert the new slug as primary
-    if (existingSlug && existingSlug.promotionLinkId === link.id) {
+    if (existingSlugInTx && existingSlugInTx.promotionLinkId === link.id) {
       // Re-promoting an existing historical alias to primary
       await tx.promotionSlugRegistry.update({
         where: { slug: normalizedSlug },
@@ -269,7 +315,7 @@ export async function customizePromotionSlug(params: CustomizeSlugParams) {
     return {
       success: true,
       primarySlug: normalizedSlug,
-      previousSlug: currentPrimary?.slug,
+      previousSlug: lockedPrimary?.slug,
       shortUrl: `/r/${normalizedSlug}`,
     };
   });

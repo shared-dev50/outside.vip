@@ -2,11 +2,13 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import request from 'supertest';
 import { app } from '../app.js';
 import { prisma } from '../db/prisma.js';
-import { getRedisClient } from '../lib/redis.js';
+import { getRedisClient, setSimulatedRedisFailure } from '../lib/redis.js';
+import { hashRateLimitIdentifier } from '../lib/session.service.js';
 import {
   VISITOR_COOKIE_NAME,
   COOKIE_MAX_AGE_SECONDS,
   ATTRIBUTION_WINDOW_MS,
+  COOKIELESS_LINK_BURST_MAX,
 } from '../modules/promotions/promotions.constants.js';
 import {
   deriveCanonicalVisitorId,
@@ -1059,6 +1061,228 @@ describe('Promotions & Short-Link Resolver System (Stage 1)', () => {
         });
         expect(preservedDay).not.toBeNull();
       });
+    });
+  });
+
+  // ===========================================================================
+  // 6. Stage 6 Implementation 2.3: SEC-10 Part E — Cookie-less Promotional Resolver Abuse Protection
+  // ===========================================================================
+  describe('6. Stage 6 Implementation 2.3: SEC-10 Part E — Cookie-less Promotional Resolver Abuse Protection', () => {
+    let sec10Link1Id: string;
+    let sec10Link2Id: string;
+    const sec10Slug1 = `sec10-cookieless-1-${testRunId}`;
+    const sec10Slug2 = `sec10-cookieless-2-${testRunId}`;
+
+    beforeAll(async () => {
+      const link1 = await prisma.promotionLink.create({
+        data: {
+          eventId: event1Id,
+          type: 'CAMPAIGN',
+          status: 'ACTIVE',
+          name: 'SEC-10 Cookieless Test Link 1',
+          createdById: organizerId,
+          slugRegistry: {
+            create: [{ slug: sec10Slug1, isPrimary: true }],
+          },
+        },
+      });
+      sec10Link1Id = link1.id;
+      createdPromotionLinkIds.push(link1.id);
+
+      const link2 = await prisma.promotionLink.create({
+        data: {
+          eventId: event1Id,
+          type: 'CAMPAIGN',
+          status: 'ACTIVE',
+          name: 'SEC-10 Cookieless Test Link 2',
+          createdById: organizerId,
+          slugRegistry: {
+            create: [{ slug: sec10Slug2, isPrimary: true }],
+          },
+        },
+      });
+      sec10Link2Id = link2.id;
+      createdPromotionLinkIds.push(link2.id);
+    });
+
+    it('suppresses duplicate/retry cookie-less clicks from the same IP and User-Agent while preserving 302 redirect and cookie issuance', async () => {
+      const testIp = '198.51.100.41';
+      const testUa = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) Safari/604.1';
+
+      // 1. First cookie-less request records 1 click and 1 visitor-day
+      const res1 = await request(app)
+        .get(`/r/${sec10Slug1}`)
+        .set('X-Forwarded-For', testIp)
+        .set('User-Agent', testUa)
+        .expect(302);
+
+      expect(res1.header.location).toContain(`/events/promo-fest-1-${testRunId}`);
+      expect(String(res1.header['set-cookie'])).toContain(`${VISITOR_COOKIE_NAME}=`);
+
+      let clicks = await prisma.promotionClick.count({
+        where: { promotionLinkId: sec10Link1Id },
+      });
+      let visitorDays = await prisma.promotionVisitorDay.count({
+        where: { promotionLinkId: sec10Link1Id },
+      });
+      expect(clicks).toBe(1);
+      expect(visitorDays).toBe(1);
+
+      // 2. Immediate cookie-less retry (dropping Set-Cookie) from same IP + User-Agent
+      const res2 = await request(app)
+        .get(`/r/${sec10Slug1}`)
+        .set('X-Forwarded-For', testIp)
+        .set('User-Agent', testUa)
+        .expect(302);
+
+      // Still redirects and issues cookie
+      expect(res2.header.location).toContain(`/events/promo-fest-1-${testRunId}`);
+      expect(String(res2.header['set-cookie'])).toContain(`${VISITOR_COOKIE_NAME}=`);
+
+      // Analytics counts MUST NOT increment on the cookie-less retry
+      clicks = await prisma.promotionClick.count({
+        where: { promotionLinkId: sec10Link1Id },
+      });
+      visitorDays = await prisma.promotionVisitorDay.count({
+        where: { promotionLinkId: sec10Link1Id },
+      });
+      expect(clicks).toBe(1);
+      expect(visitorDays).toBe(1);
+
+      // 3. Verify no permanent IP-based visitor identity was stored in PostgreSQL
+      const ipBasedCanonical = deriveCanonicalVisitorId(testIp);
+      const ipHash = hashRateLimitIdentifier(testIp);
+      const ipStoredCount = await prisma.promotionVisitorAttribution.count({
+        where: {
+          OR: [
+            { canonicalVisitorId: testIp },
+            { canonicalVisitorId: ipBasedCanonical },
+            { canonicalVisitorId: ipHash },
+            { visitorIdHash: { contains: testIp } },
+          ],
+        },
+      });
+      expect(ipStoredCount).toBe(0);
+    });
+
+    it('allows distinct first-time visitors behind a shared NAT IP up to COOKIELESS_LINK_BURST_MAX (3), scopes per link, and ignores bots', async () => {
+      const natIp = '198.51.100.42';
+
+      // 1. Bots from the shared NAT IP do NOT consume human cookie-less rate-limit capacity or create analytics
+      for (let b = 0; b < 5; b++) {
+        await request(app)
+          .get(`/r/${sec10Slug2}`)
+          .set('X-Forwarded-For', natIp)
+          .set('User-Agent', 'Twitterbot/1.0')
+          .expect(302);
+      }
+
+      let link2Clicks = await prisma.promotionClick.count({
+        where: { promotionLinkId: sec10Link2Id },
+      });
+      expect(link2Clicks).toBe(0);
+
+      // 2. Three distinct human visitors behind the same NAT IP (distinct User-Agents) click sec10Slug2 for the first time
+      const distinctUAs = [
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 Chrome/120.0',
+        'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 Mobile Safari/537.36',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
+      ];
+
+      for (const ua of distinctUAs) {
+        const res = await request(app)
+          .get(`/r/${sec10Slug2}`)
+          .set('X-Forwarded-For', natIp)
+          .set('User-Agent', ua)
+          .expect(302);
+        expect(String(res.header['set-cookie'])).toContain(`${VISITOR_COOKIE_NAME}=`);
+      }
+
+      link2Clicks = await prisma.promotionClick.count({
+        where: { promotionLinkId: sec10Link2Id },
+      });
+      expect(link2Clicks).toBe(COOKIELESS_LINK_BURST_MAX); // 3
+
+      // 3. 4th and 5th cookie-less requests from the same NAT IP on sec10Slug2 (even with rotated User-Agents)
+      // still redirect 302 and issue cookies, but have analytics writes suppressed!
+      for (let extra = 1; extra <= 2; extra++) {
+        const res = await request(app)
+          .get(`/r/${sec10Slug2}`)
+          .set('X-Forwarded-For', natIp)
+          .set('User-Agent', `Mozilla/5.0 (RotationClient/${extra}.0; Linux x86_64) AppleWebKit/537.36`)
+          .expect(302);
+        expect(res.header.location).toContain(`/events/promo-fest-1-${testRunId}`);
+        expect(String(res.header['set-cookie'])).toContain(`${VISITOR_COOKIE_NAME}=`);
+      }
+
+      link2Clicks = await prisma.promotionClick.count({
+        where: { promotionLinkId: sec10Link2Id },
+      });
+      expect(link2Clicks).toBe(COOKIELESS_LINK_BURST_MAX); // Still 3!
+
+      // 4. Different promotion link (sec10Slug1) is scoped independently and still allows a first-time cookie-less visitor from natIp!
+      const beforeLink1Clicks = await prisma.promotionClick.count({
+        where: { promotionLinkId: sec10Link1Id },
+      });
+
+      await request(app)
+        .get(`/r/${sec10Slug1}`)
+        .set('X-Forwarded-For', natIp)
+        .set('User-Agent', distinctUAs[0])
+        .expect(302);
+
+      const afterLink1Clicks = await prisma.promotionClick.count({
+        where: { promotionLinkId: sec10Link1Id },
+      });
+      expect(afterLink1Clicks).toBe(beforeLink1Clicks + 1);
+
+      // 5. A visitor from natIp who HAS a valid outside_vid cookie is never blocked by the exhausted cookie-less link burst limit on sec10Slug2!
+      const validCookieVid = `vid_valid_behind_nat_${testRunId}_1234567890`;
+      await request(app)
+        .get(`/r/${sec10Slug2}`)
+        .set('X-Forwarded-For', natIp)
+        .set('Cookie', `${VISITOR_COOKIE_NAME}=${validCookieVid}`)
+        .expect(302);
+
+      link2Clicks = await prisma.promotionClick.count({
+        where: { promotionLinkId: sec10Link2Id },
+      });
+      expect(link2Clicks).toBe(COOKIELESS_LINK_BURST_MAX + 1); // 4
+    });
+
+    it('fails OPEN for HTTP 302 redirection and cookie issuance while failing CLOSED for cookie-less database analytics writes during a Redis outage', async () => {
+      const outageIp = '198.51.100.43';
+      const beforeClicks = await prisma.promotionClick.count({
+        where: { promotionLinkId: sec10Link1Id },
+      });
+      const beforeVisitorDays = await prisma.promotionVisitorDay.count({
+        where: { promotionLinkId: sec10Link1Id },
+      });
+
+      setSimulatedRedisFailure(true);
+      try {
+        const res = await request(app)
+          .get(`/r/${sec10Slug1}`)
+          .set('X-Forwarded-For', outageIp)
+          .set('User-Agent', 'Mozilla/5.0 (OutageTest/1.0)')
+          .expect(302);
+
+        // Fails OPEN for navigation & cookie issuance
+        expect(res.header.location).toContain(`/events/promo-fest-1-${testRunId}`);
+        expect(String(res.header['set-cookie'])).toContain(`${VISITOR_COOKIE_NAME}=`);
+      } finally {
+        setSimulatedRedisFailure(false);
+      }
+
+      // Fails CLOSED for cookie-less database analytics recording during Redis outage
+      const afterClicks = await prisma.promotionClick.count({
+        where: { promotionLinkId: sec10Link1Id },
+      });
+      const afterVisitorDays = await prisma.promotionVisitorDay.count({
+        where: { promotionLinkId: sec10Link1Id },
+      });
+      expect(afterClicks).toBe(beforeClicks);
+      expect(afterVisitorDays).toBe(beforeVisitorDays);
     });
   });
 });

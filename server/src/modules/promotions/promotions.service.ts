@@ -3,10 +3,16 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '../../db/prisma.js';
 import { env } from '../../config/env.js';
 import { getRedisClient } from '../../lib/redis.js';
+import { hashRateLimitIdentifier } from '../../lib/session.service.js';
 import {
   ATTRIBUTION_WINDOW_MS,
   CLICK_DEDUP_WINDOW_SECONDS,
   ALLOWED_QUERY_PARAMS,
+  COOKIELESS_CLICK_RETRY_DEDUP_WINDOW_MS,
+  COOKIELESS_LINK_BURST_MAX,
+  COOKIELESS_LINK_BURST_WINDOW_MS,
+  COOKIELESS_IP_SUSTAINED_MAX,
+  COOKIELESS_IP_SUSTAINED_WINDOW_MS,
   isBotUserAgent,
 } from './promotions.constants.js';
 
@@ -158,6 +164,87 @@ export async function resolvePromotionSlug(
     },
     event: registry.promotionLink.event,
   };
+}
+
+/**
+ * SEC-10 Part E: Evaluates whether a cookie-less human resolver request is permitted
+ * to record click and visitor attribution analytics.
+ *
+ * Combines three short-lived Redis protections keyed by non-reversible SHA-256 digests:
+ * 1. 30-second duplicate/retry deduplication per (ipHash, promotionLinkId, slugHash, uaHash)
+ *    to prevent immediate cookie-less retries from counting as new clicks or unique visitors.
+ * 2. 60-second per-(ipHash, promotionLinkId) burst ceiling (3 cookie-less clicks/min)
+ *    to allow distinct first-time visitors behind a shared NAT while stopping User-Agent/alias rotation floods.
+ * 3. 60-second per-ipHash global ceiling (15 cookie-less clicks/min) across all promotional links.
+ *
+ * Resilience policy on Redis failure:
+ * - Navigation and cookie issuance in handleShortLinkRedirect fail OPEN (HTTP 302 redirect still succeeds).
+ * - Cookie-less database analytics recording fails CLOSED (returns false) so an attacker cannot
+ *   exploit a Redis outage to flood PostgreSQL with synthetic visitor records.
+ */
+export async function shouldRecordCookielessResolverAnalytics(params: {
+  ip?: string | null;
+  promotionLinkId: string;
+  slug: string;
+  userAgent?: string | null;
+}): Promise<boolean> {
+  const { ip, promotionLinkId, slug, userAgent } = params;
+  const ipHash = hashRateLimitIdentifier(ip || 'unknown');
+  const slugHash = hashRateLimitIdentifier((slug || '').toLowerCase());
+  const uaHash = hashRateLimitIdentifier((userAgent || 'unknown').trim().toLowerCase());
+
+  try {
+    const redis = getRedisClient();
+
+    // 1. Short-lived duplicate/retry deduplication for identical cookie-less requests
+    const retryDedupKey = `cookieless_dedup:${ipHash}:${promotionLinkId}:${slugHash}:${uaHash}`;
+    const isFirstRetry = await redis.setNxPx(
+      retryDedupKey,
+      '1',
+      COOKIELESS_CLICK_RETRY_DEDUP_WINDOW_MS
+    );
+    if (!isFirstRetry) {
+      return false;
+    }
+
+    // 2. Per-IP per-link burst budget (allows distinct NAT visitors while bounding link floods)
+    const linkBurstKey = `ratelimit:cookieless_link:${ipHash}:${promotionLinkId}`;
+    const linkBurstCount = await redis.incrWithTtl(
+      linkBurstKey,
+      COOKIELESS_LINK_BURST_WINDOW_MS
+    );
+    if (linkBurstCount > COOKIELESS_LINK_BURST_MAX) {
+      console.warn('[Promotions] Cookie-less link burst limit exceeded; suppressing analytics write', {
+        event: 'RATE_LIMIT_TRIGGERED',
+        scope: 'cookieless_resolver_link_burst',
+        linkId: promotionLinkId,
+      });
+      return false;
+    }
+
+    // 3. Per-IP global resolver sustained budget across all links
+    const ipSustainedKey = `ratelimit:cookieless_ip:${ipHash}`;
+    const ipSustainedCount = await redis.incrWithTtl(
+      ipSustainedKey,
+      COOKIELESS_IP_SUSTAINED_WINDOW_MS
+    );
+    if (ipSustainedCount > COOKIELESS_IP_SUSTAINED_MAX) {
+      console.warn('[Promotions] Cookie-less global IP limit exceeded; suppressing analytics write', {
+        event: 'RATE_LIMIT_TRIGGERED',
+        scope: 'cookieless_resolver_ip_sustained',
+        linkId: promotionLinkId,
+      });
+      return false;
+    }
+
+    return true;
+  } catch {
+    console.warn('[Promotions] Redis unavailable during cookie-less resolver check; failing closed for analytics write', {
+      event: 'COOKIELESS_RESOLVER_REDIS_OUTAGE',
+      linkId: promotionLinkId,
+    });
+    return false;
+  }
 }
 
 /**

@@ -1,6 +1,16 @@
 import { Request, Response, NextFunction } from 'express';
 import { EventTeamRole, TeamMemberStatus } from '@prisma/client';
-import { BadRequestError, UnauthorizedError } from '../../utils/errors.js';
+import { BadRequestError, TooManyRequestsError, UnauthorizedError } from '../../utils/errors.js';
+import {
+  checkRedisRateLimitWithRetryAfter,
+  hashRateLimitIdentifier,
+} from '../../lib/session.service.js';
+import {
+  TEAM_INVITE_INSPECT_IP_BURST_MAX,
+  TEAM_INVITE_INSPECT_IP_BURST_WINDOW_MS,
+  TEAM_INVITE_INSPECT_IP_SUSTAINED_MAX,
+  TEAM_INVITE_INSPECT_IP_SUSTAINED_WINDOW_MS,
+} from '../promotions/promotions.constants.js';
 import { resolveEventAuthorization } from './eventTeam.permissions.js';
 import {
   inviteTeamMember,
@@ -64,6 +74,7 @@ export async function handleInviteTeamMember(
 
 /**
  * Inspects public invitation metadata without requiring prior authentication.
+ * SEC-10 Part C: Enforces trusted-proxy IP burst and sustained rate limits without logging tokens or raw IPs.
  */
 export async function handleInspectTeamInvitation(
   req: Request,
@@ -71,6 +82,45 @@ export async function handleInspectTeamInvitation(
   next: NextFunction
 ): Promise<void> {
   try {
+    const clientIp = req.ip || req.socket?.remoteAddress || 'unknown';
+    const ipHash = hashRateLimitIdentifier(clientIp);
+
+    const burstRate = await checkRedisRateLimitWithRetryAfter(
+      `team_invite_inspect:burst:${ipHash}`,
+      TEAM_INVITE_INSPECT_IP_BURST_MAX,
+      TEAM_INVITE_INSPECT_IP_BURST_WINDOW_MS
+    );
+    if (!burstRate.allowed) {
+      console.warn('[EventTeam] Public invitation inspection burst rate limit exceeded', {
+        event: 'RATE_LIMIT_TRIGGERED',
+        scope: 'team_invite_inspect_ip_burst',
+        retryAfterSeconds: burstRate.retryAfterSeconds,
+      });
+      throw new TooManyRequestsError(
+        'Too many invitation inspection requests. Please wait before trying again.',
+        'TEAM_INVITATION_INSPECT_RATE_LIMIT',
+        burstRate.retryAfterSeconds
+      );
+    }
+
+    const sustainedRate = await checkRedisRateLimitWithRetryAfter(
+      `team_invite_inspect:sustained:${ipHash}`,
+      TEAM_INVITE_INSPECT_IP_SUSTAINED_MAX,
+      TEAM_INVITE_INSPECT_IP_SUSTAINED_WINDOW_MS
+    );
+    if (!sustainedRate.allowed) {
+      console.warn('[EventTeam] Public invitation inspection sustained rate limit exceeded', {
+        event: 'RATE_LIMIT_TRIGGERED',
+        scope: 'team_invite_inspect_ip_sustained',
+        retryAfterSeconds: sustainedRate.retryAfterSeconds,
+      });
+      throw new TooManyRequestsError(
+        'Too many invitation inspection requests. Please wait before trying again.',
+        'TEAM_INVITATION_INSPECT_RATE_LIMIT',
+        sustainedRate.retryAfterSeconds
+      );
+    }
+
     const rawToken = req.params.token;
     const metadata = await inspectTeamInvitation(rawToken);
     res.json({
