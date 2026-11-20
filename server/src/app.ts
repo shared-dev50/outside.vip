@@ -11,6 +11,7 @@ import { errorHandler } from './middleware/errorHandler.js';
 import { healthRouter } from './modules/health/health.routes.js';
 import { authRouter } from './modules/auth/auth.routes.js';
 import { eventsRouter } from './modules/events/events.routes.js';
+import { handlePublicEventCrawler } from './modules/events/events.controller.js';
 import { organizerRouter } from './modules/organizer/organizer.routes.js';
 import { checkoutRouter } from './modules/checkout/checkout.routes.js';
 import { webhookRouter } from './modules/webhooks/webhook.routes.js';
@@ -69,6 +70,7 @@ app.use('/api/staff/invitations', staffInvitationRouter);
 app.use('/api/scanner', scannerRouter);
 app.use('/r', promotionsRouter);
 app.use('/api/r', promotionsRouter);
+app.get('/events/:slug', handlePublicEventCrawler);
 
 app.use('/api/*', (_req, res) => {
   res.status(404).json({

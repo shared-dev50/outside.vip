@@ -93,6 +93,43 @@ export const EventDetailPage: React.FC = () => {
     }
   }, [event?.isPasswordProtected, event?.hasAccess, eventAccessToken, slug]);
 
+  // Synchronize document title and Open Graph / Twitter meta tags
+  useEffect(() => {
+    if (!event) return;
+    const title = `${event.title} | Outside.vip`;
+    document.title = title;
+
+    if (typeof document === 'undefined') return;
+
+    const setMetaTag = (propertyOrName: string, content: string, isProperty = false) => {
+      const attr = isProperty ? 'property' : 'name';
+      let meta = document.querySelector(`meta[${attr}="${propertyOrName}"]`);
+      if (!meta) {
+        meta = document.createElement('meta');
+        meta.setAttribute(attr, propertyOrName);
+        document.head.appendChild(meta);
+      }
+      meta.setAttribute('content', content);
+    };
+
+    const cleanDescription = (event.tagline || event.description || '')
+      .replace(/<[^>]*>/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    setMetaTag('og:title', title, true);
+    setMetaTag('og:description', cleanDescription || `Get tickets for ${event.title} on Outside.vip`, true);
+    setMetaTag('og:url', typeof window !== 'undefined' ? window.location.href : '', true);
+    setMetaTag('og:type', 'website', true);
+    if (event.coverImageUrl) {
+      setMetaTag('og:image', event.coverImageUrl, true);
+      setMetaTag('twitter:image', event.coverImageUrl, false);
+    }
+    setMetaTag('twitter:card', 'summary_large_image', false);
+    setMetaTag('twitter:title', title, false);
+    setMetaTag('twitter:description', cleanDescription || `Get tickets for ${event.title} on Outside.vip`, false);
+  }, [event]);
+
   useEffect(() => {
     if (!offerTokenParam) return;
     let isMounted = true;

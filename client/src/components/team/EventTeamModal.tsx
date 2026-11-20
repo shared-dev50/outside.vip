@@ -20,7 +20,9 @@ import {
   Settings2,
   ArrowRightLeft,
   Filter,
+  Share2,
 } from 'lucide-react';
+import { SocialShareModal } from '../promotions/SocialShareModal';
 import {
   api,
   EventStaffMember,
@@ -96,6 +98,9 @@ export const EventTeamModal: React.FC<EventTeamModalProps> = ({
 
   // Clipboard copy feedback
   const [copiedSlug, setCopiedSlug] = useState<string | null>(null);
+
+  // Social Share Modal state
+  const [sharingLink, setSharingLink] = useState<{ id: string; slug: string; name?: string } | null>(null);
 
   // 1. Fetch Event Team Members & Invitations (Hosts & Admins)
   const {
@@ -1103,6 +1108,20 @@ export const EventTeamModal: React.FC<EventTeamModalProps> = ({
                                     <Copy className="w-3.5 h-3.5" />
                                   )}
                                 </button>
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setSharingLink({
+                                      id: member.hostLink!.id,
+                                      slug: member.hostLink!.slug!,
+                                      name: member.hostLink!.name || `${member.name}'s Host Link`,
+                                    })
+                                  }
+                                  className="p-1 rounded hover:bg-stone-200 text-stone-500 hover:text-stone-800 transition-colors cursor-pointer"
+                                  title="Share Host Link on Social"
+                                >
+                                  <Share2 className="w-3.5 h-3.5" />
+                                </button>
                               </div>
                             ) : member.status === 'INACTIVE' ? (
                               <span className="text-stone-400 italic">Link paused (member inactive)</span>
@@ -1469,6 +1488,23 @@ export const EventTeamModal: React.FC<EventTeamModalProps> = ({
             </div>
           </div>
         </div>
+      )}
+
+      {/* Social Share Modal */}
+      {sharingLink && (
+        <SocialShareModal
+          isOpen={Boolean(sharingLink)}
+          onClose={() => setSharingLink(null)}
+          event={{
+            title: event.title,
+            slug: event.slug,
+            city: event.city,
+            tagline: event.tagline,
+            coverImageUrl: event.coverImageUrl,
+            category: event.category,
+          }}
+          link={sharingLink}
+        />
       )}
     </>
   );

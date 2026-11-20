@@ -66,7 +66,7 @@ export const RESERVED_SLUGS = new Set([
  * Bots are redirected without incrementing click metrics or creating attribution.
  */
 const BOT_USER_AGENT_PATTERN =
-  /bot|crawl|spider|slurp|facebookexternalhit|whatsapp|telegrambot|twitterbot|linkedinbot|slackbot|discordbot|bingpreview|google-structured-data-testing-tool|applebot/i;
+  /bot|crawl|spider|slurp|facebookexternalhit|whatsapp|telegrambot|twitterbot|linkedinbot|slackbot|discordbot|bingpreview|google-structured-data-testing-tool|applebot|snapchat|pinterest|meta-externalagent/i;
 
 export function isBotUserAgent(userAgent?: string | null): boolean {
   if (!userAgent || typeof userAgent !== 'string') return false;

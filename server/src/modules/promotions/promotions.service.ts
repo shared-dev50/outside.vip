@@ -25,6 +25,10 @@ export interface ResolveSlugResult {
     id: string;
     slug: string | null;
     title: string;
+    tagline?: string | null;
+    description: string;
+    coverImageUrl: string;
+    isPasswordProtected?: boolean;
     status: string;
     organizerId: string;
   };
@@ -123,6 +127,10 @@ export async function resolvePromotionSlug(
               id: true,
               slug: true,
               title: true,
+              tagline: true,
+              description: true,
+              coverImageUrl: true,
+              isPasswordProtected: true,
               status: true,
               organizerId: true,
             },

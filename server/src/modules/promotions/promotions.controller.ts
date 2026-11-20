@@ -14,6 +14,10 @@ import {
   recordPromotionClick,
   upsertVisitorAttribution,
 } from './promotions.service.js';
+import {
+  buildEventSocialMetadata,
+  renderCrawlerHtml,
+} from '../events/eventMetadata.service.js';
 
 /**
  * Handles short-link resolution and HTTP 302 redirection.
@@ -110,7 +114,26 @@ export async function handleShortLinkRedirect(
   const queryString = searchParams.toString();
   const redirectUrl = queryString ? `${targetPath}?${queryString}` : targetPath;
 
-  // 8. Execute HTTP 302 Redirect
+  // 8. If bot crawler, respond with 302 Location AND crawler-readable HTML metadata body
+  if (isBot) {
+    const metadata = buildEventSocialMetadata(
+      {
+        title: event.title,
+        slug: event.slug || event.id,
+        tagline: event.tagline,
+        description: event.description,
+        coverImageUrl: event.coverImageUrl,
+        isPasswordProtected: event.isPasswordProtected,
+        status: event.status,
+      },
+      { baseUrl: env.CLIENT_URL || 'https://outside.vip' }
+    );
+    const crawlerHtml = renderCrawlerHtml(metadata, { redirectUrl });
+    res.status(302).set('Location', redirectUrl).type('html').send(crawlerHtml);
+    return;
+  }
+
+  // Execute HTTP 302 Redirect for human visitors
   res.redirect(302, redirectUrl);
 }
 

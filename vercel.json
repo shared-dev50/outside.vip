@@ -6,6 +6,17 @@
       "destination": "https://outside-vip.onrender.com/r/:path*"
     },
     {
+      "source": "/events/:slug*",
+      "has": [
+        {
+          "type": "header",
+          "key": "user-agent",
+          "value": "(?i).*(bot|crawl|spider|slurp|facebookexternalhit|whatsapp|telegrambot|twitterbot|linkedinbot|slackbot|discordbot|bingpreview|google-structured-data-testing-tool|applebot|snapchat|pinterest|meta-externalagent).*"
+        }
+      ],
+      "destination": "https://outside-vip.onrender.com/events/:slug*"
+    },
+    {
       "source": "/api/:path*",
       "destination": "https://outside-vip.onrender.com/api/:path*"
     },

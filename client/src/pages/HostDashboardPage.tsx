@@ -24,7 +24,9 @@ import {
   RotateCw,
   X,
   Shield,
+  Share2,
 } from 'lucide-react';
+import { SocialShareModal } from '../components/promotions/SocialShareModal';
 
 export interface HostDashboardPageProps {
   initialEvents?: HostAssignedEventItem[];
@@ -53,6 +55,7 @@ export const HostDashboardPage: React.FC<HostDashboardPageProps> = ({
   const [customSlugInput, setCustomSlugInput] = useState('');
   const [slugError, setSlugError] = useState<string | null>(null);
   const [copiedSlug, setCopiedSlug] = useState<string | null>(null);
+  const [isShareModalOpen, setIsShareModalOpen] = useState(false);
   const [notification, setNotification] = useState<{
     type: 'success' | 'error';
     message: string;
@@ -471,6 +474,17 @@ export const HostDashboardPage: React.FC<HostDashboardPageProps> = ({
                           )}
                         </button>
 
+                        {/* Share on Social Button */}
+                        <button
+                          type="button"
+                          onClick={() => setIsShareModalOpen(true)}
+                          className="inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-600 text-stone-950 text-xs font-mono uppercase font-bold tracking-wider transition-colors shadow-xs cursor-pointer shrink-0"
+                          title="Share Link on Social Media"
+                        >
+                          <Share2 className="w-3.5 h-3.5" />
+                          <span>Share Link</span>
+                        </button>
+
                         {/* Customize Slug Button */}
                         <button
                           type="button"
@@ -852,6 +866,26 @@ export const HostDashboardPage: React.FC<HostDashboardPageProps> = ({
             </form>
           </div>
         </div>
+      )}
+
+      {/* Social Share Modal for Host Link */}
+      {isShareModalOpen && activeEvent && activeHostLink && (
+        <SocialShareModal
+          isOpen={isShareModalOpen}
+          onClose={() => setIsShareModalOpen(false)}
+          event={{
+            title: activeEvent.title,
+            slug: activeEvent.slug,
+            city: activeEvent.city,
+            coverImageUrl: activeEvent.coverImageUrl,
+          }}
+          link={{
+            id: activeHostLink.id,
+            slug: activeHostLink.slug,
+            name: activeHostLink.name,
+          }}
+          isHost={true}
+        />
       )}
     </div>
   );

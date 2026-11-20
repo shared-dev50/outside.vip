@@ -12,6 +12,12 @@ import {
   verifyEventAccessToken,
 } from './passwordAccess.service.js';
 import { calculateDisplayPriceFromGross } from '../checkout/checkout.financials.js';
+import { env } from '../../config/env.js';
+import { isBotUserAgent } from '../promotions/promotions.constants.js';
+import {
+  buildEventSocialMetadata,
+  renderCrawlerHtml,
+} from './eventMetadata.service.js';
 
 export async function listEvents(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
@@ -532,5 +538,107 @@ export async function getCities(_req: Request, res: Response, next: NextFunction
     });
   } catch (error) {
     next(error);
+  }
+}
+
+/**
+ * Serves crawler-readable Open Graph and Twitter Card HTML for event pages,
+ * or redirects human visitors to the client SPA.
+ */
+export async function handlePublicEventCrawler(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const rawSlug = req.params.slug;
+    if (!rawSlug) {
+      res.status(404).type('html').send(
+        '<!DOCTYPE html><html><head><title>Event Not Found | Outside.vip</title></head><body><h1>Event Not Found</h1></body></html>'
+      );
+      return;
+    }
+
+    const event = await prisma.event.findFirst({
+      where: {
+        OR: [{ slug: rawSlug }, { id: rawSlug }],
+      },
+      select: {
+        id: true,
+        slug: true,
+        title: true,
+        tagline: true,
+        description: true,
+        coverImageUrl: true,
+        isPasswordProtected: true,
+        status: true,
+      },
+    });
+
+    if (!event || event.status === EventStatus.ARCHIVED) {
+      res.status(404).type('html').send(
+        '<!DOCTYPE html><html><head><title>Event Not Found | Outside.vip</title></head><body><h1>Event Not Found</h1></body></html>'
+      );
+      return;
+    }
+
+    const baseUrl = (env.CLIENT_URL || 'https://outside.vip').replace(/\/+$/, '');
+    const clientEventUrl = `${baseUrl}/events/${encodeURIComponent(event.slug)}`;
+    const userAgent = req.headers['user-agent'] as string | undefined;
+
+    // Build social metadata
+    const metadata = buildEventSocialMetadata(event, { baseUrl });
+
+    if (isBotUserAgent(userAgent)) {
+      res.status(200).type('html').send(renderCrawlerHtml(metadata, { redirectUrl: clientEventUrl }));
+      return;
+    }
+
+    // Direct browser hit on backend redirects to client SPA
+    res.redirect(302, clientEventUrl);
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * Returns JSON social preview metadata for an event.
+ */
+export async function getEventSocialMetadata(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const rawSlug = req.params.slug;
+    const event = await prisma.event.findFirst({
+      where: {
+        OR: [{ slug: rawSlug }, { id: rawSlug }],
+      },
+      select: {
+        id: true,
+        slug: true,
+        title: true,
+        tagline: true,
+        description: true,
+        coverImageUrl: true,
+        isPasswordProtected: true,
+        status: true,
+      },
+    });
+
+    if (!event || event.status === EventStatus.ARCHIVED) {
+      throw new NotFoundError('Event not found');
+    }
+
+    const baseUrl = (env.CLIENT_URL || 'https://outside.vip').replace(/\/+$/, '');
+    const metadata = buildEventSocialMetadata(event, { baseUrl });
+
+    res.json({
+      success: true,
+      metadata,
+    });
+  } catch (err) {
+    next(err);
   }
 }

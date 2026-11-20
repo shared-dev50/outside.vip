@@ -21,8 +21,10 @@ import {
   AlertCircle,
   CheckCircle2,
   Layers,
+  Share2,
 } from 'lucide-react';
 import { api } from '../../lib/api';
+import { SocialShareModal } from './SocialShareModal';
 import {
   OrganizerEventItem,
   PromotionLinkItem,
@@ -83,6 +85,9 @@ export const EventPromotionsModal: React.FC<EventPromotionsModalProps> = ({
 
   // Copy Feedback state
   const [copiedSlug, setCopiedSlug] = useState<string | null>(null);
+
+  // Social Share Modal state
+  const [sharingLink, setSharingLink] = useState<{ id: string; slug: string; name?: string } | null>(null);
 
   // Calculate actual Date parameters for analytics
   const dateParams = useMemo(() => {
@@ -526,6 +531,20 @@ export const EventPromotionsModal: React.FC<EventPromotionsModalProps> = ({
                                       <Copy className="w-3.5 h-3.5" />
                                     )}
                                   </button>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setSharingLink({
+                                        id: link.id,
+                                        slug: link.primarySlug!,
+                                        name: link.name,
+                                      })
+                                    }
+                                    className="p-1 rounded hover:bg-stone-200 text-stone-500 hover:text-stone-800 transition-colors cursor-pointer"
+                                    title="Share Promotional Link on Social"
+                                  >
+                                    <Share2 className="w-3.5 h-3.5" />
+                                  </button>
                                 </div>
                                 {link.historicalAliases && link.historicalAliases.length > 0 && (
                                   <div className="text-[10px] text-stone-400 truncate max-w-xs" title={`Aliases: ${link.historicalAliases.join(', ')}`}>
@@ -558,6 +577,24 @@ export const EventPromotionsModal: React.FC<EventPromotionsModalProps> = ({
                           </td>
                           <td className="py-3 px-3 text-right">
                             <div className="flex items-center justify-end gap-1.5">
+                              {/* Share on Social Media */}
+                              {link.status === 'ACTIVE' && link.primarySlug && (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setSharingLink({
+                                      id: link.id,
+                                      slug: link.primarySlug!,
+                                      name: link.name,
+                                    })
+                                  }
+                                  className="p-1.5 rounded-lg bg-stone-100 hover:bg-stone-200 text-stone-600 hover:text-stone-900 transition-colors cursor-pointer"
+                                  title="Share on Social Media"
+                                >
+                                  <Share2 className="w-3.5 h-3.5" />
+                                </button>
+                              )}
+
                               {/* View Analytics for Link */}
                               <button
                                 type="button"
@@ -1272,6 +1309,23 @@ export const EventPromotionsModal: React.FC<EventPromotionsModalProps> = ({
             </div>
           </div>
         </div>
+      )}
+
+      {/* Social Share Modal */}
+      {sharingLink && (
+        <SocialShareModal
+          isOpen={Boolean(sharingLink)}
+          onClose={() => setSharingLink(null)}
+          event={{
+            title: event.title,
+            slug: event.slug,
+            city: event.city,
+            tagline: event.tagline,
+            coverImageUrl: event.coverImageUrl,
+            category: event.category,
+          }}
+          link={sharingLink}
+        />
       )}
     </div>
   );
