@@ -196,13 +196,11 @@ export const TeamInvitationPage: React.FC<TeamInvitationPageProps> = ({
       setAcceptanceResult(result);
       await Promise.all([
         queryClient?.invalidateQueries({ queryKey: ['host-events'] }),
+        queryClient?.invalidateQueries({ queryKey: ['host-analytics'] }),
         queryClient?.invalidateQueries({ queryKey: ['organizer-events'] }),
         queryClient?.invalidateQueries({ queryKey: ['organizer-dashboard'] }),
         auth?.refreshUser?.(),
       ]);
-      if (result.role === 'HOST') {
-        navigate('/host', { replace: true });
-      }
     } catch (err: any) {
       const status = err?.statusCode || err?.status;
       if (status === 401) {
@@ -490,7 +488,11 @@ export const TeamInvitationPage: React.FC<TeamInvitationPageProps> = ({
 
             <div className="pt-1">
               <Link
-                to={`/login?redirect=${encodeURIComponent(location.pathname)}`}
+                to={
+                  isHost
+                    ? `/login?redirect=${encodeURIComponent(location.pathname)}`
+                    : `/login?redirect=${encodeURIComponent(location.pathname)}&requirePassword=1`
+                }
                 className="inline-flex items-center gap-2 px-6 py-2.5 rounded-xl bg-stone-900 hover:bg-black text-white text-xs font-mono uppercase font-bold tracking-wider transition-colors shadow-xs"
               >
                 {isHost ? 'Sign In or Create Password Account' : 'Sign In / Register'}

@@ -476,6 +476,7 @@ describe('Staff Scanner Authorization & Dedicated Scanner Router API', () => {
 
       // But organizer revoked staff assignment in PostgreSQL
       vi.spyOn(prisma.eventStaff, 'findFirst').mockResolvedValue(null);
+      vi.spyOn(prisma.event, 'findFirst').mockResolvedValue(null);
       vi.spyOn(prisma.ticket, 'findUnique').mockResolvedValue(mockAssignedTicket as any);
       vi.spyOn(prisma.eventStaff, 'findUnique').mockResolvedValue({
         id: 'staff-revoked-id',
@@ -575,6 +576,7 @@ describe('Staff Scanner Authorization & Dedicated Scanner Router API', () => {
 
       // 5. POST /api/scanner/check-in is rejected (403) on unassigned event
       vi.spyOn(prisma.eventStaff, 'findFirst').mockResolvedValueOnce(null);
+      vi.spyOn(prisma.event, 'findFirst').mockResolvedValueOnce(null);
       const deniedScan = await request(app)
         .post('/api/scanner/check-in')
         .set('Cookie', cookieHeader)
@@ -617,6 +619,7 @@ describe('Staff Scanner Authorization & Dedicated Scanner Router API', () => {
       expect(gatesRes.body.data.events).toEqual([]);
 
       vi.spyOn(prisma.eventStaff, 'findFirst').mockResolvedValue(null);
+      vi.spyOn(prisma.event, 'findFirst').mockResolvedValue(null);
       const checkInRes = await request(app)
         .post('/api/scanner/check-in')
         .set('Cookie', cookieHeader)
@@ -733,6 +736,7 @@ describe('Staff Scanner Authorization & Dedicated Scanner Router API', () => {
       vi.spyOn(prisma.ticket, 'findUnique').mockResolvedValueOnce({
         eventId: mockAssignedEvent.id,
       } as any);
+      vi.spyOn(prisma.event, 'findFirst').mockResolvedValueOnce(null);
       vi.spyOn(prisma.eventStaff, 'findUnique').mockResolvedValueOnce({
         status: EventStaffStatus.REVOKED,
       } as any);

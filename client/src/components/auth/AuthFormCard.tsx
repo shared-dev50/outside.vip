@@ -19,6 +19,7 @@ export type AuthViewMode = 'login' | 'otp-login' | 'register' | 'forgot-password
 
 interface AuthFormCardProps {
   initialMode?: AuthViewMode;
+  allowOtpLogin?: boolean;
   badgeText?: string;
   loginTitle?: string;
   loginSubtitle?: string;
@@ -28,6 +29,7 @@ interface AuthFormCardProps {
 
 export const AuthFormCard: React.FC<AuthFormCardProps> = ({
   initialMode = 'login',
+  allowOtpLogin = true,
   badgeText = 'Outside.Vip Account',
   loginTitle = 'Sign in to your account',
   loginSubtitle = 'Enter your email address and password to access your tickets, orders, and event tools.',
@@ -35,7 +37,9 @@ export const AuthFormCard: React.FC<AuthFormCardProps> = ({
   showReturnLink = true,
 }) => {
   const { login, register, requestLoginOtp, verifyLoginOtp } = useAuth();
-  const [mode, setMode] = useState<AuthViewMode>(initialMode);
+  const effectiveInitialMode: AuthViewMode =
+    !allowOtpLogin && initialMode === 'otp-login' ? 'login' : initialMode;
+  const [mode, setMode] = useState<AuthViewMode>(effectiveInitialMode);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [name, setName] = useState('');
@@ -51,13 +55,13 @@ export const AuthFormCard: React.FC<AuthFormCardProps> = ({
   const [otpCooldownSeconds, setOtpCooldownSeconds] = useState(0);
 
   useEffect(() => {
-    setMode(initialMode);
+    setMode(effectiveInitialMode);
     setError(null);
     setRecoverySent(false);
     setOtpRequested(false);
     setOtpCode('');
     setOtpInfoMessage(null);
-  }, [initialMode]);
+  }, [effectiveInitialMode]);
 
   useEffect(() => {
     if (otpCooldownSeconds <= 0) return;
@@ -466,16 +470,18 @@ export const AuthFormCard: React.FC<AuthFormCardProps> = ({
       <div className="mt-6 pt-5 border-t border-stone-200/80 space-y-2.5 text-center text-xs text-stone-600">
         {mode === 'login' && (
           <>
-            <p>
-              Passwordless host or door staff?{' '}
-              <button
-                type="button"
-                onClick={() => switchMode('otp-login')}
-                className="font-semibold text-stone-900 hover:underline"
-              >
-                Sign in with email code
-              </button>
-            </p>
+            {allowOtpLogin && (
+              <p>
+                Passwordless host or door staff?{' '}
+                <button
+                  type="button"
+                  onClick={() => switchMode('otp-login')}
+                  className="font-semibold text-stone-900 hover:underline"
+                >
+                  Sign in with email code
+                </button>
+              </p>
+            )}
             <p>
               Don&apos;t have an account?{' '}
               <button

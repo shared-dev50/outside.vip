@@ -40,14 +40,20 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (csrfToken) {
         setActiveCsrfToken(csrfToken);
       }
-      setUser(fetchedUser);
+      setUser((prev) => {
+        if (prev && prev.id !== fetchedUser.id) {
+          queryClient?.clear();
+        }
+        return fetchedUser;
+      });
       return fetchedUser;
     } catch {
       setActiveCsrfToken(null);
       setUser(null);
+      queryClient?.clear();
       return null;
     }
-  }, []);
+  }, [queryClient]);
 
   useEffect(() => {
     let isMounted = true;
@@ -64,6 +70,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         if (!isMounted) return;
         setActiveCsrfToken(null);
         setUser(null);
+        queryClient?.clear();
       } finally {
         if (isMounted) {
           setIsLoading(false);
@@ -75,7 +82,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return () => {
       isMounted = false;
     };
-  }, []);
+  }, [queryClient]);
 
   const login = useCallback(async (email: string, password: string) => {
     const data = await api.auth.login({ email, password });

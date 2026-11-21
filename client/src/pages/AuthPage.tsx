@@ -13,12 +13,13 @@ export const AuthPage: React.FC = () => {
 
   const rawRedirect = searchParams.get('redirect');
   const redirectPath = sanitizeRedirectUrl(rawRedirect, '/organizer');
+  const allowOtpLogin = searchParams.get('requirePassword') !== '1';
 
   const initialMode: AuthViewMode = location.pathname.startsWith('/register')
     ? 'register'
     : location.pathname.startsWith('/forgot-password')
       ? 'forgot-password'
-      : searchParams.get('mode') === 'otp'
+      : allowOtpLogin && searchParams.get('mode') === 'otp'
         ? 'otp-login'
         : 'login';
 
@@ -54,6 +55,7 @@ export const AuthPage: React.FC = () => {
     <div className="min-h-[82vh] bg-[#FAF8F5] text-stone-900 flex items-center justify-center px-4 py-12">
       <AuthFormCard
         initialMode={initialMode}
+        allowOtpLogin={allowOtpLogin}
         onSuccess={() => {
           // Navigation is handled reactively once user state updates
         }}

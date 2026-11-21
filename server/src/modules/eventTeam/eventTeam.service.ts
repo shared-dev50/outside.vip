@@ -1,5 +1,11 @@
 import crypto from 'crypto';
-import { Prisma, EventTeamRole, TeamMemberStatus, TeamInvitationStatus } from '@prisma/client';
+import {
+  AccountStatus,
+  Prisma,
+  EventTeamRole,
+  TeamMemberStatus,
+  TeamInvitationStatus,
+} from '@prisma/client';
 import { prisma } from '../../db/prisma.js';
 import { env, normalizeEmail } from '../../config/env.js';
 import {
@@ -439,6 +445,25 @@ export async function acceptTeamInvitation(
     throw new ForbiddenError('Signed-in account email does not match invitation recipient');
   }
 
+  // S4R-01: Enforce server-side that Event ADMIN invitations require an ACTIVE password-protected
+  // account (passwordHash !== null). Passwordless accounts (e.g. scanner staff) cannot accept ADMIN
+  // invitations regardless of how they authenticated (OTP, /scanner, /login?mode=otp, or direct API).
+  if (invitation.role === EventTeamRole.ADMIN) {
+    const acceptingUser = await prisma.user.findUnique({
+      where: { id: user.userId },
+      select: { id: true, passwordHash: true, status: true },
+    });
+    if (!acceptingUser || acceptingUser.status !== AccountStatus.ACTIVE) {
+      throw new ForbiddenError('Account is not active and cannot accept this invitation.');
+    }
+    if (!acceptingUser.passwordHash) {
+      throw new ForbiddenError(
+        'Event Admin invitations require a password-protected account. Please establish password credentials before accepting this role.',
+        'ADMIN_PASSWORD_REQUIRED'
+      );
+    }
+  }
+
   // Enforce delegation ceiling and self/admin modification protection if invited by an Event Admin
   if (invitation.invitedByUserId !== invitation.event.organizerId) {
     if (user.userId === invitation.invitedByUserId) {
@@ -482,11 +507,30 @@ export async function acceptTeamInvitation(
 
   // Execute acceptance in an atomic transaction with conditional single-use claim
   return await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
-    // 1. Atomically claim PENDING non-expired invitation before any membership/link writes
+    // Re-verify ADMIN password requirement inside the transaction before claiming the invitation
+    // so a passwordless user can never consume an ADMIN invitation or bypass via TOCTOU.
+    if (invitation.role === EventTeamRole.ADMIN) {
+      const txUser = await tx.user.findUnique({
+        where: { id: user.userId },
+        select: { passwordHash: true, status: true },
+      });
+      if (!txUser || txUser.status !== AccountStatus.ACTIVE) {
+        throw new ForbiddenError('Account is not active and cannot accept this invitation.');
+      }
+      if (!txUser.passwordHash) {
+        throw new ForbiddenError(
+          'Event Admin invitations require a password-protected account. Please establish password credentials before accepting this role.',
+          'ADMIN_PASSWORD_REQUIRED'
+        );
+      }
+    }
+
+    // 1. Atomically claim PENDING, non-expired, non-superseded invitation before any membership/link writes
     const claimNow = new Date();
     const claimed = await tx.eventTeamInvitation.updateMany({
       where: {
         id: invitation.id,
+        tokenHash,
         status: TeamInvitationStatus.PENDING,
         expiresAt: { gt: claimNow },
       },
@@ -499,7 +543,7 @@ export async function acceptTeamInvitation(
     if (claimed.count !== 1) {
       const currentInv = await tx.eventTeamInvitation.findUnique({
         where: { id: invitation.id },
-        select: { status: true, expiresAt: true },
+        select: { status: true, expiresAt: true, tokenHash: true },
       });
       if (!currentInv || currentInv.status === TeamInvitationStatus.REVOKED) {
         throw new ForbiddenError('This invitation has been revoked');
@@ -508,6 +552,15 @@ export async function acceptTeamInvitation(
         throw new ConflictError(
           'This invitation has already been accepted',
           'INVITATION_ALREADY_ACCEPTED'
+        );
+      }
+      if (
+        currentInv.status === TeamInvitationStatus.PENDING &&
+        currentInv.tokenHash !== tokenHash
+      ) {
+        throw new ForbiddenError(
+          'This invitation link has been superseded by a newer email. Please use the latest invitation link.',
+          'INVITATION_TOKEN_SUPERSEDED'
         );
       }
       throw new ForbiddenError('This invitation has expired');
@@ -693,7 +746,12 @@ export async function resendTeamInvitation(
   }
 
   if (invitation.status !== TeamInvitationStatus.PENDING) {
-    throw new BadRequestError(`Cannot resend invitation that is already ${invitation.status.toLowerCase()}`);
+    throw new ConflictError(
+      `Cannot resend invitation that is already ${String(invitation.status).toLowerCase()}`,
+      invitation.status === TeamInvitationStatus.ACCEPTED
+        ? 'INVITATION_ALREADY_ACCEPTED'
+        : 'INVITATION_NOT_PENDING'
+    );
   }
 
   if (actor && !actor.isOwner) {
@@ -776,23 +834,43 @@ export async function resendTeamInvitation(
   const expiresInDays = 7;
   const expiresAt = new Date(Date.now() + expiresInDays * 24 * 60 * 60 * 1000);
 
-  const updated = await prisma.eventTeamInvitation.update({
-    where: { id: invitation.id },
+  // S4R-02: Atomically rotate tokenHash/expiresAt ONLY while status is still PENDING
+  const rotated = await prisma.eventTeamInvitation.updateMany({
+    where: {
+      id: invitation.id,
+      eventId,
+      status: TeamInvitationStatus.PENDING,
+    },
     data: {
       tokenHash,
       expiresAt,
     },
   });
 
+  if (rotated.count !== 1) {
+    await releaseRedisCooldown(cooldownKey).catch(() => {});
+    const current = await prisma.eventTeamInvitation.findUnique({
+      where: { id: invitation.id },
+      select: { status: true },
+    });
+    const currentStatus = current?.status ? String(current.status).toLowerCase() : 'processed';
+    throw new ConflictError(
+      `Cannot resend invitation that is already ${currentStatus}`,
+      current?.status === TeamInvitationStatus.ACCEPTED
+        ? 'INVITATION_ALREADY_ACCEPTED'
+        : 'INVITATION_NOT_PENDING'
+    );
+  }
+
   const baseUrl = env.CLIENT_URL || 'https://outside.vip';
   const inviteUrl = `${baseUrl}/team/invitations/${rawToken}`;
   const organizerDisplayName = invitation.event.organizer?.name || 'Outside.vip Organizer';
 
   await sendTeamInvitationEmail({
-    to: updated.email,
+    to: invitation.email,
     eventTitle: invitation.event.title,
     organizerName: organizerDisplayName,
-    role: updated.role,
+    role: invitation.role,
     inviteUrl,
     expiresInDays,
   }).catch((err) => {
@@ -800,9 +878,9 @@ export async function resendTeamInvitation(
   });
 
   return {
-    id: updated.id,
-    email: updated.email,
-    expiresAt: updated.expiresAt,
+    id: invitation.id,
+    email: invitation.email,
+    expiresAt,
   };
 }
 
@@ -823,7 +901,12 @@ export async function revokeTeamInvitation(
   }
 
   if (invitation.status !== TeamInvitationStatus.PENDING) {
-    throw new BadRequestError(`Cannot revoke invitation that is already ${invitation.status.toLowerCase()}`);
+    throw new ConflictError(
+      `Cannot revoke invitation that is already ${String(invitation.status).toLowerCase()}`,
+      invitation.status === TeamInvitationStatus.ACCEPTED
+        ? 'INVITATION_ALREADY_ACCEPTED'
+        : 'INVITATION_NOT_PENDING'
+    );
   }
 
   if (actor && !actor.isOwner) {
@@ -838,13 +921,33 @@ export async function revokeTeamInvitation(
     }
   }
 
-  await prisma.eventTeamInvitation.update({
-    where: { id: invitation.id },
+  // S4R-02: Atomically revoke ONLY while status is still PENDING so a concurrent accept
+  // cannot be silently overwritten from ACCEPTED to REVOKED after membership creation.
+  const revoked = await prisma.eventTeamInvitation.updateMany({
+    where: {
+      id: invitation.id,
+      eventId,
+      status: TeamInvitationStatus.PENDING,
+    },
     data: {
       status: TeamInvitationStatus.REVOKED,
       revokedAt: new Date(),
     },
   });
+
+  if (revoked.count !== 1) {
+    const current = await prisma.eventTeamInvitation.findUnique({
+      where: { id: invitation.id },
+      select: { status: true },
+    });
+    const currentStatus = current?.status ? String(current.status).toLowerCase() : 'processed';
+    throw new ConflictError(
+      `Cannot revoke invitation that is already ${currentStatus}`,
+      current?.status === TeamInvitationStatus.ACCEPTED
+        ? 'INVITATION_ALREADY_ACCEPTED'
+        : 'INVITATION_NOT_PENDING'
+    );
+  }
 
   return { success: true };
 }

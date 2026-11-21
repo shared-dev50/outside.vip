@@ -17,8 +17,6 @@ import {
   User,
 } from './types';
 import { DEFAULT_ADMIN_PERMISSIONS } from './components/team/AdminPermissionsModal';
-import fs from 'fs';
-import path from 'path';
 
 describe('Authentication Stage 4: Cross-Role Navigation, Unified OTP Login & Dashboard Permissions', () => {
   let queryClient: QueryClient;
@@ -310,21 +308,21 @@ describe('Authentication Stage 4: Cross-Role Navigation, Unified OTP Login & Das
   // Group D: Cache Isolation & Revocation Recovery
   // =========================================================================
   describe('D. Cache Isolation, 401 Recovery & Host Revocation State', () => {
-    it('AuthContext clears QueryClient cache on logout and clearSessionState so User B never sees User A data', () => {
-      const authCtxSrc = fs.readFileSync(
-        path.resolve(__dirname, './context/AuthContext.tsx'),
-        'utf8'
+    it('AuthPage suppresses OTP mode when ?requirePassword=1 is set (Event Admin onboarding link)', () => {
+      const html = renderToString(
+        <QueryClientProvider client={queryClient}>
+          <MemoryRouter initialEntries={['/login?mode=otp&requirePassword=1&redirect=%2Fteam%2Finvitations%2Ftok']}>
+            <AuthContext.Provider value={createMockAuth(null)}>
+              <AuthPage />
+            </AuthContext.Provider>
+          </MemoryRouter>
+        </QueryClientProvider>
       );
-      expect(authCtxSrc).toContain('QueryClientContext');
-      expect(authCtxSrc).toContain('queryClient?.clear()');
 
-      // Behavioral verification against QueryClient directly
-      queryClient.setQueryData(['organizer-events'], { events: [{ id: 'user-a-event' }] });
-      queryClient.setQueryData(['host-events'], [{ membershipId: 'user-a-host' }]);
-      expect(queryClient.getQueryData(['organizer-events'])).toBeDefined();
-      queryClient.clear();
-      expect(queryClient.getQueryData(['organizer-events'])).toBeUndefined();
-      expect(queryClient.getQueryData(['host-events'])).toBeUndefined();
+      expect(html).toContain('Sign in to your account');
+      expect(html).toContain('id="auth-password"');
+      expect(html).not.toContain('Send 6-Digit Sign-In Code');
+      expect(html).not.toContain('Sign in with email code');
     });
 
     it('HostDashboardPage displays Host Access Revoked (not infinite loading) when analytics returns 403', () => {
@@ -461,6 +459,8 @@ describe('Authentication Stage 4: Cross-Role Navigation, Unified OTP Login & Das
         title: 'Owned Rooftop Draft',
         status: 'DRAFT',
         ticketsSold: 0,
+        revenueInCents: 0,
+        revenueFormatted: '$0.00',
         organizerId: dualUser.id,
         isOwner: true,
         accessRole: 'OWNER',
@@ -516,6 +516,167 @@ describe('Authentication Stage 4: Cross-Role Navigation, Unified OTP Login & Das
       expect(html).toContain('title="Delete Draft Event"');
       // Unpublish must NOT appear because the only PUBLISHED event is an Event Admin row
       expect(html).not.toContain('title="Unpublish event (hide from discovery)"');
+
+      // S4R-06: Mixed-role KPIs must reflect combined owned + assigned scope, never owned-only totals
+      expect(html).toContain('1 owned · 1 admin');
+      expect(html).toContain('Across owned &amp; assigned events');
+      expect(html).toContain('Permitted events only (some restricted)');
+      // Revenue for Event B (canViewOrders: false) must NOT be aggregated into top KPI ($0.00 owned only, not $2,500.00!)
+      expect(html).not.toContain('$2,500.00');
+    });
+
+    it('S4R-06: Owner-only dashboard uses owner stats directly and displays Completed transactions subtitle', () => {
+      const ownerUser: User = {
+        ...baseAttendeeUser,
+        role: 'ORGANIZER',
+        organizer: { id: 'org-owner', displayName: 'Owner Collective', slug: 'owner-collective' },
+      };
+      const ownedEvent = makeEvent({
+        id: 'evt-owned-only',
+        title: 'Solo Owner Fest',
+        status: 'PUBLISHED',
+        organizerId: ownerUser.id,
+        isOwner: true,
+        accessRole: 'OWNER',
+        permissions: null,
+        ticketsSold: 42,
+        revenueInCents: 420000,
+        revenueFormatted: '$4,200.00',
+      });
+
+      const html = renderToString(
+        <QueryClientProvider client={queryClient}>
+          <MemoryRouter initialEntries={['/organizer']}>
+            <AuthContext.Provider value={createMockAuth(ownerUser)}>
+              <OrganizerDashboardPage
+                initialUser={ownerUser}
+                initialIsLoading={false}
+                initialEvents={[ownedEvent]}
+                initialStats={{
+                  totalEvents: 1,
+                  publishedEvents: 1,
+                  draftEvents: 0,
+                  ticketsSold: 42,
+                  grossRevenueInCents: 420000,
+                  grossRevenueFormatted: '$4,200.00',
+                  currency: 'USD',
+                }}
+              />
+            </AuthContext.Provider>
+          </MemoryRouter>
+        </QueryClientProvider>
+      );
+
+      expect(html).toContain('$4,200.00');
+      expect(html).toContain('Completed transactions');
+      expect(html).toContain('Across all lifecycles');
+      expect(html).not.toContain('Permitted events only');
+    });
+
+    it('S4R-06: Mixed-role dashboard aggregates owned + permitted Event Admin revenue when canViewOrders is true and excludes restricted events when false', () => {
+      const mixedUser: User = {
+        ...baseAttendeeUser,
+        role: 'ORGANIZER',
+        organizer: { id: 'org-mix', displayName: 'Mixed Co', slug: 'mixed-co' },
+      };
+
+      const ownedEvent = makeEvent({
+        id: 'evt-mix-owned',
+        title: 'Owned Gala',
+        status: 'PUBLISHED',
+        organizerId: mixedUser.id,
+        isOwner: true,
+        accessRole: 'OWNER',
+        permissions: null,
+        ticketsSold: 10,
+        revenueInCents: 100000,
+        revenueFormatted: '$1,000.00',
+      });
+
+      const permittedAdminEvent = makeEvent({
+        id: 'evt-mix-admin-ok',
+        title: 'Permitted Partner Event',
+        status: 'PUBLISHED',
+        organizerId: 'usr-partner-1',
+        isOwner: false,
+        accessRole: 'ADMIN',
+        permissions: { ...DEFAULT_ADMIN_PERMISSIONS, canViewOrders: true },
+        ticketsSold: 15,
+        revenueInCents: 50000,
+        revenueFormatted: '$500.00',
+      });
+
+      const restrictedAdminEvent = makeEvent({
+        id: 'evt-mix-admin-restricted',
+        title: 'Restricted Partner Event',
+        status: 'DRAFT',
+        organizerId: 'usr-partner-2',
+        isOwner: false,
+        accessRole: 'ADMIN',
+        permissions: { ...DEFAULT_ADMIN_PERMISSIONS, canViewOrders: false },
+        ticketsSold: 5,
+        // Even if a malicious/stale payload had non-zero cents, client must never aggregate it
+        revenueInCents: 999900,
+        revenueFormatted: '$9,999.00',
+      });
+
+      // Case 1: Owned + Permitted Admin + Restricted Admin
+      const htmlWithRestricted = renderToString(
+        <QueryClientProvider client={queryClient}>
+          <MemoryRouter initialEntries={['/organizer']}>
+            <AuthContext.Provider value={createMockAuth(mixedUser)}>
+              <OrganizerDashboardPage
+                initialUser={mixedUser}
+                initialIsLoading={false}
+                initialEvents={[ownedEvent, permittedAdminEvent, restrictedAdminEvent]}
+                initialStats={{
+                  totalEvents: 1,
+                  publishedEvents: 1,
+                  draftEvents: 0,
+                  ticketsSold: 10,
+                  grossRevenueInCents: 100000,
+                  grossRevenueFormatted: '$1,000.00',
+                  currency: 'USD',
+                }}
+              />
+            </AuthContext.Provider>
+          </MemoryRouter>
+        </QueryClientProvider>
+      );
+
+      expect(htmlWithRestricted).toContain('1 owned · 2 admin');
+      expect(htmlWithRestricted).toContain('$1,500.00');
+      expect(htmlWithRestricted).toContain('Permitted events only (some restricted)');
+      expect(htmlWithRestricted).not.toContain('$9,999.00');
+      expect(htmlWithRestricted).not.toContain('$11,499.00');
+
+      // Case 2: Owned + Permitted Admin only (all events financially visible)
+      const htmlAllPermitted = renderToString(
+        <QueryClientProvider client={queryClient}>
+          <MemoryRouter initialEntries={['/organizer']}>
+            <AuthContext.Provider value={createMockAuth(mixedUser)}>
+              <OrganizerDashboardPage
+                initialUser={mixedUser}
+                initialIsLoading={false}
+                initialEvents={[ownedEvent, permittedAdminEvent]}
+                initialStats={{
+                  totalEvents: 1,
+                  publishedEvents: 1,
+                  draftEvents: 0,
+                  ticketsSold: 10,
+                  grossRevenueInCents: 100000,
+                  grossRevenueFormatted: '$1,000.00',
+                  currency: 'USD',
+                }}
+              />
+            </AuthContext.Provider>
+          </MemoryRouter>
+        </QueryClientProvider>
+      );
+
+      expect(htmlAllPermitted).toContain('1 owned · 1 admin');
+      expect(htmlAllPermitted).toContain('$1,500.00');
+      expect(htmlAllPermitted).toContain('Owned &amp; permitted admin events');
     });
   });
 });

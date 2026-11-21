@@ -1,6 +1,6 @@
-import { api } from "@/lib/api";
-import { useOptionalAuth } from "@/context/AuthContext";
-import { OrderStatus } from "@/types";
+import { api } from "../lib/api";
+import { useOptionalAuth } from "../context/AuthContext";
+import { OrderStatus } from "../types";
 import { useQuery } from "@tanstack/react-query";
 import { AlertCircle, ChevronDown, Search, X } from "lucide-react";
 import { useEffect, useState } from "react";

@@ -1,5 +1,6 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useOptionalAuth } from '../../context/AuthContext';
 import {
   TrendingUp,
   Megaphone,
@@ -48,6 +49,17 @@ export const EventPromotionsModal: React.FC<EventPromotionsModalProps> = ({
   if (!isOpen || !event) return null;
 
   const queryClient = useQueryClient();
+  const auth = useOptionalAuth();
+  const clearSessionState = auth?.clearSessionState;
+
+  const handleAuthError = (err: any): boolean => {
+    const status = err?.statusCode || err?.status;
+    if (status === 401) {
+      clearSessionState?.();
+      return true;
+    }
+    return false;
+  };
 
   // Navigation tab
   const [activeTab, setActiveTab] = useState<'LINKS' | 'CREATE' | 'ANALYTICS'>('LINKS');
@@ -152,6 +164,15 @@ export const EventPromotionsModal: React.FC<EventPromotionsModalProps> = ({
 
   const traffic = analyticsData?.traffic;
 
+  const linksErrorStatus = (linksError as any)?.statusCode || (linksError as any)?.status;
+  const analyticsErrorStatus = (analyticsError as any)?.statusCode || (analyticsError as any)?.status;
+
+  useEffect(() => {
+    if (linksErrorStatus === 401 || analyticsErrorStatus === 401) {
+      clearSessionState?.();
+    }
+  }, [linksErrorStatus, analyticsErrorStatus, clearSessionState]);
+
   // Mutations
   const createCampaignMutation = useMutation({
     mutationFn: (data: { name: string; slug?: string }) =>
@@ -168,6 +189,7 @@ export const EventPromotionsModal: React.FC<EventPromotionsModalProps> = ({
       );
     },
     onError: (err: any) => {
+      if (handleAuthError(err)) return;
       showNotification('error', err?.message || 'Failed to create campaign link');
     },
   });
@@ -183,6 +205,7 @@ export const EventPromotionsModal: React.FC<EventPromotionsModalProps> = ({
       showNotification('success', `Promotional link "${updated.name}" updated`);
     },
     onError: (err: any) => {
+      if (handleAuthError(err)) return;
       showNotification('error', err?.message || 'Failed to update link status');
     },
   });
@@ -200,6 +223,7 @@ export const EventPromotionsModal: React.FC<EventPromotionsModalProps> = ({
       showNotification('success', `Primary slug updated to /r/${result.primarySlug}`);
     },
     onError: (err: any) => {
+      if (handleAuthError(err)) return;
       setSlugError(err?.message || 'Failed to update slug. It may already be in use or reserved.');
     },
   });

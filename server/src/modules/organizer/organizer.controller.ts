@@ -168,7 +168,13 @@ export async function ensureOrganizerWorkspaceForUser(
         where: { id: user.id },
         data: { role: Role.ORGANIZER },
       });
-      await invalidateUserAuthCache(user.id).catch(() => {});
+      await invalidateUserAuthCache(user.id).catch((cacheErr) => {
+        console.warn('[Organizer] Failed to invalidate user auth cache after role promotion', {
+          userId: user.id,
+          context: 'ensureOrganizerWorkspaceForUser',
+          error: cacheErr instanceof Error ? cacheErr.message : String(cacheErr),
+        });
+      });
     }
 
     return createdProfile;
@@ -258,7 +264,13 @@ export async function upsertOrganizerWorkspace(
         where: { id: userId },
         data: { role: Role.ORGANIZER },
       });
-      await invalidateUserAuthCache(userId).catch(() => {});
+      await invalidateUserAuthCache(userId).catch((cacheErr) => {
+        console.warn('[Organizer] Failed to invalidate user auth cache after role promotion', {
+          userId,
+          context: 'upsertOrganizerWorkspace',
+          error: cacheErr instanceof Error ? cacheErr.message : String(cacheErr),
+        });
+      });
     }
 
     res.status(existing ? 200 : 201).json({
@@ -2193,8 +2205,13 @@ export async function checkInTicket(req: Request, res: Response, next: NextFunct
 
     if (!isOrganizerRole) {
       let hasStaffAccess = false;
+      let hasOwnedPublishedEventAccess = false;
+      const isSpecificGate = Boolean(
+        eventIdOrSlug && eventIdOrSlug !== 'all' && eventIdOrSlug !== 'all_events'
+      );
+
       try {
-        if (eventIdOrSlug && eventIdOrSlug !== 'all' && eventIdOrSlug !== 'all_events') {
+        if (isSpecificGate) {
           const staffRecord = await prisma.eventStaff.findFirst({
             where: {
               userId: scannerUserId,
@@ -2220,7 +2237,28 @@ export async function checkInTicket(req: Request, res: Response, next: NextFunct
         if (err?.code !== 'P2021') throw err;
       }
 
+      // S4R-03: Align checkInTicket with getScannerGates — an event owner can always check in
+      // tickets for their own PUBLISHED event based on organizerId === authenticatedUserId,
+      // independently of a potentially stale global user.role (e.g. ATTENDEE).
+      // Hosts and Event Admins receive zero implicit scanner authorization.
       if (!hasStaffAccess) {
+        const ownedEvent = await prisma.event.findFirst({
+          where: isSpecificGate
+            ? {
+                organizerId: scannerUserId,
+                status: EventStatus.PUBLISHED,
+                OR: [{ id: eventIdOrSlug }, { slug: eventIdOrSlug }],
+              }
+            : {
+                organizerId: scannerUserId,
+                status: EventStatus.PUBLISHED,
+              },
+          select: { id: true },
+        });
+        hasOwnedPublishedEventAccess = !!ownedEvent;
+      }
+
+      if (!hasStaffAccess && !hasOwnedPublishedEventAccess) {
         throw new ForbiddenError('You do not have permission to check in attendees for this event');
       }
     }
@@ -2261,13 +2299,16 @@ export async function checkInTicket(req: Request, res: Response, next: NextFunct
         throw new ForbiddenError('You do not have permission to check in attendees for this event');
       }
 
-      // For legacy ORGANIZER records lacking authorizedVia, allow replay if the organizer
-      // currently owns the target event; otherwise require an ACTIVE EventStaff assignment.
-      if (isOrganizerRole && !record?.authorizedVia) {
+      // S4R-03: Allow replay for event owners (regardless of stale global user.role) when the
+      // record was OWNER-authorized or legacy (no authorizedVia) AND current DB ownership of the
+      // PUBLISHED event is verified. Never allow a STAFF-authorized record to bypass EventStaff
+      // revocation (F-07).
+      if (record?.authorizedVia === 'OWNER' || !record?.authorizedVia) {
         const ownedEvent = await prisma.event.findFirst({
           where: {
             id: targetEventId,
             organizerId: scannerUserId,
+            status: EventStatus.PUBLISHED,
           },
           select: { id: true },
         });

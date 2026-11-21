@@ -313,6 +313,10 @@ export const FinanceOrganizationPage: React.FC = () => {
         throw new Error('No redirect URL received from Stripe onboarding service');
       }
     } catch (err: any) {
+      if ((err?.statusCode || err?.status) === 401) {
+        clearSessionState?.();
+        return;
+      }
       console.error('Failed to create onboarding link:', err);
       let friendlyMsg = 'Could not initiate Stripe onboarding. Please try again.';
       if (err?.code === 'STRIPE_CONFIGURATION_UNAVAILABLE') {
@@ -341,6 +345,10 @@ export const FinanceOrganizationPage: React.FC = () => {
         throw new Error('No dashboard link received');
       }
     } catch (err: any) {
+      if ((err?.statusCode || err?.status) === 401) {
+        clearSessionState?.();
+        return;
+      }
       console.error('Failed to open Stripe dashboard:', err);
       let friendlyMsg = 'Could not access the Stripe Express dashboard. Please try again.';
       if (err?.code === 'INVALID_CONNECTED_ACCOUNT') {
@@ -392,6 +400,10 @@ export const FinanceOrganizationPage: React.FC = () => {
 
           await loadDashboardData(true);
     } catch (err: any) {
+      if ((err?.statusCode || err?.status) === 401) {
+        clearSessionState?.();
+        return;
+      }
       console.error('Withdrawal failed:', err);
       setWithdrawError(sanitizeClientErrorMessage(err?.message || 'Withdrawal could not be completed. Please try again.'));
     } finally {
@@ -413,6 +425,10 @@ export const FinanceOrganizationPage: React.FC = () => {
         });
       }
     } catch (err: any) {
+      if ((err?.statusCode || err?.status) === 401) {
+        clearSessionState?.();
+        return;
+      }
       console.error('Failed to update organization details:', err);
       setError(err?.message || 'Could not save organization details.');
     } finally {

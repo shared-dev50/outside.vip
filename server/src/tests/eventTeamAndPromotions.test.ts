@@ -68,11 +68,12 @@ describe('Event Teams, Invitations & Host Promotional Tools (Stage 2)', () => {
     createdUserIds.push(organizerUser.id);
     organizerAuth = await createAuth(organizerUser.id);
 
-    // 2. Create Event Admin User
+    // 2. Create Event Admin User (password-protected account per S4R-01)
     adminUser = await prisma.user.create({
       data: {
         email: `event_admin_${testRunId}@outside.vip`,
         name: 'Stage 2 Admin',
+        passwordHash: '$2a$10$Stage2AdminFixturePasswordHash000000000000000000000000',
         role: 'ATTENDEE',
         emailVerified: true,
         emailVerifiedAt: new Date(),
@@ -1514,6 +1515,7 @@ describe('Event Teams, Invitations & Host Promotional Tools (Stage 2)', () => {
         data: {
           email: `limited_admin_${testRunId}@outside.vip`,
           name: 'Limited Admin',
+          passwordHash: '$2a$10$LimitedAdminFixturePasswordHash00000000000000000000000',
           role: 'ATTENDEE',
           emailVerified: true,
           emailVerifiedAt: new Date(),
@@ -2957,6 +2959,7 @@ describe('Event Teams, Invitations & Host Promotional Tools (Stage 2)', () => {
           data: {
             email: `sec09_host_to_admin_${testRunId}@outside.vip`,
             name: 'SEC-09 Host To Admin',
+            passwordHash: '$2a$10$Sec09AdminFixturePasswordHash0000000000000000000000000',
             role: 'ATTENDEE',
             emailVerified: true,
             emailVerifiedAt: new Date(),
@@ -3590,7 +3593,7 @@ describe('Event Teams, Invitations & Host Promotional Tools (Stage 2)', () => {
           .post(`/api/events/${sec10Event.id}/team/invitations/${revokedInv.id}/resend`)
           .set('Cookie', sec10OrganizerAuth.cookie)
           .set('x-csrf-token', sec10OrganizerAuth.csrf)
-          .expect(400);
+          .expect(409);
 
         expect(await redis.get(event1ResendKey)).toBeNull();
         expect(await redis.get(orgActorKey)).toBeNull();
@@ -4027,6 +4030,7 @@ describe('Event Teams, Invitations & Host Promotional Tools (Stage 2)', () => {
           data: {
             email: `sec12_admin_${testRunId}@outside.vip`,
             name: 'SEC-12 Admin',
+            passwordHash: '$2a$10$Sec12AdminFixturePasswordHash0000000000000000000000000',
             role: 'ATTENDEE',
             emailVerified: true,
             emailVerifiedAt: new Date(),

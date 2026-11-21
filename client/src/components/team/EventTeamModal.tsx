@@ -1,5 +1,6 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useOptionalAuth } from '../../context/AuthContext';
 import {
   Users,
   UserPlus,
@@ -58,6 +59,17 @@ export const EventTeamModal: React.FC<EventTeamModalProps> = ({
   if ((!isOpen && !isInline) || !event) return null;
 
   const queryClient = useQueryClient();
+  const auth = useOptionalAuth();
+  const clearSessionState = auth?.clearSessionState;
+
+  const handleAuthError = (err: any): boolean => {
+    const status = err?.statusCode || err?.status;
+    if (status === 401) {
+      clearSessionState?.();
+      return true;
+    }
+    return false;
+  };
 
   // Navigation tab
   const [activeTab, setActiveTab] = useState<'MEMBERS' | 'INVITATIONS' | 'INVITE'>('MEMBERS');
@@ -121,6 +133,7 @@ export const EventTeamModal: React.FC<EventTeamModalProps> = ({
     isLoading: isLoadingStaff,
     isFetching: isFetchingStaff,
     refetch: refetchStaff,
+    error: staffError,
   } = useQuery({
     queryKey: ['event-staff', event.id],
     queryFn: async () => {
@@ -154,6 +167,15 @@ export const EventTeamModal: React.FC<EventTeamModalProps> = ({
 
   const isStaffRestricted = Boolean((staffData as any)?.isRestricted);
 
+  const teamErrorStatus = (teamError as any)?.statusCode || (teamError as any)?.status;
+  const staffErrorStatus = (staffError as any)?.statusCode || (staffError as any)?.status;
+
+  useEffect(() => {
+    if (teamErrorStatus === 401 || staffErrorStatus === 401) {
+      clearSessionState?.();
+    }
+  }, [teamErrorStatus, staffErrorStatus, clearSessionState]);
+
   const isLoading = !teamData && !staffData && (isLoadingTeam || isLoadingStaff);
   const isFetching = isFetchingTeam || isFetchingStaff;
 
@@ -184,6 +206,7 @@ export const EventTeamModal: React.FC<EventTeamModalProps> = ({
       showNotification('success', `Invitation successfully dispatched to ${invitation.email}`);
     },
     onError: (err: any) => {
+      if (handleAuthError(err)) return;
       showNotification('error', err?.message || 'Failed to dispatch team invitation');
     },
   });
@@ -195,6 +218,7 @@ export const EventTeamModal: React.FC<EventTeamModalProps> = ({
       showNotification('success', `Invitation resent to ${invitation.email}`);
     },
     onError: (err: any) => {
+      if (handleAuthError(err)) return;
       showNotification('error', err?.message || 'Failed to resend invitation');
     },
   });
@@ -206,6 +230,7 @@ export const EventTeamModal: React.FC<EventTeamModalProps> = ({
       showNotification('success', 'Invitation revoked successfully');
     },
     onError: (err: any) => {
+      if (handleAuthError(err)) return;
       showNotification('error', err?.message || 'Failed to revoke invitation');
     },
   });
@@ -228,6 +253,7 @@ export const EventTeamModal: React.FC<EventTeamModalProps> = ({
       showNotification('success', `Team member ${updated.name || updated.email} updated`);
     },
     onError: (err: any) => {
+      if (handleAuthError(err)) return;
       showNotification('error', err?.message || 'Failed to update team member');
     },
   });
@@ -242,6 +268,7 @@ export const EventTeamModal: React.FC<EventTeamModalProps> = ({
       showNotification('success', 'Team member access revoked and personal links archived');
     },
     onError: (err: any) => {
+      if (handleAuthError(err)) return;
       showNotification('error', err?.message || 'Failed to revoke team member access');
     },
   });
@@ -260,6 +287,7 @@ export const EventTeamModal: React.FC<EventTeamModalProps> = ({
       );
     },
     onError: (err: any) => {
+      if (handleAuthError(err)) return;
       showNotification('error', err?.message || 'Failed to dispatch staff invitation');
     },
   });
@@ -271,6 +299,7 @@ export const EventTeamModal: React.FC<EventTeamModalProps> = ({
       showNotification('success', 'Staff invitation email resent successfully');
     },
     onError: (err: any) => {
+      if (handleAuthError(err)) return;
       showNotification('error', err?.message || 'Failed to resend staff invitation');
     },
   });
@@ -283,6 +312,7 @@ export const EventTeamModal: React.FC<EventTeamModalProps> = ({
       showNotification('success', 'Staff invitation revoked');
     },
     onError: (err: any) => {
+      if (handleAuthError(err)) return;
       showNotification('error', err?.message || 'Failed to revoke staff invitation');
     },
   });
@@ -295,6 +325,7 @@ export const EventTeamModal: React.FC<EventTeamModalProps> = ({
       showNotification('success', 'Staff scanning access revoked');
     },
     onError: (err: any) => {
+      if (handleAuthError(err)) return;
       showNotification('error', err?.message || 'Failed to revoke staff scanning access');
     },
   });

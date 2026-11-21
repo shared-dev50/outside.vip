@@ -120,6 +120,11 @@ export const OrganizerDashboardPage: React.FC<OrganizerDashboardPageProps> = ({
       showNotification('success', data.message || 'Event published to Outside.vip discovery!');
     },
     onError: (err: any) => {
+      const status = err?.statusCode || err?.status;
+      if (status === 401) {
+        clearSessionState?.();
+        return;
+      }
       showNotification('error', err?.message || 'Failed to publish event. Ensure all required fields and ticket tiers are valid.');
     },
   });
@@ -133,6 +138,11 @@ export const OrganizerDashboardPage: React.FC<OrganizerDashboardPageProps> = ({
       showNotification('success', data.message || 'Event reverted to draft status.');
     },
     onError: (err: any) => {
+      const status = err?.statusCode || err?.status;
+      if (status === 401) {
+        clearSessionState?.();
+        return;
+      }
       showNotification('error', err?.message || 'Failed to unpublish event.');
     },
   });
@@ -148,6 +158,11 @@ export const OrganizerDashboardPage: React.FC<OrganizerDashboardPageProps> = ({
     },
     onError: (err: any) => {
       setIsDeleting(false);
+      const status = err?.statusCode || err?.status;
+      if (status === 401) {
+        clearSessionState?.();
+        return;
+      }
       showNotification('error', err?.message || 'Failed to delete event. Events with sold tickets cannot be deleted.');
     },
   });
@@ -206,31 +221,55 @@ export const OrganizerDashboardPage: React.FC<OrganizerDashboardPageProps> = ({
     (evt) => !(evt.isOwner ?? evt.organizerId === user.id)
   );
   const isAssignedAdminOnlyView = ownedEvents.length === 0 && assignedAdminEvents.length > 0;
+  const isMixedRoleView = ownedEvents.length > 0 && assignedAdminEvents.length > 0;
+  const useCombinedEventKpis = isAssignedAdminOnlyView || isMixedRoleView;
 
-  const displayedTotalEvents = isAssignedAdminOnlyView
-    ? assignedAdminEvents.length
+  const isEventRevenueVisible = (evt: OrganizerEventItem) =>
+    Boolean(evt.isOwner ?? evt.organizerId === user.id) ||
+    isPlatformAdmin ||
+    Boolean(evt.permissions?.canViewOrders);
+
+  const displayedTotalEvents = useCombinedEventKpis
+    ? rawEvents.length
     : stats?.totalEvents ?? ownedEvents.length;
-  const displayedPublishedEvents = isAssignedAdminOnlyView
-    ? assignedAdminEvents.filter((e) => e.status === 'PUBLISHED').length
+  const displayedPublishedEvents = useCombinedEventKpis
+    ? rawEvents.filter((e) => e.status === 'PUBLISHED').length
     : stats?.publishedEvents ?? ownedEvents.filter((e) => e.status === 'PUBLISHED').length;
-  const displayedDraftEvents = isAssignedAdminOnlyView
-    ? assignedAdminEvents.filter((e) => e.status === 'DRAFT').length
+  const displayedDraftEvents = useCombinedEventKpis
+    ? rawEvents.filter((e) => e.status === 'DRAFT').length
     : stats?.draftEvents ?? ownedEvents.filter((e) => e.status === 'DRAFT').length;
-  const displayedTicketsSold = isAssignedAdminOnlyView
-    ? assignedAdminEvents.reduce((sum, e) => sum + (e.ticketsSold || 0), 0)
+  const displayedTicketsSold = useCombinedEventKpis
+    ? rawEvents.reduce((sum, e) => sum + (e.ticketsSold || 0), 0)
     : stats?.ticketsSold ?? 0;
-  const canViewAssignedRevenue = assignedAdminEvents.some(
-    (e) => isPlatformAdmin || Boolean(e.permissions?.canViewOrders)
-  );
-  const assignedRevenueCents = assignedAdminEvents.reduce(
+
+  // S4R-06: Strictly aggregate revenue ONLY from events where the user holds financial visibility
+  // (event owner, Platform Admin, or Event Admin with canViewOrders: true). Never aggregate or
+  // expose restricted Event Admin revenue, and clearly distinguish restricted from $0.00.
+  const financiallyVisibleEvents = rawEvents.filter(isEventRevenueVisible);
+  const hasRestrictedRevenueEvents =
+    rawEvents.length > 0 && financiallyVisibleEvents.length < rawEvents.length;
+  const permittedRevenueCents = financiallyVisibleEvents.reduce(
     (sum, e) => sum + (e.revenueInCents || 0),
     0
   );
-  const displayedRevenueFormatted = isAssignedAdminOnlyView
-    ? canViewAssignedRevenue
-      ? `$${(assignedRevenueCents / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-      : 'Restricted'
+  const formatUsd = (cents: number) =>
+    `$${(cents / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+  const displayedRevenueFormatted = useCombinedEventKpis
+    ? financiallyVisibleEvents.length === 0
+      ? 'Restricted'
+      : formatUsd(permittedRevenueCents)
     : stats?.grossRevenueFormatted ?? '$0';
+
+  const displayedRevenueSubtitle = useCombinedEventKpis
+    ? financiallyVisibleEvents.length === 0
+      ? 'Requires View Orders permission'
+      : hasRestrictedRevenueEvents
+        ? 'Permitted events only (some restricted)'
+        : isMixedRoleView
+          ? 'Owned & permitted admin events'
+          : 'Permitted assigned events'
+    : 'Completed transactions';
   const filteredEvents = rawEvents.filter((evt) => {
     if (filterStatus === 'PUBLISHED' && evt.status !== 'PUBLISHED') return false;
     if (filterStatus === 'DRAFT' && evt.status !== 'DRAFT') return false;
@@ -373,10 +412,14 @@ export const OrganizerDashboardPage: React.FC<OrganizerDashboardPageProps> = ({
               <Calendar className="w-4 h-4 text-stone-400" />
             </div>
             <div className="font-display font-black text-2xl sm:text-3xl text-stone-900">
-              {isLoadingStats && !isAssignedAdminOnlyView ? '—' : displayedTotalEvents}
+              {isLoadingStats && !useCombinedEventKpis ? '—' : displayedTotalEvents}
             </div>
             <div className="text-[11px] font-mono text-stone-400">
-              {isAssignedAdminOnlyView ? 'Event Admin access' : 'Across all lifecycles'}
+              {isAssignedAdminOnlyView
+                ? 'Event Admin access'
+                : isMixedRoleView
+                  ? `${ownedEvents.length} owned · ${assignedAdminEvents.length} admin`
+                  : 'Across all lifecycles'}
             </div>
           </div>
 
@@ -388,7 +431,7 @@ export const OrganizerDashboardPage: React.FC<OrganizerDashboardPageProps> = ({
               <Radio className="w-4 h-4 text-emerald-600" />
             </div>
             <div className="font-display font-black text-2xl sm:text-3xl text-emerald-800">
-              {isLoadingStats && !isAssignedAdminOnlyView ? '—' : displayedPublishedEvents}
+              {isLoadingStats && !useCombinedEventKpis ? '—' : displayedPublishedEvents}
             </div>
             <div className="text-[11px] font-mono text-stone-400">
               Visible on discovery
@@ -403,7 +446,7 @@ export const OrganizerDashboardPage: React.FC<OrganizerDashboardPageProps> = ({
               <Clock className="w-4 h-4 text-amber-600" />
             </div>
             <div className="font-display font-black text-2xl sm:text-3xl text-amber-800">
-              {isLoadingStats && !isAssignedAdminOnlyView ? '—' : displayedDraftEvents}
+              {isLoadingStats && !useCombinedEventKpis ? '—' : displayedDraftEvents}
             </div>
             <div className="text-[11px] font-mono text-stone-400">
               Unpublished workflows
@@ -418,10 +461,14 @@ export const OrganizerDashboardPage: React.FC<OrganizerDashboardPageProps> = ({
               <Ticket className="w-4 h-4 text-stone-400" />
             </div>
             <div className="font-display font-black text-2xl sm:text-3xl text-stone-900">
-              {isLoadingStats && !isAssignedAdminOnlyView ? '—' : displayedTicketsSold.toLocaleString()}
+              {isLoadingStats && !useCombinedEventKpis ? '—' : displayedTicketsSold.toLocaleString()}
             </div>
             <div className="text-[11px] font-mono text-stone-400">
-              {isAssignedAdminOnlyView ? 'Across assigned events' : 'Actual database sales'}
+              {isAssignedAdminOnlyView
+                ? 'Across assigned events'
+                : isMixedRoleView
+                  ? 'Across owned & assigned events'
+                  : 'Actual database sales'}
             </div>
           </div>
 
@@ -433,12 +480,10 @@ export const OrganizerDashboardPage: React.FC<OrganizerDashboardPageProps> = ({
               <TrendingUp className="w-4 h-4 text-emerald-600" />
             </div>
             <div className="font-display font-black text-2xl sm:text-3xl text-stone-900 truncate">
-              {isLoadingStats && !isAssignedAdminOnlyView ? '—' : displayedRevenueFormatted}
+              {isLoadingStats && !useCombinedEventKpis ? '—' : displayedRevenueFormatted}
             </div>
             <div className="text-[11px] font-mono text-stone-400">
-              {isAssignedAdminOnlyView && !canViewAssignedRevenue
-                ? 'Requires View Orders permission'
-                : 'Completed transactions'}
+              {displayedRevenueSubtitle}
             </div>
           </div>
         </div>
