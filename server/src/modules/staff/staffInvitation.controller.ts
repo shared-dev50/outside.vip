@@ -17,7 +17,9 @@ import {
 import {
   checkRedisRateLimit,
   rotateSession,
+  revokeAllUserSessions,
   setSessionCookie,
+  clearSessionCookie,
   invalidateUserAuthCache,
   getUserAuthCacheVersion,
   populateUserAuthCacheAtomically,
@@ -133,6 +135,7 @@ export async function getInvitationMetadata(
         id: true,
         email: true,
         passwordHash: true,
+        status: true,
       },
     });
 
@@ -157,6 +160,7 @@ export async function getInvitationMetadata(
       ? staffAssignment?.status === 'ACTIVE'
       : true;
 
+    const isAccountActive = !existingUser || existingUser.status === AccountStatus.ACTIVE;
     const hasPassword = Boolean(existingUser && existingUser.passwordHash !== null);
     const currentSessionUser = req.user;
     const isCurrentAccount = Boolean(
@@ -168,7 +172,8 @@ export async function getInvitationMetadata(
       invitation.status === 'ACCEPTED' &&
       !hasPassword &&
       !isCurrentAccount &&
-      isAssignmentActive;
+      isAssignmentActive &&
+      isAccountActive;
 
     res.json({
       success: true,
@@ -246,6 +251,15 @@ export async function requestInvitationOtp(
     where: { email: normalizeEmail(invitation.email) },
     select: { id: true, email: true, passwordHash: true, status: true },
   });
+
+  if (existingUser && existingUser.status !== AccountStatus.ACTIVE) {
+    await invalidateUserAuthCache(existingUser.id);
+    await revokeAllUserSessions(existingUser.id);
+    throw new ForbiddenError(
+      `Your account has been ${String(existingUser.status || 'disabled').toLowerCase()}.`,
+      `ACCOUNT_${existingUser.status || 'DISABLED'}`
+    );
+  }
 
   if (existingUser && existingUser.passwordHash !== null) {
     throw new BadRequestError(
@@ -461,6 +475,16 @@ export async function verifyInvitationOtp(
     select: { id: true, email: true, passwordHash: true, status: true },
   });
 
+  if (existingUser && existingUser.status !== AccountStatus.ACTIVE) {
+    await invalidateUserAuthCache(existingUser.id);
+    await revokeAllUserSessions(existingUser.id);
+    clearSessionCookie(res);
+    throw new ForbiddenError(
+      `Your account has been ${String(existingUser.status || 'disabled').toLowerCase()}.`,
+      `ACCOUNT_${existingUser.status || 'DISABLED'}`
+    );
+  }
+
   if (existingUser && existingUser.passwordHash !== null) {
     throw new BadRequestError(
       'This account has a password set. Please sign in with your password to accept this invitation.',
@@ -569,8 +593,11 @@ export async function verifyInvitationOtp(
     }
 
     const normEmail = normalizeEmail(freshInvite.email);
+    let blockedNonActiveUserId: string | null = null;
 
-    const transactionResult = await prisma.$transaction(async (tx) => {
+    let transactionResult;
+    try {
+      transactionResult = await prisma.$transaction(async (tx) => {
       const lockedInvite = await tx.eventStaffInvitation.findUnique({
         where: { id: freshInvite.id },
       });
@@ -593,6 +620,14 @@ export async function verifyInvitationOtp(
 
         if (!user) {
           throw new NotFoundError('User account not found.', 'USER_NOT_FOUND');
+        }
+
+        if (user.status !== AccountStatus.ACTIVE) {
+          blockedNonActiveUserId = user.id;
+          throw new ForbiddenError(
+            `Your account has been ${String(user.status || 'disabled').toLowerCase()}.`,
+            `ACCOUNT_${user.status || 'DISABLED'}`
+          );
         }
 
         if (user.passwordHash !== null) {
@@ -635,6 +670,14 @@ export async function verifyInvitationOtp(
         where: { email: normEmail },
       });
 
+      if (user && user.status !== AccountStatus.ACTIVE) {
+        blockedNonActiveUserId = user.id;
+        throw new ForbiddenError(
+          `Your account has been ${String(user.status || 'disabled').toLowerCase()}.`,
+          `ACCOUNT_${user.status || 'DISABLED'}`
+        );
+      }
+
       if (user && user.passwordHash !== null) {
         throw new BadRequestError(
           'This account has a password set. Please sign in with your password to accept this invitation.',
@@ -658,6 +701,13 @@ export async function verifyInvitationOtp(
         } catch {
           user = await tx.user.findUnique({ where: { email: normEmail } });
           if (!user) throw new ServiceUnavailableError('Unable to resolve user account.');
+          if (user.status !== AccountStatus.ACTIVE) {
+            blockedNonActiveUserId = user.id;
+            throw new ForbiddenError(
+              `Your account has been ${String(user.status || 'disabled').toLowerCase()}.`,
+              `ACCOUNT_${user.status || 'DISABLED'}`
+            );
+          }
           if (user.passwordHash !== null) {
             throw new BadRequestError(
               'This account has a password set. Please sign in with your password to accept this invitation.',
@@ -665,7 +715,7 @@ export async function verifyInvitationOtp(
             );
           }
         }
-      } else if (!user.emailVerified) {
+      } else if (user.emailVerified !== true) {
         user = await tx.user.update({
           where: { id: user.id },
           data: {
@@ -721,7 +771,25 @@ export async function verifyInvitationOtp(
       });
 
       return { user, staffRecord, isReturningStaff: false };
-    });
+      });
+    } catch (txError) {
+      if (blockedNonActiveUserId) {
+        await invalidateUserAuthCache(blockedNonActiveUserId).catch(() => {});
+        await revokeAllUserSessions(blockedNonActiveUserId).catch(() => {});
+        clearSessionCookie(res);
+      }
+      throw txError;
+    }
+
+    if (transactionResult.user.status !== AccountStatus.ACTIVE) {
+      await invalidateUserAuthCache(transactionResult.user.id);
+      await revokeAllUserSessions(transactionResult.user.id);
+      clearSessionCookie(res);
+      throw new ForbiddenError(
+        `Your account has been ${String(transactionResult.user.status || 'disabled').toLowerCase()}.`,
+        `ACCOUNT_${transactionResult.user.status || 'DISABLED'}`
+      );
+    }
 
     await invalidateUserAuthCache(transactionResult.user.id);
     const ver = await getUserAuthCacheVersion(transactionResult.user.id);
@@ -731,7 +799,7 @@ export async function verifyInvitationOtp(
         email: transactionResult.user.email,
         role: transactionResult.user.role,
         emailVerified: true,
-        accountStatus: AccountStatus.ACTIVE,
+        accountStatus: transactionResult.user.status,
       },
       ver
     );
@@ -784,6 +852,13 @@ export async function acceptInvitationWithSession(
       throw new UnauthorizedError('Authentication required to accept invitation');
     }
 
+    if (!currentUser.emailVerified) {
+      throw new ForbiddenError(
+        'Email verification is required before accepting a staff invitation.',
+        'EMAIL_VERIFICATION_REQUIRED'
+      );
+    }
+
     const invitation = await prisma.eventStaffInvitation.findUnique({
       where: { tokenHash },
     });
@@ -810,6 +885,38 @@ export async function acceptInvitationWithSession(
     }
 
     if (invitation.status === 'ACCEPTED') {
+      const dbUser = await prisma.user.findUnique({
+        where: { id: currentUser.userId },
+        select: {
+          id: true,
+          email: true,
+          role: true,
+          status: true,
+          emailVerified: true,
+        },
+      });
+
+      if (!dbUser) {
+        throw new UnauthorizedError('User account not found');
+      }
+
+      if (dbUser.status !== AccountStatus.ACTIVE) {
+        await invalidateUserAuthCache(dbUser.id);
+        await revokeAllUserSessions(dbUser.id);
+        clearSessionCookie(res);
+        throw new ForbiddenError(
+          `Your account has been ${String(dbUser.status || 'disabled').toLowerCase()}.`,
+          `ACCOUNT_${dbUser.status || 'DISABLED'}`
+        );
+      }
+
+      if (dbUser.emailVerified !== true) {
+        throw new ForbiddenError(
+          'Email verification is required before accepting a staff invitation.',
+          'EMAIL_VERIFICATION_REQUIRED'
+        );
+      }
+
       const existingStaff = await prisma.eventStaff.findUnique({
         where: {
           eventId_userId: {
@@ -832,9 +939,9 @@ export async function acceptInvitationWithSession(
           eventId: invitation.eventId,
           status: 'ACTIVE',
           user: {
-            id: currentUser.userId,
-            email: currentUser.email,
-            role: currentUser.role,
+            id: dbUser.id,
+            email: dbUser.email,
+            role: dbUser.role,
           },
         },
       });
@@ -846,7 +953,10 @@ export async function acceptInvitationWithSession(
       throw new AppError('This invitation has expired.', 410, true, 'INVITATION_EXPIRED');
     }
 
-    const transactionResult = await prisma.$transaction(async (tx) => {
+    let blockedAcceptUserId: string | null = null;
+    let transactionResult;
+    try {
+      transactionResult = await prisma.$transaction(async (tx) => {
       const lockedInvite = await tx.eventStaffInvitation.findUnique({
         where: { id: invitation.id },
       });
@@ -868,6 +978,21 @@ export async function acceptInvitationWithSession(
 
       if (!dbUser) {
         throw new UnauthorizedError('User account not found');
+      }
+
+      if (dbUser.status !== AccountStatus.ACTIVE) {
+        blockedAcceptUserId = dbUser.id;
+        throw new ForbiddenError(
+          `Your account has been ${String(dbUser.status || 'disabled').toLowerCase()}.`,
+          `ACCOUNT_${dbUser.status || 'DISABLED'}`
+        );
+      }
+
+      if (dbUser.emailVerified !== true) {
+        throw new ForbiddenError(
+          'Email verification is required before accepting a staff invitation.',
+          'EMAIL_VERIFICATION_REQUIRED'
+        );
       }
 
       const existingStaff = await tx.eventStaff.findUnique({
@@ -916,7 +1041,15 @@ export async function acceptInvitationWithSession(
       });
 
       return { user: dbUser, staffRecord };
-    });
+      });
+    } catch (txError) {
+      if (blockedAcceptUserId) {
+        await invalidateUserAuthCache(blockedAcceptUserId).catch(() => {});
+        await revokeAllUserSessions(blockedAcceptUserId).catch(() => {});
+        clearSessionCookie(res);
+      }
+      throw txError;
+    }
 
     await invalidateUserAuthCache(transactionResult.user.id);
     const ver = await getUserAuthCacheVersion(transactionResult.user.id);
@@ -926,7 +1059,7 @@ export async function acceptInvitationWithSession(
         email: transactionResult.user.email,
         role: transactionResult.user.role,
         emailVerified: transactionResult.user.emailVerified,
-        accountStatus: transactionResult.user.status ?? AccountStatus.ACTIVE,
+        accountStatus: transactionResult.user.status,
       },
       ver
     );

@@ -79,9 +79,21 @@ export function resetEmailServiceTestOptions(): void {
 
 // Test-only in-memory recorder. Never populated outside NODE_ENV=test.
 export const sentVerificationEmails: VerificationEmailMessage[] = [];
+export const sentLoginOtpEmails: LoginOtpEmailMessage[] = [];
 export const sentStaffInvitationEmails: StaffInvitationEmailMessage[] = [];
 export const sentStaffOtpEmails: StaffOtpEmailMessage[] = [];
 export const sentTeamInvitationEmails: TeamInvitationEmailMessage[] = [];
+
+export interface LoginOtpEmailMessage {
+  to: string;
+  from: string;
+  subject: string;
+  text: string;
+  html: string;
+  code: string;
+  expiresInMinutes: number;
+  sentAt: Date;
+}
 
 export interface TeamInvitationEmailMessage {
   to: string;
@@ -130,6 +142,10 @@ export function resetSentVerificationEmails(): void {
   sentVerificationEmails.length = 0;
 }
 
+export function resetSentLoginOtpEmails(): void {
+  sentLoginOtpEmails.length = 0;
+}
+
 export function resetSentStaffInvitationEmails(): void {
   sentStaffInvitationEmails.length = 0;
 }
@@ -146,6 +162,19 @@ export function getLatestVerificationEmail(email: string): VerificationEmailMess
   for (let i = sentVerificationEmails.length - 1; i >= 0; i--) {
     if (normalizeEmail(sentVerificationEmails[i].to) === normalized) {
       return sentVerificationEmails[i];
+    }
+  }
+  return undefined;
+}
+
+export function getLatestLoginOtpEmail(email: string): LoginOtpEmailMessage | undefined {
+  if (getActiveNodeEnv() !== 'test') {
+    return undefined;
+  }
+  const normalized = normalizeEmail(email);
+  for (let i = sentLoginOtpEmails.length - 1; i >= 0; i--) {
+    if (normalizeEmail(sentLoginOtpEmails[i].to) === normalized) {
+      return sentLoginOtpEmails[i];
     }
   }
   return undefined;
@@ -1093,6 +1122,153 @@ export async function sendTeamInvitationEmail(params: {
 
       console.error(
         `[EmailService] Team invitation email delivery failed for ${maskEmailForLog(to)} after ${attempt} attempt(s): ${safeDetail}`
+      );
+      throw deliveryError;
+    }
+  }
+
+  throw lastError!;
+}
+
+export async function sendLoginOtpEmail(params: {
+  to: string;
+  name?: string;
+  code: string;
+  expiresInMinutes?: number;
+  idempotencyKey?: string;
+}): Promise<EmailDeliveryResult> {
+  const expiresInMinutes = params.expiresInMinutes ?? 10;
+  const from = resolveEmailFrom();
+  const to = sanitizeHeaderField(normalizeEmail(params.to));
+  const cleanName = sanitizeHeaderField(params.name || 'there') || 'there';
+  const cleanCode = sanitizeHeaderField(params.code);
+  const subject = `${cleanCode} is your Outside.vip sign-in code`;
+
+  const text = [
+    `Hi ${cleanName},`,
+    '',
+    `Your Outside.vip sign-in code is: ${cleanCode}`,
+    '',
+    `This single-use code expires in ${expiresInMinutes} minutes.`,
+    'If you did not request this sign-in code, you can safely ignore this email.',
+  ].join('\n');
+
+  const escapedName = escapeHtml(cleanName);
+  const escapedCode = escapeHtml(cleanCode);
+  const escapedExpiry = escapeHtml(String(expiresInMinutes));
+
+  const html = `
+    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0A0A0C; color: #F5F5F7; padding: 32px; border-radius: 16px; max-width: 520px; margin: 0 auto;">
+      <p style="font-size: 12px; text-transform: uppercase; letter-spacing: 0.14em; color: #FF5500; margin: 0 0 8px;">Outside.vip Security</p>
+      <h1 style="font-size: 24px; margin: 0 0 16px; color: #FFFFFF;">Your Sign-In Code</h1>
+      <p style="font-size: 15px; line-height: 1.6; color: #B8B8C2;">
+        Hi ${escapedName}, enter the 6-digit single-use code below to sign in to your Outside.vip account:
+      </p>
+      <div style="margin: 24px 0; padding: 18px 24px; background: #141418; border: 1px solid #2A2A32; border-radius: 12px; text-align: center;">
+        <span style="font-family: monospace; font-size: 32px; font-weight: 700; letter-spacing: 0.25em; color: #FF5500;">${escapedCode}</span>
+      </div>
+      <p style="font-size: 13px; color: #8E8E99; margin-top: 16px;">
+        This code is single-use and expires in <strong>${escapedExpiry} minutes</strong>. If you did not request this code, you can safely ignore this email.
+      </p>
+    </div>
+  `.trim();
+
+  const sentAt = new Date();
+  const activeNodeEnv = getActiveNodeEnv();
+  const shouldUseResendInTest = env.NODE_ENV === 'test' && Boolean(testOptions.useResendInTest);
+
+  if (activeNodeEnv === 'test' && !shouldUseResendInTest) {
+    const message: LoginOtpEmailMessage = {
+      to,
+      from,
+      subject,
+      text,
+      html,
+      code: cleanCode,
+      expiresInMinutes,
+      sentAt,
+    };
+    sentLoginOtpEmails.push(message);
+    return {
+      sent: true,
+      status: 'recorded',
+      provider: 'test-recorder',
+      messageId: `test_rec_${crypto.randomUUID()}`,
+      from,
+      to,
+      expiresInMinutes,
+      sentAt,
+    };
+  }
+
+  const resendApiKey = resolveResendApiKey();
+  if (!resendApiKey) {
+    console.error(
+      `[EmailService] Login OTP email aborted for ${maskEmailForLog(to)}: RESEND_API_KEY is not configured.`
+    );
+    throw new EmailDeliveryError(
+      'Email delivery service is not configured. Please try again later.',
+      {
+        code: 'EMAIL_SERVICE_UNCONFIGURED',
+        providerStatusCode: null,
+        retryable: false,
+      }
+    );
+  }
+
+  const resend = new Resend(resendApiKey);
+  const timeoutMs = getEffectiveTimeoutMs();
+  const retryDelayMs = getEffectiveRetryDelayMs();
+  const maxRetries = getEffectiveMaxRetries();
+  const sensitiveValues = [resendApiKey, cleanCode, params.code];
+
+  let lastError: EmailDeliveryError | null = null;
+  for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
+    try {
+      const { messageId } = await sendSingleResendAttempt({
+        resend,
+        from,
+        to,
+        subject,
+        text,
+        html,
+        idempotencyKey: params.idempotencyKey,
+        timeoutMs,
+      });
+
+      return {
+        sent: true,
+        status: 'sent',
+        provider: 'resend',
+        messageId,
+        from,
+        to,
+        expiresInMinutes,
+        sentAt,
+      };
+    } catch (err) {
+      const deliveryError =
+        err instanceof EmailDeliveryError
+          ? err
+          : classifyProviderError({ message: err instanceof Error ? err.message : undefined });
+      lastError = deliveryError;
+
+      const canRetry = deliveryError.retryable && attempt <= maxRetries;
+      const safeDetail = sanitizeEmailLogMessage(
+        deliveryError.providerDetail || deliveryError.message,
+        sensitiveValues
+      );
+
+      if (canRetry) {
+        console.warn(
+          `[EmailService] Transient Resend failure on attempt ${attempt} for ${maskEmailForLog(to)}: ${safeDetail}. Retrying.`
+        );
+        await sleep(retryDelayMs);
+        continue;
+      }
+
+      console.error(
+        `[EmailService] Login OTP email delivery failed for ${maskEmailForLog(to)} after ${attempt} attempt(s): ${safeDetail}`
       );
       throw deliveryError;
     }

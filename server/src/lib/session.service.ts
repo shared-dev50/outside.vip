@@ -679,3 +679,48 @@ export async function releaseRedisCooldown(key: string): Promise<void> {
     // Best-effort cleanup
   }
 }
+
+/**
+ * Atomically acquires an ownership-tagged cooldown lock in Redis using SET ... NX PX.
+ * Returns the unique `ownerToken` so only the request that acquired this cooldown
+ * can release it on rollback.
+ */
+export async function acquireOwnedRedisCooldown(
+  key: string,
+  cooldownMs: number
+): Promise<{ allowed: boolean; retryAfterSeconds: number; ownerToken: string | null }> {
+  try {
+    const redis = getRedisClient();
+    const fullKey = `cooldown:${key}`;
+    const ownerToken = crypto.randomUUID();
+    const acquired = await redis.setNxPx(fullKey, ownerToken, cooldownMs);
+    if (acquired) {
+      return { allowed: true, retryAfterSeconds: 0, ownerToken };
+    }
+    const pttl = await redis.pttl(fullKey);
+    const retryAfterSeconds =
+      pttl > 0
+        ? Math.max(1, Math.ceil(pttl / 1000))
+        : Math.max(1, Math.ceil(cooldownMs / 1000));
+    return { allowed: false, retryAfterSeconds, ownerToken: null };
+  } catch (err) {
+    wrapRedisError(err);
+  }
+}
+
+/**
+ * Atomically releases a Redis cooldown key ONLY if it is still owned by `ownerToken`.
+ * Prevents slow or failed requests from releasing another request's cooldown.
+ */
+export async function releaseOwnedRedisCooldown(
+  key: string,
+  ownerToken: string | null
+): Promise<boolean> {
+  if (!ownerToken) return false;
+  try {
+    const redis = getRedisClient();
+    return await redis.delLockIfMatches(`cooldown:${key}`, ownerToken);
+  } catch {
+    return false;
+  }
+}
