@@ -1,4 +1,5 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useMemo } from 'react';
+import { QueryClientContext } from '@tanstack/react-query';
 import { User } from '../types';
 import { api, setActiveCsrfToken } from '../lib/api';
 
@@ -6,6 +7,13 @@ interface AuthContextType {
   user: User | null;
   isLoading: boolean;
   login: (email: string, password: string) => Promise<void>;
+  requestLoginOtp?: (email: string) => Promise<{
+    message: string;
+    cooldownSeconds: number;
+    expiresInMinutes: number;
+  }>;
+  verifyLoginOtp?: (email: string, code: string) => Promise<User>;
+  clearSessionState?: () => void;
   register: (data: {
     email: string;
     password: string;
@@ -24,21 +32,28 @@ export const AuthContext = createContext<AuthContextType | undefined>(undefined)
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
+  const queryClient = useContext(QueryClientContext);
 
-  const refreshUser = async (): Promise<User | null> => {
+  const refreshUser = useCallback(async (): Promise<User | null> => {
     try {
       const { user: fetchedUser, csrfToken } = await api.auth.me();
       if (csrfToken) {
         setActiveCsrfToken(csrfToken);
       }
-      setUser(fetchedUser);
+      setUser((prev) => {
+        if (prev && prev.id !== fetchedUser.id) {
+          queryClient?.clear();
+        }
+        return fetchedUser;
+      });
       return fetchedUser;
     } catch {
       setActiveCsrfToken(null);
       setUser(null);
+      queryClient?.clear();
       return null;
     }
-  };
+  }, [queryClient]);
 
   useEffect(() => {
     let isMounted = true;
@@ -55,6 +70,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         if (!isMounted) return;
         setActiveCsrfToken(null);
         setUser(null);
+        queryClient?.clear();
       } finally {
         if (isMounted) {
           setIsLoading(false);
@@ -66,17 +82,43 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return () => {
       isMounted = false;
     };
-  }, []);
+  }, [queryClient]);
 
-  const login = async (email: string, password: string) => {
+  const login = useCallback(async (email: string, password: string) => {
     const data = await api.auth.login({ email, password });
+    queryClient?.clear();
     if (data.csrfToken) {
       setActiveCsrfToken(data.csrfToken);
     }
     setUser(data.user);
-  };
+  }, [queryClient]);
 
-  const register = async (input: {
+  const requestLoginOtp = useCallback(async (email: string) => {
+    const data = await api.auth.requestLoginOtp({ email });
+    return {
+      message: data.message,
+      cooldownSeconds: data.cooldownSeconds,
+      expiresInMinutes: data.expiresInMinutes,
+    };
+  }, []);
+
+  const verifyLoginOtp = useCallback(async (email: string, code: string): Promise<User> => {
+    const data = await api.auth.verifyLoginOtp({ email, code });
+    queryClient?.clear();
+    if (data.csrfToken) {
+      setActiveCsrfToken(data.csrfToken);
+    }
+    setUser(data.user);
+    return data.user;
+  }, [queryClient]);
+
+  const clearSessionState = useCallback(() => {
+    setActiveCsrfToken(null);
+    setUser(null);
+    queryClient?.clear();
+  }, [queryClient]);
+
+  const register = useCallback(async (input: {
     email: string;
     password: string;
     name: string;
@@ -84,30 +126,31 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     organizerDisplayName?: string;
   }) => {
     const data = await api.auth.register(input);
+    queryClient?.clear();
     if (data.csrfToken) {
       setActiveCsrfToken(data.csrfToken);
     }
     setUser(data.user);
-  };
+  }, [queryClient]);
 
-  const verifyEmail = async (code: string): Promise<User> => {
+  const verifyEmail = useCallback(async (code: string): Promise<User> => {
     const data = await api.auth.verifyEmail({ code });
     if (data.csrfToken) {
       setActiveCsrfToken(data.csrfToken);
     }
     setUser(data.user);
     return data.user;
-  };
+  }, []);
 
-  const resendVerification = async () => {
+  const resendVerification = useCallback(async () => {
     const data = await api.auth.resendVerification();
     return {
       message: data.message,
       cooldownSeconds: data.cooldownSeconds,
     };
-  };
+  }, []);
 
-  const logout = async () => {
+  const logout = useCallback(async () => {
     try {
       await api.auth.logout();
     } catch {
@@ -115,22 +158,41 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     } finally {
       setActiveCsrfToken(null);
       setUser(null);
+      queryClient?.clear();
     }
-  };
+  }, [queryClient]);
+
+  const contextValue = useMemo(
+    () => ({
+      user,
+      isLoading,
+      login,
+      requestLoginOtp,
+      verifyLoginOtp,
+      clearSessionState,
+      register,
+      verifyEmail,
+      resendVerification,
+      refreshUser,
+      logout,
+    }),
+    [
+      user,
+      isLoading,
+      login,
+      requestLoginOtp,
+      verifyLoginOtp,
+      clearSessionState,
+      register,
+      verifyEmail,
+      resendVerification,
+      refreshUser,
+      logout,
+    ]
+  );
 
   return (
-    <AuthContext.Provider
-      value={{
-        user,
-        isLoading,
-        login,
-        register,
-        verifyEmail,
-        resendVerification,
-        refreshUser,
-        logout,
-      }}
-    >
+    <AuthContext.Provider value={contextValue}>
       {children}
     </AuthContext.Provider>
   );

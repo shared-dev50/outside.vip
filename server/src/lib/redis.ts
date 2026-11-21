@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import { Redis } from 'ioredis';
 import { env } from '../config/env.js';
 
@@ -70,6 +71,116 @@ else
 end
 `;
 
+export const SET_LOGIN_OTP_RETURNING_PRIOR_LUA = `
+local prior = redis.call('GET', KEYS[1])
+redis.call('SET', KEYS[1], ARGV[1], 'PX', tonumber(ARGV[2]))
+return prior
+`;
+
+export const ROLLBACK_LOGIN_OTP_IF_MATCHES_LUA = `
+local currentRaw = redis.call('GET', KEYS[1])
+if not currentRaw then
+  return 'NOOP_MISSING'
+end
+local okCur, current = pcall(cjson.decode, currentRaw)
+if not okCur or type(current) ~= 'table' or current.generationId ~= ARGV[1] then
+  return 'NOOP_REPLACED'
+end
+local priorRaw = ARGV[2]
+local nowMs = tonumber(ARGV[3])
+local maxAttempts = tonumber(ARGV[4])
+if priorRaw and priorRaw ~= '' then
+  local okPrior, prior = pcall(cjson.decode, priorRaw)
+  if okPrior and type(prior) == 'table' then
+    local priorExpiresAt = tonumber(prior.expiresAt) or 0
+    local priorAttempts = tonumber(prior.attempts) or 0
+    if priorExpiresAt > nowMs and priorAttempts < maxAttempts then
+      local remainingTtl = math.floor(math.max(1000, priorExpiresAt - nowMs))
+      redis.call('SET', KEYS[1], priorRaw, 'PX', remainingTtl)
+      return 'RESTORED_PRIOR'
+    end
+  end
+end
+redis.call('DEL', KEYS[1])
+return 'DELETED'
+`;
+
+export const VERIFY_AND_CONSUME_LOGIN_OTP_LUA = `
+local raw = redis.call('GET', KEYS[1])
+if not raw then
+  return 'NOT_FOUND'
+end
+local ok, record = pcall(cjson.decode, raw)
+if not ok or type(record) ~= 'table' or type(record.codeHash) ~= 'string' then
+  redis.call('DEL', KEYS[1])
+  return 'NOT_FOUND'
+end
+local attempts = tonumber(record.attempts) or 0
+local maxAttempts = tonumber(ARGV[3])
+if attempts >= maxAttempts then
+  return 'MAX_ATTEMPTS'
+end
+local expiresAt = tonumber(record.expiresAt) or 0
+local nowMs = tonumber(ARGV[2])
+if expiresAt <= nowMs then
+  redis.call('DEL', KEYS[1])
+  return 'EXPIRED'
+end
+local storedHash = record.codeHash
+local submittedHash = ARGV[1]
+local isMatch = false
+if #storedHash == #submittedHash then
+  local diff = 0
+  for i = 1, #storedHash do
+    if string.byte(storedHash, i) ~= string.byte(submittedHash, i) then
+      diff = 1
+    end
+  end
+  isMatch = (diff == 0)
+end
+if isMatch then
+  redis.call('DEL', KEYS[1])
+  return 'OK:' .. tostring(record.generationId or '')
+end
+local nextAttempts = attempts + 1
+record.attempts = nextAttempts
+local remainingTtl = math.floor(math.max(1000, expiresAt - nowMs))
+redis.call('SET', KEYS[1], cjson.encode(record), 'PX', remainingTtl)
+if nextAttempts >= maxAttempts then
+  return 'MAX_ATTEMPTS'
+end
+return 'INVALID:' .. tostring(nextAttempts)
+`;
+
+export type LoginOtpRollbackResult =
+  | 'RESTORED_PRIOR'
+  | 'DELETED'
+  | 'NOOP_MISSING'
+  | 'NOOP_REPLACED';
+
+export type LoginOtpVerifyResult =
+  | { status: 'OK'; generationId: string }
+  | { status: 'NOT_FOUND' }
+  | { status: 'EXPIRED' }
+  | { status: 'MAX_ATTEMPTS' }
+  | { status: 'INVALID'; attempts: number };
+
+function parseLoginOtpVerifyLuaResult(raw: string): LoginOtpVerifyResult {
+  if (raw.startsWith('OK:')) {
+    return { status: 'OK', generationId: raw.slice(3) };
+  }
+  if (raw === 'EXPIRED') {
+    return { status: 'EXPIRED' };
+  }
+  if (raw === 'MAX_ATTEMPTS') {
+    return { status: 'MAX_ATTEMPTS' };
+  }
+  if (raw.startsWith('INVALID:')) {
+    return { status: 'INVALID', attempts: parseInt(raw.slice(8), 10) || 1 };
+  }
+  return { status: 'NOT_FOUND' };
+}
+
 export interface RedisStoreClient {
   get(key: string): Promise<string | null>;
   setPx(key: string, value: string, ttlMs: number): Promise<void>;
@@ -82,6 +193,24 @@ export interface RedisStoreClient {
     ttlMs: number
   ): Promise<boolean>;
   extendLockIfMatches(key: string, lockId: string, ttlMs: number): Promise<boolean>;
+  setLoginOtpReturningPrior(
+    otpKey: string,
+    newRecordJson: string,
+    ttlMs: number
+  ): Promise<string | null>;
+  rollbackLoginOtpIfMatches(
+    otpKey: string,
+    expectedGenerationId: string,
+    priorRecordJson: string | null,
+    nowMs: number,
+    maxAttempts: number
+  ): Promise<LoginOtpRollbackResult>;
+  verifyAndConsumeLoginOtp(
+    otpKey: string,
+    submittedHash: string,
+    nowMs: number,
+    maxAttempts: number
+  ): Promise<LoginOtpVerifyResult>;
   del(...keys: string[]): Promise<number>;
   pttl(key: string): Promise<number>;
   pexpire(key: string, ttlMs: number): Promise<number>;
@@ -200,6 +329,69 @@ class IoRedisStoreAdapter implements RedisStoreClient {
       Math.max(1, Math.floor(ttlMs)).toString()
     );
     return Number(res) === 1;
+  }
+
+  async setLoginOtpReturningPrior(
+    otpKey: string,
+    newRecordJson: string,
+    ttlMs: number
+  ): Promise<string | null> {
+    assertRedisAvailable();
+    const res = await this.client.eval(
+      SET_LOGIN_OTP_RETURNING_PRIOR_LUA,
+      1,
+      otpKey,
+      newRecordJson,
+      Math.max(1, Math.floor(ttlMs)).toString()
+    );
+    return typeof res === 'string' ? res : null;
+  }
+
+  async rollbackLoginOtpIfMatches(
+    otpKey: string,
+    expectedGenerationId: string,
+    priorRecordJson: string | null,
+    nowMs: number,
+    maxAttempts: number
+  ): Promise<LoginOtpRollbackResult> {
+    assertRedisAvailable();
+    const res = await this.client.eval(
+      ROLLBACK_LOGIN_OTP_IF_MATCHES_LUA,
+      1,
+      otpKey,
+      expectedGenerationId,
+      priorRecordJson ?? '',
+      Math.floor(nowMs).toString(),
+      Math.floor(maxAttempts).toString()
+    );
+    const str = String(res);
+    if (
+      str === 'RESTORED_PRIOR' ||
+      str === 'DELETED' ||
+      str === 'NOOP_MISSING' ||
+      str === 'NOOP_REPLACED'
+    ) {
+      return str;
+    }
+    return 'NOOP_REPLACED';
+  }
+
+  async verifyAndConsumeLoginOtp(
+    otpKey: string,
+    submittedHash: string,
+    nowMs: number,
+    maxAttempts: number
+  ): Promise<LoginOtpVerifyResult> {
+    assertRedisAvailable();
+    const res = await this.client.eval(
+      VERIFY_AND_CONSUME_LOGIN_OTP_LUA,
+      1,
+      otpKey,
+      submittedHash,
+      Math.floor(nowMs).toString(),
+      Math.floor(maxAttempts).toString()
+    );
+    return parseLoginOtpVerifyLuaResult(String(res));
   }
 
   async del(...keys: string[]): Promise<number> {
@@ -403,6 +595,115 @@ class AtomicMemoryRedisAdapter implements RedisStoreClient {
       return true;
     }
     return false;
+  }
+
+  async setLoginOtpReturningPrior(
+    otpKey: string,
+    newRecordJson: string,
+    ttlMs: number
+  ): Promise<string | null> {
+    assertRedisAvailable();
+    const existing = this.getValidStringEntry(otpKey);
+    const prior = existing ? existing.value : null;
+    this.kv.set(otpKey, {
+      value: newRecordJson,
+      expiresAt: Date.now() + Math.max(1, Math.floor(ttlMs)),
+    });
+    return prior;
+  }
+
+  async rollbackLoginOtpIfMatches(
+    otpKey: string,
+    expectedGenerationId: string,
+    priorRecordJson: string | null,
+    nowMs: number,
+    maxAttempts: number
+  ): Promise<LoginOtpRollbackResult> {
+    assertRedisAvailable();
+    const currentEntry = this.getValidStringEntry(otpKey);
+    if (!currentEntry) {
+      return 'NOOP_MISSING';
+    }
+    let current: any;
+    try {
+      current = JSON.parse(currentEntry.value);
+    } catch {
+      return 'NOOP_REPLACED';
+    }
+    if (!current || typeof current !== 'object' || current.generationId !== expectedGenerationId) {
+      return 'NOOP_REPLACED';
+    }
+    if (priorRecordJson) {
+      try {
+        const prior = JSON.parse(priorRecordJson);
+        const priorExpiresAt = Number(prior?.expiresAt) || 0;
+        const priorAttempts = Number(prior?.attempts) || 0;
+        if (prior && typeof prior === 'object' && priorExpiresAt > nowMs && priorAttempts < maxAttempts) {
+          const remainingTtl = Math.max(1_000, priorExpiresAt - nowMs);
+          this.kv.set(otpKey, {
+            value: priorRecordJson,
+            expiresAt: Date.now() + remainingTtl,
+          });
+          return 'RESTORED_PRIOR';
+        }
+      } catch {
+        // Malformed prior record: fall through to delete
+      }
+    }
+    this.kv.delete(otpKey);
+    return 'DELETED';
+  }
+
+  async verifyAndConsumeLoginOtp(
+    otpKey: string,
+    submittedHash: string,
+    nowMs: number,
+    maxAttempts: number
+  ): Promise<LoginOtpVerifyResult> {
+    assertRedisAvailable();
+    const entry = this.getValidStringEntry(otpKey);
+    if (!entry) {
+      return { status: 'NOT_FOUND' };
+    }
+    let record: any;
+    try {
+      record = JSON.parse(entry.value);
+    } catch {
+      this.kv.delete(otpKey);
+      return { status: 'NOT_FOUND' };
+    }
+    if (!record || typeof record !== 'object' || typeof record.codeHash !== 'string') {
+      this.kv.delete(otpKey);
+      return { status: 'NOT_FOUND' };
+    }
+    const attempts = Number(record.attempts) || 0;
+    if (attempts >= maxAttempts) {
+      return { status: 'MAX_ATTEMPTS' };
+    }
+    const expiresAt = Number(record.expiresAt) || 0;
+    if (expiresAt <= nowMs) {
+      this.kv.delete(otpKey);
+      return { status: 'EXPIRED' };
+    }
+    const storedBuf = Buffer.from(record.codeHash, 'utf8');
+    const submittedBuf = Buffer.from(submittedHash, 'utf8');
+    const isMatch =
+      storedBuf.length === submittedBuf.length && crypto.timingSafeEqual(storedBuf, submittedBuf);
+    if (isMatch) {
+      this.kv.delete(otpKey);
+      return { status: 'OK', generationId: String(record.generationId || '') };
+    }
+    const nextAttempts = attempts + 1;
+    record.attempts = nextAttempts;
+    const remainingTtl = Math.max(1_000, expiresAt - nowMs);
+    this.kv.set(otpKey, {
+      value: JSON.stringify(record),
+      expiresAt: Date.now() + remainingTtl,
+    });
+    if (nextAttempts >= maxAttempts) {
+      return { status: 'MAX_ATTEMPTS' };
+    }
+    return { status: 'INVALID', attempts: nextAttempts };
   }
 
   async del(...keys: string[]): Promise<number> {

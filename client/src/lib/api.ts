@@ -173,19 +173,22 @@ export class ApiError extends Error {
   public details?: Array<{ field: string; message: string }>;
   public data?: any;
   public code?: string;
+  public retryAfter?: number;
 
   constructor(
     message: string,
     statusCode: number,
     details?: Array<{ field: string; message: string }>,
     data?: any,
-    code?: string
+    code?: string,
+    retryAfter?: number
   ) {
     super(message);
     this.statusCode = statusCode;
     this.details = details;
     this.data = data;
     this.code = code;
+    this.retryAfter = retryAfter;
   }
 }
 
@@ -246,8 +249,23 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
       'An unexpected error occurred';
     const statusCode = json.error?.statusCode || response.status;
     const code = (json.error as any)?.code || (json.data as any)?.result;
+    const rawBodyRetryAfter = (json.error as any)?.retryAfter;
+    const rawHeaderRetryAfter =
+      typeof response.headers?.get === 'function'
+        ? response.headers.get('retry-after')
+        : null;
+    const parsedHeaderRetryAfter =
+      rawHeaderRetryAfter !== null && rawHeaderRetryAfter !== ''
+        ? Number(rawHeaderRetryAfter)
+        : NaN;
+    const retryAfter =
+      typeof rawBodyRetryAfter === 'number' && Number.isFinite(rawBodyRetryAfter) && rawBodyRetryAfter > 0
+        ? rawBodyRetryAfter
+        : Number.isFinite(parsedHeaderRetryAfter) && parsedHeaderRetryAfter > 0
+          ? parsedHeaderRetryAfter
+          : undefined;
 
-    throw new ApiError(message, statusCode, json.error?.details, json.data, code);
+    throw new ApiError(message, statusCode, json.error?.details, json.data, code, retryAfter);
   }
 
   return (json as any).data !== undefined ? (json as any).data : (json as any);
@@ -660,6 +678,19 @@ export const api = {
       request<{ user: User; csrfToken?: string }>('/auth/login', {
         method: 'POST',
         body: JSON.stringify(credentials),
+      }),
+    requestLoginOtp: (payload: { email: string }) =>
+      request<{ message: string; cooldownSeconds: number; expiresInMinutes: number }>(
+        '/auth/otp/request',
+        {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        }
+      ),
+    verifyLoginOtp: (payload: { email: string; code: string }) =>
+      request<{ user: User; csrfToken?: string }>('/auth/otp/verify', {
+        method: 'POST',
+        body: JSON.stringify(payload),
       }),
     register: (data: { email: string; password: string; name: string; role?: string; organizerDisplayName?: string }) =>
       request<{ user: User; csrfToken?: string; verificationRequired?: boolean }>('/auth/register', {

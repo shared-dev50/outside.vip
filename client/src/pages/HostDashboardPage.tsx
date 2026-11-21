@@ -31,13 +31,15 @@ import { SocialShareModal } from '../components/promotions/SocialShareModal';
 export interface HostDashboardPageProps {
   initialEvents?: HostAssignedEventItem[];
   initialError?: string | null;
+  initialAnalyticsError?: (Error & { statusCode?: number; status?: number }) | null;
 }
 
 export const HostDashboardPage: React.FC<HostDashboardPageProps> = ({
   initialEvents,
   initialError,
+  initialAnalyticsError,
 }) => {
-  const { user } = useAuth();
+  const { user, clearSessionState } = useAuth();
   const queryClient = useQueryClient();
 
   // Background theming
@@ -98,23 +100,46 @@ export const HostDashboardPage: React.FC<HostDashboardPageProps> = ({
   // Query: Host Private Analytics for active event
   const {
     data: analyticsData,
-    isLoading: isLoadingAnalytics,
+    isLoading: rawIsLoadingAnalytics,
     isFetching: isFetchingAnalytics,
-    error: analyticsError,
+    error: queryAnalyticsError,
     refetch: refetchAnalytics,
   } = useQuery({
     queryKey: ['host-analytics', activeEvent?.id],
     queryFn: () => api.host.getAnalytics(activeEvent!.id),
-    enabled: Boolean(activeEvent?.id),
+    enabled: Boolean(activeEvent?.id) && initialAnalyticsError === undefined,
   });
 
+  const analyticsError = initialAnalyticsError !== undefined ? initialAnalyticsError : queryAnalyticsError;
+  const isLoadingAnalytics = initialAnalyticsError !== undefined ? false : rawIsLoadingAnalytics;
+
+  const eventsErrorStatus = (eventsError as any)?.statusCode || (eventsError as any)?.status;
+  const analyticsErrorStatus = (analyticsError as any)?.statusCode || (analyticsError as any)?.status;
+  const isHostAccessRevoked = analyticsErrorStatus === 403;
+
+  // Handle genuine 401 session expiration cleanly (never treat 403 authorization denials as session expiry)
+  useEffect(() => {
+    if (eventsErrorStatus === 401 || analyticsErrorStatus === 401) {
+      clearSessionState?.();
+    }
+  }, [eventsErrorStatus, analyticsErrorStatus, clearSessionState]);
+
+  // Reconcile cached Host assignments if active event analytics fails with 403 (revoked membership)
+  useEffect(() => {
+    if (isHostAccessRevoked && initialEvents === undefined) {
+      queryClient.invalidateQueries({ queryKey: ['host-events'] });
+    }
+  }, [isHostAccessRevoked, initialEvents, queryClient]);
+
   // Verify that analyticsData matches the currently active host link to prevent stale data leaking during event switches
+  // Never mask an actual analytics error (e.g. 403 revoked Host membership) behind a loading indicator.
   const isAnalyticsForCurrentEvent = Boolean(
     !activeHostLink || (analyticsData?.link && analyticsData.link.id === activeHostLink.id)
   );
   const isActuallyLoadingAnalytics =
-    isLoadingAnalytics || (Boolean(activeEvent?.id) && !isAnalyticsForCurrentEvent);
-  const traffic = !isActuallyLoadingAnalytics ? analyticsData?.traffic : null;
+    !analyticsError &&
+    (isLoadingAnalytics || (Boolean(activeEvent?.id) && !isAnalyticsForCurrentEvent));
+  const traffic = !isActuallyLoadingAnalytics && !analyticsError ? analyticsData?.traffic : null;
 
   // Mutation: Customize Slug
   const customizeSlugMutation = useMutation({
@@ -134,6 +159,15 @@ export const HostDashboardPage: React.FC<HostDashboardPageProps> = ({
       );
     },
     onError: (err: any) => {
+      const status = err?.statusCode || err?.status;
+      if (status === 401) {
+        clearSessionState?.();
+        return;
+      }
+      if (status === 403) {
+        queryClient.invalidateQueries({ queryKey: ['host-events'] });
+        queryClient.invalidateQueries({ queryKey: ['host-analytics', activeEvent?.id] });
+      }
       const msg = err?.message || 'Failed to customize slug. Please choose a different slug.';
       setSlugError(msg);
     },
@@ -541,17 +575,36 @@ export const HostDashboardPage: React.FC<HostDashboardPageProps> = ({
                       <span>Loading private traffic analytics...</span>
                     </div>
                   ) : analyticsError ? (
-                    <div className="py-12 text-center space-y-2 bg-stone-50 rounded-xl border border-stone-200">
-                      <AlertCircle className="w-5 h-5 text-rose-600 mx-auto" />
-                      <p className="text-xs text-stone-600 font-mono">
-                        {analyticsError instanceof Error ? analyticsError.message : 'Failed to load traffic metrics.'}
+                    <div
+                      role="alert"
+                      className={`py-12 px-6 text-center space-y-3 rounded-xl border ${
+                        isHostAccessRevoked
+                          ? 'bg-rose-50/70 border-rose-200'
+                          : 'bg-stone-50 border-stone-200'
+                      }`}
+                    >
+                      <AlertCircle className="w-6 h-6 text-rose-600 mx-auto" />
+                      <h4 className="font-display font-bold text-stone-900 text-sm">
+                        {isHostAccessRevoked ? 'Host Access Revoked' : 'Unable to Load Traffic Metrics'}
+                      </h4>
+                      <p className="text-xs text-stone-600 font-sans max-w-md mx-auto leading-relaxed">
+                        {isHostAccessRevoked
+                          ? 'Your Event Host membership for this event is no longer active. Contact the event organizer if you believe this is a mistake.'
+                          : analyticsError instanceof Error
+                            ? analyticsError.message
+                            : 'Failed to load traffic metrics.'}
                       </p>
                       <button
                         type="button"
-                        onClick={() => refetchAnalytics()}
-                        className="text-xs font-mono font-bold text-stone-900 underline"
+                        onClick={() => {
+                          refetchEvents();
+                          if (!isHostAccessRevoked) {
+                            refetchAnalytics();
+                          }
+                        }}
+                        className="text-xs font-mono font-bold text-stone-900 underline cursor-pointer"
                       >
-                        Try Again
+                        {isHostAccessRevoked ? 'Refresh Host Assignments' : 'Try Again'}
                       </button>
                     </div>
                   ) : !traffic || (traffic.totalClicks === 0 && traffic.uniqueVisitors === 0) ? (

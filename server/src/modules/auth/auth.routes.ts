@@ -2,6 +2,8 @@ import { Router } from 'express';
 import {
   register,
   login,
+  requestLoginOtp,
+  verifyLoginOtp,
   logout,
   logoutAll,
   listSessions,
@@ -28,6 +30,8 @@ authRouter.all(['/demo', '/demo-login', '/quick-login', '/demo/*'], forbidDemoAu
 authRouter.get('/csrf', getCsrfToken);
 authRouter.post('/register', register);
 authRouter.post('/login', login);
+authRouter.post('/otp/request', requestLoginOtp);
+authRouter.post('/otp/verify', verifyLoginOtp);
 authRouter.post('/logout', logout);
 authRouter.post('/logout-all', requireAuth, requireFreshUserVerification, logoutAll);
 authRouter.get('/sessions', requireAuth, listSessions);

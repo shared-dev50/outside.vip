@@ -1,7 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { PromotionLinkStatus } from '@prisma/client';
 import { prisma } from '../../db/prisma.js';
-import { BadRequestError, UnauthorizedError, NotFoundError } from '../../utils/errors.js';
+import { BadRequestError, ForbiddenError, UnauthorizedError, NotFoundError } from '../../utils/errors.js';
 import { resolveEventAuthorization } from '../eventTeam/eventTeam.permissions.js';
 import {
   createCampaignLink,
@@ -245,7 +245,7 @@ export async function handleCustomizeHostSlug(
     });
 
     if (!hostMember || hostMember.role !== 'HOST' || hostMember.status !== 'ACTIVE') {
-      throw new UnauthorizedError('Active Host membership required');
+      throw new ForbiddenError('Active Event Host membership required to customize promotional slug.');
     }
 
     const hostLink = await prisma.promotionLink.findFirst({

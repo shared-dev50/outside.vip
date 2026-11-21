@@ -80,7 +80,7 @@ export const Navbar: React.FC = () => {
               Discover
             </Link>
             <Link
-              to="orders"
+              to="/orders"
               className={`transition-colors py-1 ${isOrder
                 ? 'text-stone-900 font-bold border-b-2 border-stone-900'
                 : 'text-stone-500 hover:text-stone-900 font-medium'
@@ -89,7 +89,7 @@ export const Navbar: React.FC = () => {
               Orders
             </Link>
              <Link
-              to="atendees"
+              to="/atendees"
               className={`transition-colors py-1 ${isAtendee
                 ? 'text-stone-900 font-bold border-b-2 border-stone-900'
                 : 'text-stone-500 hover:text-stone-900 font-medium'
@@ -244,6 +244,13 @@ export const Navbar: React.FC = () => {
               Organizer Portal
             </Link>
             <Link
+              to="/teams"
+              onClick={() => setMobileMenuOpen(false)}
+              className="block text-stone-600 hover:text-stone-900 py-1.5"
+            >
+              Event Teams
+            </Link>
+            <Link
               to="/host"
               onClick={() => setMobileMenuOpen(false)}
               className="block text-stone-600 hover:text-stone-900 py-1.5"
@@ -284,6 +291,7 @@ export const Navbar: React.FC = () => {
                   } catch {}
                   logout();
                   setMobileMenuOpen(false);
+                  navigate('/');
                 }}
                 className="text-xs text-rose-600 hover:underline"
               >

@@ -14,6 +14,7 @@ import {
 import { calculateCombinedEarnings } from '../checkout/checkout.financials.js';
 import { NotFoundError, ForbiddenError, BadRequestError, ConflictError, UnauthorizedError } from '../../utils/errors.js';
 import { getRedisClient } from '../../lib/redis.js';
+import { invalidateUserAuthCache } from '../../lib/session.service.js';
 import { calculateOccurrences, formatOccurrenceSlugSuffix } from '../events/recurrence.service.js';
 import { assertStripeReadyForPaidPublishing } from '../finance/finance.service.js';
 import { recordAdminAuditLog } from '../../lib/auditLogger.js';
@@ -167,6 +168,13 @@ export async function ensureOrganizerWorkspaceForUser(
         where: { id: user.id },
         data: { role: Role.ORGANIZER },
       });
+      await invalidateUserAuthCache(user.id).catch((cacheErr) => {
+        console.warn('[Organizer] Failed to invalidate user auth cache after role promotion', {
+          userId: user.id,
+          context: 'ensureOrganizerWorkspaceForUser',
+          error: cacheErr instanceof Error ? cacheErr.message : String(cacheErr),
+        });
+      });
     }
 
     return createdProfile;
@@ -255,6 +263,13 @@ export async function upsertOrganizerWorkspace(
       await prisma.user.update({
         where: { id: userId },
         data: { role: Role.ORGANIZER },
+      });
+      await invalidateUserAuthCache(userId).catch((cacheErr) => {
+        console.warn('[Organizer] Failed to invalidate user auth cache after role promotion', {
+          userId,
+          context: 'upsertOrganizerWorkspace',
+          error: cacheErr instanceof Error ? cacheErr.message : String(cacheErr),
+        });
       });
     }
 
@@ -402,8 +417,12 @@ export async function listOrganizerEvents(req: Request, res: Response, next: Nex
 
       // Clean orders array and sensitive/owner-only fields before returning
       const { orders: _, passwordHash: __, ...rest } = event;
+      const accessRole: 'OWNER' | 'ADMIN' = isOwner ? 'OWNER' : 'ADMIN';
       enhanced.push({
         ...rest,
+        isOwner,
+        accessRole,
+        permissions: isOwner ? null : (adminPerms ?? null),
         payoutDetails: null,
         payoutDetailsId: isOwner ? event.payoutDetailsId : null,
         totalCapacity,
@@ -530,6 +549,7 @@ export async function getOrganizerEventById(req: Request, res: Response, next: N
       ticketTiers: enrichedTicketTiers,
       passwordHash: undefined,
       payoutDetails: sanitizedPayout,
+      payoutDetailsId: isOwner ? event.payoutDetailsId : null,
       organizer: sanitizedOrganizer,
     };
 
@@ -1593,6 +1613,7 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
           ...updatedEvent,
           passwordHash: undefined,
           payoutDetails: isOwner ? sanitizePayoutDetails(updatedEvent?.payoutDetails) : null,
+          payoutDetailsId: isOwner ? (updatedEvent?.payoutDetailsId ?? null) : null,
         },
       },
     });
@@ -2184,8 +2205,13 @@ export async function checkInTicket(req: Request, res: Response, next: NextFunct
 
     if (!isOrganizerRole) {
       let hasStaffAccess = false;
+      let hasOwnedPublishedEventAccess = false;
+      const isSpecificGate = Boolean(
+        eventIdOrSlug && eventIdOrSlug !== 'all' && eventIdOrSlug !== 'all_events'
+      );
+
       try {
-        if (eventIdOrSlug && eventIdOrSlug !== 'all' && eventIdOrSlug !== 'all_events') {
+        if (isSpecificGate) {
           const staffRecord = await prisma.eventStaff.findFirst({
             where: {
               userId: scannerUserId,
@@ -2211,10 +2237,100 @@ export async function checkInTicket(req: Request, res: Response, next: NextFunct
         if (err?.code !== 'P2021') throw err;
       }
 
+      // S4R-03: Align checkInTicket with getScannerGates — an event owner can always check in
+      // tickets for their own PUBLISHED event based on organizerId === authenticatedUserId,
+      // independently of a potentially stale global user.role (e.g. ATTENDEE).
+      // Hosts and Event Admins receive zero implicit scanner authorization.
       if (!hasStaffAccess) {
+        const ownedEvent = await prisma.event.findFirst({
+          where: isSpecificGate
+            ? {
+                organizerId: scannerUserId,
+                status: EventStatus.PUBLISHED,
+                OR: [{ id: eventIdOrSlug }, { slug: eventIdOrSlug }],
+              }
+            : {
+                organizerId: scannerUserId,
+                status: EventStatus.PUBLISHED,
+              },
+          select: { id: true },
+        });
+        hasOwnedPublishedEventAccess = !!ownedEvent;
+      }
+
+      if (!hasStaffAccess && !hasOwnedPublishedEventAccess) {
         throw new ForbiddenError('You do not have permission to check in attendees for this event');
       }
     }
+
+    const assertIdempotencyReplayAuthorized = async (record: any): Promise<void> => {
+      if (isAdmin) {
+        return;
+      }
+
+      // Post-deployment organizer-owned check-in replays explicitly carry authorizedVia === 'OWNER'.
+      // Never trust missing legacy metadata as proof of authorization (S2R-04).
+      if (isOrganizerRole && record?.authorizedVia === 'OWNER') {
+        return;
+      }
+
+      let targetEventId: string | null =
+        typeof record?.resolvedEventId === 'string' && record.resolvedEventId.trim()
+          ? record.resolvedEventId.trim()
+          : null;
+
+      if (!targetEventId && typeof record?.ticketId === 'string' && record.ticketId.trim()) {
+        const ticketRow = await prisma.ticket.findUnique({
+          where: { id: record.ticketId.trim() },
+          select: { eventId: true },
+        });
+        targetEventId = ticketRow?.eventId ?? null;
+      }
+
+      if (!targetEventId && typeof record?.eventId === 'string' && record.eventId.trim()) {
+        const ev = await prisma.event.findFirst({
+          where: { OR: [{ id: record.eventId.trim() }, { slug: record.eventId.trim() }] },
+          select: { id: true },
+        });
+        targetEventId = ev?.id ?? null;
+      }
+
+      if (!targetEventId) {
+        throw new ForbiddenError('You do not have permission to check in attendees for this event');
+      }
+
+      // S4R-03: Allow replay for event owners (regardless of stale global user.role) when the
+      // record was OWNER-authorized or legacy (no authorizedVia) AND current DB ownership of the
+      // PUBLISHED event is verified. Never allow a STAFF-authorized record to bypass EventStaff
+      // revocation (F-07).
+      if (record?.authorizedVia === 'OWNER' || !record?.authorizedVia) {
+        const ownedEvent = await prisma.event.findFirst({
+          where: {
+            id: targetEventId,
+            organizerId: scannerUserId,
+            status: EventStatus.PUBLISHED,
+          },
+          select: { id: true },
+        });
+        if (ownedEvent) {
+          return;
+        }
+      }
+
+      const staffMember = await prisma.eventStaff.findUnique({
+        where: {
+          eventId_userId: {
+            eventId: targetEventId,
+            userId: scannerUserId,
+          },
+        },
+        select: { status: true },
+      });
+
+      if (!staffMember || staffMember.status !== 'ACTIVE') {
+        throw new ForbiddenError('You do not have permission to check in attendees for this event');
+      }
+    };
 
     // Safe check-in retry idempotency via Redis
     if (idempotencyKey) {
@@ -2249,6 +2365,7 @@ export async function checkInTicket(req: Request, res: Response, next: NextFunct
         }
 
         if (record.status === 'COMPLETED') {
+          await assertIdempotencyReplayAuthorized(record);
           res.status(record.responseStatus).json(record.responseBody);
           return;
         }
@@ -2261,6 +2378,7 @@ export async function checkInTicket(req: Request, res: Response, next: NextFunct
             if (pollRaw) {
               const pollRecord = JSON.parse(pollRaw);
               if (pollRecord.status === 'COMPLETED') {
+                await assertIdempotencyReplayAuthorized(pollRecord);
                 res.status(pollRecord.responseStatus).json(pollRecord.responseBody);
                 return;
               }
@@ -2299,6 +2417,7 @@ export async function checkInTicket(req: Request, res: Response, next: NextFunct
           if (pollRaw) {
             const pollRecord = JSON.parse(pollRaw);
             if (pollRecord.status === 'COMPLETED') {
+              await assertIdempotencyReplayAuthorized(pollRecord);
               res.status(pollRecord.responseStatus).json(pollRecord.responseBody);
               return;
             }
@@ -2620,6 +2739,8 @@ export async function checkInTicket(req: Request, res: Response, next: NextFunct
                 scannerUserId,
                 token,
                 eventId: (eventIdOrSlug || '').trim(),
+                resolvedEventId: ticket.eventId,
+                authorizedVia: isStaff ? 'STAFF' : isOwner ? 'OWNER' : 'ADMIN',
                 ticketId: ticket.id,
                 status: 'COMPLETED',
                 responseStatus: 200,
@@ -2949,6 +3070,8 @@ export async function checkInTicket(req: Request, res: Response, next: NextFunct
           scannerUserId,
           token,
           eventId: (eventIdOrSlug || '').trim(),
+          resolvedEventId: ticket.eventId,
+          authorizedVia: isStaff ? 'STAFF' : isOwner ? 'OWNER' : 'ADMIN',
           ticketId: ticket.id,
           status: 'COMPLETED',
           responseStatus: 200,

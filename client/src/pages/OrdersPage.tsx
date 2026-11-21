@@ -1,5 +1,6 @@
-import { api } from "@/lib/api";
-import { OrderStatus } from "@/types";
+import { api } from "../lib/api";
+import { useOptionalAuth } from "../context/AuthContext";
+import { OrderStatus } from "../types";
 import { useQuery } from "@tanstack/react-query";
 import { AlertCircle, ChevronDown, Search, X } from "lucide-react";
 import { useEffect, useState } from "react";
@@ -7,6 +8,8 @@ import { useSearchParams } from "react-router-dom";
 
 export const OrdersPage: React.FC = () => {
   const [searchParams, setSearchParams] = useSearchParams();
+  const auth = useOptionalAuth();
+  const clearSessionState = auth?.clearSessionState;
 
   const initialStatus = (searchParams.get("status") as OrderStatus) || undefined;
   const initialEventId = searchParams.get("eventid") || "";
@@ -43,6 +46,13 @@ export const OrdersPage: React.FC = () => {
         sortOrder: "asc",
       }),
   });
+
+  const ordersErrorStatus = (error as any)?.statusCode || (error as any)?.status;
+  useEffect(() => {
+    if (ordersErrorStatus === 401) {
+      clearSessionState?.();
+    }
+  }, [ordersErrorStatus, clearSessionState]);
 
   const orders = data?.orders;
 

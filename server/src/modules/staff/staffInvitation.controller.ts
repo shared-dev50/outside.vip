@@ -17,7 +17,9 @@ import {
 import {
   checkRedisRateLimit,
   rotateSession,
+  revokeAllUserSessions,
   setSessionCookie,
+  clearSessionCookie,
   invalidateUserAuthCache,
   getUserAuthCacheVersion,
   populateUserAuthCacheAtomically,
@@ -123,52 +125,71 @@ export async function getInvitationMetadata(
     }
 
     const now = new Date();
-    if (invitation.status === 'PENDING' && invitation.expiresAt.getTime() <= now.getTime()) {
+    if (
+      invitation.status === 'EXPIRED' ||
+      (invitation.status === 'PENDING' && invitation.expiresAt.getTime() <= now.getTime())
+    ) {
       throw new AppError('This invitation has expired.', 410, true, 'INVITATION_EXPIRED');
     }
 
-    const existingUser = await prisma.user.findUnique({
-      where: { email: normalizeEmail(invitation.email) },
-      select: {
-        id: true,
-        email: true,
-        passwordHash: true,
-      },
-    });
-
-    // Check existing EventStaff assignment for accepted invitations
-    let staffAssignment: { id: string; status: string } | null = null;
-    if (existingUser) {
-      staffAssignment = await prisma.eventStaff.findUnique({
-        where: {
-          eventId_userId: {
-            eventId: invitation.eventId,
-            userId: existingUser.id,
-          },
-        },
-        select: {
-          id: true,
-          status: true,
-        },
-      });
-    }
-
-    const isAssignmentActive = invitation.status === 'ACCEPTED'
-      ? staffAssignment?.status === 'ACTIVE'
-      : true;
-
-    const hasPassword = Boolean(existingUser && existingUser.passwordHash !== null);
     const currentSessionUser = req.user;
     const isCurrentAccount = Boolean(
       currentSessionUser &&
         normalizeEmail(currentSessionUser.email) === normalizeEmail(invitation.email)
     );
-    const requiresLogin = hasPassword && !isCurrentAccount;
-    const canResumeSession =
-      invitation.status === 'ACCEPTED' &&
-      !hasPassword &&
-      !isCurrentAccount &&
-      isAssignmentActive;
+
+    const isAcceptedUnauthenticated =
+      invitation.status === 'ACCEPTED' && !isCurrentAccount;
+
+    let existingUser: {
+      id: string;
+      email: string;
+      passwordHash: string | null;
+      status: AccountStatus;
+    } | null = null;
+    let staffAssignment: { id: string; status: string } | null = null;
+
+    if (!isAcceptedUnauthenticated) {
+      existingUser = await prisma.user.findUnique({
+        where: { email: normalizeEmail(invitation.email) },
+        select: {
+          id: true,
+          email: true,
+          passwordHash: true,
+          status: true,
+        },
+      });
+
+      if (existingUser) {
+        staffAssignment = await prisma.eventStaff.findUnique({
+          where: {
+            eventId_userId: {
+              eventId: invitation.eventId,
+              userId: existingUser.id,
+            },
+          },
+          select: {
+            id: true,
+            status: true,
+          },
+        });
+      }
+    }
+
+    const isAssignmentActive = isAcceptedUnauthenticated
+      ? undefined
+      : invitation.status === 'ACCEPTED'
+        ? staffAssignment?.status === 'ACTIVE'
+        : true;
+
+    const hasPassword = isAcceptedUnauthenticated
+      ? false
+      : Boolean(existingUser && existingUser.passwordHash !== null);
+    const requiresLogin =
+      invitation.status === 'PENDING' && hasPassword && !isCurrentAccount;
+    // STG2-02 (AUTH-S02): Accepted invitation tokens are one-time role-grant credentials
+    // and can never be reused to authenticate or resume a scanner session.
+    const canResumeSession = false;
 
     res.json({
       success: true,
@@ -181,7 +202,7 @@ export async function getInvitationMetadata(
           hasPassword,
           requiresLogin,
           isCurrentAccount,
-          isAssignmentActive,
+          ...(isAssignmentActive !== undefined ? { isAssignmentActive } : {}),
           canResumeSession,
         },
         event: {
@@ -237,6 +258,13 @@ export async function requestInvitationOtp(
     );
   }
 
+  if (invitation.status === 'ACCEPTED') {
+    throw new ConflictError(
+      'This invitation has already been accepted. Returning scanner staff must sign in directly at /scanner.',
+      'INVITATION_ALREADY_ACCEPTED'
+    );
+  }
+
   const now = Date.now();
   if (invitation.status === 'EXPIRED' || invitation.expiresAt.getTime() <= now) {
     throw new AppError('This invitation has expired.', 410, true, 'INVITATION_EXPIRED');
@@ -247,34 +275,20 @@ export async function requestInvitationOtp(
     select: { id: true, email: true, passwordHash: true, status: true },
   });
 
+  if (existingUser && existingUser.status !== AccountStatus.ACTIVE) {
+    await invalidateUserAuthCache(existingUser.id);
+    await revokeAllUserSessions(existingUser.id);
+    throw new ForbiddenError(
+      `Your account has been ${String(existingUser.status || 'disabled').toLowerCase()}.`,
+      `ACCOUNT_${existingUser.status || 'DISABLED'}`
+    );
+  }
+
   if (existingUser && existingUser.passwordHash !== null) {
     throw new BadRequestError(
       'This account has a password set. Please sign in with your password to accept this invitation.',
       'PASSWORD_LOGIN_REQUIRED'
     );
-  }
-
-  if (invitation.status === 'ACCEPTED') {
-    if (!existingUser) {
-      throw new NotFoundError('User account not found', 'USER_NOT_FOUND');
-    }
-
-    const staffAssignment = await prisma.eventStaff.findUnique({
-      where: {
-        eventId_userId: {
-          eventId: invitation.eventId,
-          userId: existingUser.id,
-        },
-      },
-      select: { id: true, status: true },
-    });
-
-    if (!staffAssignment || staffAssignment.status !== 'ACTIVE') {
-      throw new ForbiddenError(
-        'Your staff assignment for this event is no longer active.',
-        'STAFF_ASSIGNMENT_NOT_ACTIVE'
-      );
-    }
   }
 
   const ip = req.ip || 'unknown';
@@ -313,26 +327,19 @@ export async function requestInvitationOtp(
       where: { id: invitation.id },
     });
 
-    if (!freshInvite || (freshInvite.status !== 'PENDING' && freshInvite.status !== 'ACCEPTED')) {
-      throw new BadRequestError('Invitation is no longer pending or accepted.', 'INVITATION_NOT_PENDING');
+    if (!freshInvite) {
+      throw new NotFoundError('Invitation not found', 'INVITATION_NOT_FOUND');
     }
 
     if (freshInvite.status === 'ACCEPTED') {
-      const freshAssignment = await prisma.eventStaff.findUnique({
-        where: {
-          eventId_userId: {
-            eventId: freshInvite.eventId,
-            userId: existingUser!.id,
-          },
-        },
-        select: { status: true },
-      });
-      if (!freshAssignment || freshAssignment.status !== 'ACTIVE') {
-        throw new ForbiddenError(
-          'Your staff assignment for this event is no longer active.',
-          'STAFF_ASSIGNMENT_NOT_ACTIVE'
-        );
-      }
+      throw new ConflictError(
+        'This invitation has already been accepted. Returning scanner staff must sign in directly at /scanner.',
+        'INVITATION_ALREADY_ACCEPTED'
+      );
+    }
+
+    if (freshInvite.status !== 'PENDING') {
+      throw new BadRequestError('Invitation is no longer pending.', 'INVITATION_NOT_PENDING');
     }
 
     if (
@@ -451,6 +458,13 @@ export async function verifyInvitationOtp(
     );
   }
 
+  if (invitation.status === 'ACCEPTED') {
+    throw new ConflictError(
+      'This invitation has already been accepted. Returning scanner staff must sign in directly at /scanner.',
+      'INVITATION_ALREADY_ACCEPTED'
+    );
+  }
+
   const now = Date.now();
   if (invitation.status === 'EXPIRED' || invitation.expiresAt.getTime() <= now) {
     throw new AppError('This invitation has expired.', 410, true, 'INVITATION_EXPIRED');
@@ -461,34 +475,21 @@ export async function verifyInvitationOtp(
     select: { id: true, email: true, passwordHash: true, status: true },
   });
 
+  if (existingUser && existingUser.status !== AccountStatus.ACTIVE) {
+    await invalidateUserAuthCache(existingUser.id);
+    await revokeAllUserSessions(existingUser.id);
+    clearSessionCookie(res);
+    throw new ForbiddenError(
+      `Your account has been ${String(existingUser.status || 'disabled').toLowerCase()}.`,
+      `ACCOUNT_${existingUser.status || 'DISABLED'}`
+    );
+  }
+
   if (existingUser && existingUser.passwordHash !== null) {
     throw new BadRequestError(
       'This account has a password set. Please sign in with your password to accept this invitation.',
       'PASSWORD_LOGIN_REQUIRED'
     );
-  }
-
-  if (invitation.status === 'ACCEPTED') {
-    if (!existingUser) {
-      throw new NotFoundError('User account not found', 'USER_NOT_FOUND');
-    }
-
-    const staffAssignment = await prisma.eventStaff.findUnique({
-      where: {
-        eventId_userId: {
-          eventId: invitation.eventId,
-          userId: existingUser.id,
-        },
-      },
-      select: { id: true, status: true },
-    });
-
-    if (!staffAssignment || staffAssignment.status !== 'ACTIVE') {
-      throw new ForbiddenError(
-        'Your staff assignment for this event is no longer active.',
-        'STAFF_ASSIGNMENT_NOT_ACTIVE'
-      );
-    }
   }
 
   const redis = getRedisClient();
@@ -508,26 +509,19 @@ export async function verifyInvitationOtp(
       where: { id: invitation.id },
     });
 
-    if (!freshInvite || (freshInvite.status !== 'PENDING' && freshInvite.status !== 'ACCEPTED')) {
-      throw new BadRequestError('Invitation is no longer pending or accepted.', 'INVITATION_NOT_PENDING');
+    if (!freshInvite) {
+      throw new NotFoundError('Invitation not found', 'INVITATION_NOT_FOUND');
     }
 
     if (freshInvite.status === 'ACCEPTED') {
-      const freshAssignment = await prisma.eventStaff.findUnique({
-        where: {
-          eventId_userId: {
-            eventId: freshInvite.eventId,
-            userId: existingUser!.id,
-          },
-        },
-        select: { status: true },
-      });
-      if (!freshAssignment || freshAssignment.status !== 'ACTIVE') {
-        throw new ForbiddenError(
-          'Your staff assignment for this event is no longer active.',
-          'STAFF_ASSIGNMENT_NOT_ACTIVE'
-        );
-      }
+      throw new ConflictError(
+        'This invitation has already been accepted. Returning scanner staff must sign in directly at /scanner.',
+        'INVITATION_ALREADY_ACCEPTED'
+      );
+    }
+
+    if (freshInvite.status !== 'PENDING') {
+      throw new BadRequestError('Invitation is no longer pending.', 'INVITATION_NOT_PENDING');
     }
 
     if (!freshInvite.codeHash || !freshInvite.otpExpiresAt) {
@@ -569,15 +563,25 @@ export async function verifyInvitationOtp(
     }
 
     const normEmail = normalizeEmail(freshInvite.email);
+    let blockedNonActiveUserId: string | null = null;
 
-    const transactionResult = await prisma.$transaction(async (tx) => {
+    let transactionResult;
+    try {
+      transactionResult = await prisma.$transaction(async (tx) => {
       const lockedInvite = await tx.eventStaffInvitation.findUnique({
         where: { id: freshInvite.id },
       });
 
+      if (lockedInvite?.status === 'ACCEPTED') {
+        throw new ConflictError(
+          'This invitation has already been accepted. Returning scanner staff must sign in directly at /scanner.',
+          'INVITATION_ALREADY_ACCEPTED'
+        );
+      }
+
       if (
         !lockedInvite ||
-        (lockedInvite.status !== 'PENDING' && lockedInvite.status !== 'ACCEPTED') ||
+        lockedInvite.status !== 'PENDING' ||
         lockedInvite.expiresAt.getTime() <= Date.now()
       ) {
         throw new ConflictError(
@@ -586,54 +590,17 @@ export async function verifyInvitationOtp(
         );
       }
 
-      if (lockedInvite.status === 'ACCEPTED') {
-        const user = await tx.user.findUnique({
-          where: { email: normEmail },
-        });
-
-        if (!user) {
-          throw new NotFoundError('User account not found.', 'USER_NOT_FOUND');
-        }
-
-        if (user.passwordHash !== null) {
-          throw new BadRequestError(
-            'This account has a password set. Please sign in with your password to accept this invitation.',
-            'PASSWORD_LOGIN_REQUIRED'
-          );
-        }
-
-        const existingStaff = await tx.eventStaff.findUnique({
-          where: {
-            eventId_userId: {
-              eventId: lockedInvite.eventId,
-              userId: user.id,
-            },
-          },
-        });
-
-        if (!existingStaff || existingStaff.status !== 'ACTIVE') {
-          throw new ForbiddenError(
-            'Staff assignment is no longer active for this event.',
-            'STAFF_ASSIGNMENT_NOT_ACTIVE'
-          );
-        }
-
-        await tx.eventStaffInvitation.update({
-          where: { id: lockedInvite.id },
-          data: {
-            codeHash: null,
-            otpExpiresAt: null,
-            otpSentAt: null,
-            attempts: 0,
-          },
-        });
-
-        return { user, staffRecord: existingStaff, isReturningStaff: true };
-      }
-
       let user = await tx.user.findUnique({
         where: { email: normEmail },
       });
+
+      if (user && user.status !== AccountStatus.ACTIVE) {
+        blockedNonActiveUserId = user.id;
+        throw new ForbiddenError(
+          `Your account has been ${String(user.status || 'disabled').toLowerCase()}.`,
+          `ACCOUNT_${user.status || 'DISABLED'}`
+        );
+      }
 
       if (user && user.passwordHash !== null) {
         throw new BadRequestError(
@@ -642,30 +609,48 @@ export async function verifyInvitationOtp(
         );
       }
 
+      // S2R-03: Claim the PENDING invitation atomically BEFORE any User or EventStaff writes
+      // so PostgreSQL acquires the invitation row lock immediately and serializes concurrent
+      // accept/verify-otp transactions cleanly without P2002 / aborted-tx (25P02) collisions.
+      const acceptedUpdate = await tx.eventStaffInvitation.updateMany({
+        where: {
+          id: lockedInvite.id,
+          status: 'PENDING',
+        },
+        data: {
+          status: 'ACCEPTED',
+          acceptedAt: new Date(),
+          codeHash: null,
+          otpExpiresAt: null,
+          otpSentAt: null,
+          attempts: 0,
+        },
+      });
+
+      if (acceptedUpdate.count !== 1) {
+        throw new ConflictError(
+          'This invitation has already been accepted. Returning scanner staff must sign in directly at /scanner.',
+          'INVITATION_ALREADY_ACCEPTED'
+        );
+      }
+
       if (!user) {
-        try {
-          user = await tx.user.create({
-            data: {
-              email: normEmail,
-              name: normEmail.split('@')[0],
-              passwordHash: null,
-              role: Role.ATTENDEE,
-              status: AccountStatus.ACTIVE,
-              emailVerified: true,
-              emailVerifiedAt: new Date(),
-            },
-          });
-        } catch {
-          user = await tx.user.findUnique({ where: { email: normEmail } });
-          if (!user) throw new ServiceUnavailableError('Unable to resolve user account.');
-          if (user.passwordHash !== null) {
-            throw new BadRequestError(
-              'This account has a password set. Please sign in with your password to accept this invitation.',
-              'PASSWORD_LOGIN_REQUIRED'
-            );
-          }
-        }
-      } else if (!user.emailVerified) {
+        // Never catch a unique-constraint failure and query again inside the same
+        // PostgreSQL transaction (doing so triggers 25P02 aborted-transaction errors).
+        // Any conflict here cleanly rolls back the entire transaction including the
+        // invitation claim above.
+        user = await tx.user.create({
+          data: {
+            email: normEmail,
+            name: normEmail.split('@')[0],
+            passwordHash: null,
+            role: Role.ATTENDEE,
+            status: AccountStatus.ACTIVE,
+            emailVerified: true,
+            emailVerifiedAt: new Date(),
+          },
+        });
+      } else if (user.emailVerified !== true) {
         user = await tx.user.update({
           where: { id: user.id },
           data: {
@@ -708,20 +693,26 @@ export async function verifyInvitationOtp(
         });
       }
 
-      await tx.eventStaffInvitation.update({
-        where: { id: lockedInvite.id },
-        data: {
-          status: 'ACCEPTED',
-          acceptedAt: new Date(),
-          codeHash: null,
-          otpExpiresAt: null,
-          otpSentAt: null,
-          attempts: 0,
-        },
+      return { user, staffRecord };
       });
+    } catch (txError) {
+      if (blockedNonActiveUserId) {
+        await invalidateUserAuthCache(blockedNonActiveUserId).catch(() => {});
+        await revokeAllUserSessions(blockedNonActiveUserId).catch(() => {});
+        clearSessionCookie(res);
+      }
+      throw txError;
+    }
 
-      return { user, staffRecord, isReturningStaff: false };
-    });
+    if (transactionResult.user.status !== AccountStatus.ACTIVE) {
+      await invalidateUserAuthCache(transactionResult.user.id);
+      await revokeAllUserSessions(transactionResult.user.id);
+      clearSessionCookie(res);
+      throw new ForbiddenError(
+        `Your account has been ${String(transactionResult.user.status || 'disabled').toLowerCase()}.`,
+        `ACCOUNT_${transactionResult.user.status || 'DISABLED'}`
+      );
+    }
 
     await invalidateUserAuthCache(transactionResult.user.id);
     const ver = await getUserAuthCacheVersion(transactionResult.user.id);
@@ -731,7 +722,7 @@ export async function verifyInvitationOtp(
         email: transactionResult.user.email,
         role: transactionResult.user.role,
         emailVerified: true,
-        accountStatus: AccountStatus.ACTIVE,
+        accountStatus: transactionResult.user.status,
       },
       ver
     );
@@ -784,6 +775,13 @@ export async function acceptInvitationWithSession(
       throw new UnauthorizedError('Authentication required to accept invitation');
     }
 
+    if (!currentUser.emailVerified) {
+      throw new ForbiddenError(
+        'Email verification is required before accepting a staff invitation.',
+        'EMAIL_VERIFICATION_REQUIRED'
+      );
+    }
+
     const invitation = await prisma.eventStaffInvitation.findUnique({
       where: { tokenHash },
     });
@@ -799,6 +797,13 @@ export async function acceptInvitationWithSession(
       );
     }
 
+    if (invitation.status === 'ACCEPTED') {
+      throw new ConflictError(
+        'This invitation has already been accepted. Returning scanner staff must sign in directly at /scanner.',
+        'INVITATION_ALREADY_ACCEPTED'
+      );
+    }
+
     const normInviteEmail = normalizeEmail(invitation.email);
     const normUserEmail = normalizeEmail(currentUser.email);
 
@@ -809,47 +814,25 @@ export async function acceptInvitationWithSession(
       );
     }
 
-    if (invitation.status === 'ACCEPTED') {
-      const existingStaff = await prisma.eventStaff.findUnique({
-        where: {
-          eventId_userId: {
-            eventId: invitation.eventId,
-            userId: currentUser.userId,
-          },
-        },
-      });
-
-      if (!existingStaff || existingStaff.status !== 'ACTIVE') {
-        throw new ForbiddenError(
-          'Your staff assignment for this event is no longer active.',
-          'STAFF_ASSIGNMENT_NOT_ACTIVE'
-        );
-      }
-
-      res.json({
-        success: true,
-        data: {
-          eventId: invitation.eventId,
-          status: 'ACTIVE',
-          user: {
-            id: currentUser.userId,
-            email: currentUser.email,
-            role: currentUser.role,
-          },
-        },
-      });
-      return;
-    }
-
     const now = Date.now();
-    if (invitation.expiresAt.getTime() <= now) {
+    if (invitation.status === 'EXPIRED' || invitation.expiresAt.getTime() <= now) {
       throw new AppError('This invitation has expired.', 410, true, 'INVITATION_EXPIRED');
     }
 
-    const transactionResult = await prisma.$transaction(async (tx) => {
+    let blockedAcceptUserId: string | null = null;
+    let transactionResult;
+    try {
+      transactionResult = await prisma.$transaction(async (tx) => {
       const lockedInvite = await tx.eventStaffInvitation.findUnique({
         where: { id: invitation.id },
       });
+
+      if (lockedInvite?.status === 'ACCEPTED') {
+        throw new ConflictError(
+          'This invitation has already been accepted. Returning scanner staff must sign in directly at /scanner.',
+          'INVITATION_ALREADY_ACCEPTED'
+        );
+      }
 
       if (
         !lockedInvite ||
@@ -868,6 +851,45 @@ export async function acceptInvitationWithSession(
 
       if (!dbUser) {
         throw new UnauthorizedError('User account not found');
+      }
+
+      if (dbUser.status !== AccountStatus.ACTIVE) {
+        blockedAcceptUserId = dbUser.id;
+        throw new ForbiddenError(
+          `Your account has been ${String(dbUser.status || 'disabled').toLowerCase()}.`,
+          `ACCOUNT_${dbUser.status || 'DISABLED'}`
+        );
+      }
+
+      if (dbUser.emailVerified !== true) {
+        throw new ForbiddenError(
+          'Email verification is required before accepting a staff invitation.',
+          'EMAIL_VERIFICATION_REQUIRED'
+        );
+      }
+
+      // S2R-03: Claim the PENDING invitation atomically BEFORE EventStaff creation/update
+      // so concurrent accept / verify-otp requests serialize cleanly on the invitation row.
+      const acceptedUpdate = await tx.eventStaffInvitation.updateMany({
+        where: {
+          id: lockedInvite.id,
+          status: 'PENDING',
+        },
+        data: {
+          status: 'ACCEPTED',
+          acceptedAt: new Date(),
+          codeHash: null,
+          otpExpiresAt: null,
+          otpSentAt: null,
+          attempts: 0,
+        },
+      });
+
+      if (acceptedUpdate.count !== 1) {
+        throw new ConflictError(
+          'This invitation has already been accepted. Returning scanner staff must sign in directly at /scanner.',
+          'INVITATION_ALREADY_ACCEPTED'
+        );
       }
 
       const existingStaff = await tx.eventStaff.findUnique({
@@ -903,20 +925,16 @@ export async function acceptInvitationWithSession(
         });
       }
 
-      await tx.eventStaffInvitation.update({
-        where: { id: lockedInvite.id },
-        data: {
-          status: 'ACCEPTED',
-          acceptedAt: new Date(),
-          codeHash: null,
-          otpExpiresAt: null,
-          otpSentAt: null,
-          attempts: 0,
-        },
-      });
-
       return { user: dbUser, staffRecord };
-    });
+      });
+    } catch (txError) {
+      if (blockedAcceptUserId) {
+        await invalidateUserAuthCache(blockedAcceptUserId).catch(() => {});
+        await revokeAllUserSessions(blockedAcceptUserId).catch(() => {});
+        clearSessionCookie(res);
+      }
+      throw txError;
+    }
 
     await invalidateUserAuthCache(transactionResult.user.id);
     const ver = await getUserAuthCacheVersion(transactionResult.user.id);
@@ -926,7 +944,7 @@ export async function acceptInvitationWithSession(
         email: transactionResult.user.email,
         role: transactionResult.user.role,
         emailVerified: transactionResult.user.emailVerified,
-        accountStatus: transactionResult.user.status ?? AccountStatus.ACTIVE,
+        accountStatus: transactionResult.user.status,
       },
       ver
     );

@@ -13,9 +13,9 @@ import {
 } from './passwordAccess.service.js';
 import { calculateDisplayPriceFromGross } from '../checkout/checkout.financials.js';
 import { env } from '../../config/env.js';
-import { isBotUserAgent } from '../promotions/promotions.constants.js';
 import {
   buildEventSocialMetadata,
+  isEventPubliclyPublished,
   renderCrawlerHtml,
 } from './eventMetadata.service.js';
 
@@ -541,9 +541,35 @@ export async function getCities(_req: Request, res: Response, next: NextFunction
   }
 }
 
+const PUBLIC_METADATA_EVENT_SELECT = {
+  id: true,
+  slug: true,
+  title: true,
+  tagline: true,
+  description: true,
+  coverImageUrl: true,
+  isPasswordProtected: true,
+  status: true,
+} as const;
+
+async function findPublishedEventForMetadata(rawSlug: string) {
+  const event = await prisma.event.findFirst({
+    where: {
+      OR: [{ slug: rawSlug }, { id: rawSlug }],
+    },
+    select: PUBLIC_METADATA_EVENT_SELECT,
+  });
+
+  if (!isEventPubliclyPublished(event)) {
+    return null;
+  }
+
+  return event;
+}
+
 /**
- * Serves crawler-readable Open Graph and Twitter Card HTML for event pages,
- * or redirects human visitors to the client SPA.
+ * Serves crawler-readable Open Graph and Twitter Card HTML for published event pages.
+ * Never emits a self-refresh meta tag or HTTP redirect on /events/:slug.
  */
 export async function handlePublicEventCrawler(
   req: Request,
@@ -551,6 +577,10 @@ export async function handlePublicEventCrawler(
   next: NextFunction
 ): Promise<void> {
   try {
+    if (typeof res.set === 'function') {
+      res.set('Vary', 'User-Agent');
+    }
+
     const rawSlug = req.params.slug;
     if (!rawSlug) {
       res.status(404).type('html').send(
@@ -559,24 +589,9 @@ export async function handlePublicEventCrawler(
       return;
     }
 
-    const event = await prisma.event.findFirst({
-      where: {
-        OR: [{ slug: rawSlug }, { id: rawSlug }],
-      },
-      select: {
-        id: true,
-        slug: true,
-        title: true,
-        tagline: true,
-        description: true,
-        coverImageUrl: true,
-        isPasswordProtected: true,
-        status: true,
-      },
-    });
-
     // Only PUBLISHED events are publicly discoverable and expose crawler metadata
-    if (!event || event.status !== EventStatus.PUBLISHED) {
+    const event = await findPublishedEventForMetadata(rawSlug);
+    if (!event) {
       res.status(404).type('html').send(
         '<!DOCTYPE html><html><head><title>Event Not Found | Outside.vip</title></head><body><h1>Event Not Found</h1></body></html>'
       );
@@ -584,12 +599,11 @@ export async function handlePublicEventCrawler(
     }
 
     const baseUrl = (env.CLIENT_URL || 'https://outside.vip').replace(/\/+$/, '');
-    const clientEventUrl = `${baseUrl}/events/${encodeURIComponent(event.slug)}`;
 
     // Build social preview metadata
     const metadata = buildEventSocialMetadata(event, { baseUrl });
 
-    // Render loop-free crawler HTML (no self-refresh tag on /events/:slug)
+    // Render loop-free crawler HTML (no self-refresh tag or redirect on /events/:slug)
     res.status(200).type('html').send(renderCrawlerHtml(metadata));
   } catch (err) {
     next(err);
@@ -597,7 +611,7 @@ export async function handlePublicEventCrawler(
 }
 
 /**
- * Returns JSON social preview metadata for an event.
+ * Returns JSON social preview metadata for a PUBLISHED event.
  */
 export async function getEventSocialMetadata(
   req: Request,
@@ -606,24 +620,10 @@ export async function getEventSocialMetadata(
 ): Promise<void> {
   try {
     const rawSlug = req.params.slug;
-    const event = await prisma.event.findFirst({
-      where: {
-        OR: [{ slug: rawSlug }, { id: rawSlug }],
-      },
-      select: {
-        id: true,
-        slug: true,
-        title: true,
-        tagline: true,
-        description: true,
-        coverImageUrl: true,
-        isPasswordProtected: true,
-        status: true,
-      },
-    });
+    const event = rawSlug ? await findPublishedEventForMetadata(rawSlug) : null;
 
     // Only PUBLISHED events expose public social preview metadata
-    if (!event || event.status !== EventStatus.PUBLISHED) {
+    if (!event) {
       throw new NotFoundError('Event not found');
     }
 

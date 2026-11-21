@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useOptionalAuth } from '../context/AuthContext';
 import { api } from '../lib/api';
-import { OrganizerEventItem, User } from '../types';
+import { OrganizerDashboardStats, OrganizerEventItem, User } from '../types';
 import { OrganizerWaitlistModal } from '../components/organizer/OrganizerWaitlistModal';
 import { EventTeamModal } from '../components/team/EventTeamModal';
 import { EventPromotionsModal } from '../components/promotions/EventPromotionsModal';
@@ -37,15 +37,20 @@ import {
 interface OrganizerDashboardPageProps {
   initialUser?: User | null;
   initialIsLoading?: boolean;
+  initialEvents?: OrganizerEventItem[];
+  initialStats?: OrganizerDashboardStats | null;
 }
 
 export const OrganizerDashboardPage: React.FC<OrganizerDashboardPageProps> = ({
   initialUser,
   initialIsLoading,
+  initialEvents,
+  initialStats,
 }) => {
   const auth = useOptionalAuth();
   const user = initialUser !== undefined ? initialUser : auth?.user;
   const isLoading = initialIsLoading !== undefined ? initialIsLoading : (auth?.isLoading ?? false);
+  const clearSessionState = auth?.clearSessionState;
   const queryClient = useQueryClient();
 
   // Sync body background with page theme to prevent bounce discoloration
@@ -72,24 +77,39 @@ export const OrganizerDashboardPage: React.FC<OrganizerDashboardPageProps> = ({
   };
 
   const {
-    data: stats,
-    isLoading: isLoadingStats,
+    data: fetchedStats,
+    isLoading: rawIsLoadingStats,
+    error: statsError,
     refetch: refetchStats,
   } = useQuery({
     queryKey: ['organizer-dashboard'],
     queryFn: () => api.organizer.getDashboard(),
-    enabled: Boolean(user && user.emailVerified !== false),
+    enabled: initialStats === undefined && Boolean(user && user.emailVerified !== false),
   });
 
   const {
     data: eventsData,
-    isLoading: isLoadingEvents,
+    isLoading: rawIsLoadingEvents,
+    error: eventsError,
     refetch: refetchEvents,
   } = useQuery({
     queryKey: ['organizer-events'],
     queryFn: () => api.organizer.listEvents(),
-    enabled: Boolean(user && user.emailVerified !== false),
+    enabled: initialEvents === undefined && Boolean(user && user.emailVerified !== false),
   });
+
+  const stats = initialStats !== undefined ? initialStats : fetchedStats;
+  const isLoadingStats = initialStats !== undefined ? false : rawIsLoadingStats;
+  const isLoadingEvents = initialEvents !== undefined ? false : rawIsLoadingEvents;
+
+  const statsErrorStatus = (statsError as any)?.statusCode || (statsError as any)?.status;
+  const eventsErrorStatus = (eventsError as any)?.statusCode || (eventsError as any)?.status;
+
+  useEffect(() => {
+    if (statsErrorStatus === 401 || eventsErrorStatus === 401) {
+      clearSessionState?.();
+    }
+  }, [statsErrorStatus, eventsErrorStatus, clearSessionState]);
 
   const publishMutation = useMutation({
     mutationFn: (eventId: string) => api.organizer.publishEvent(eventId),
@@ -100,6 +120,11 @@ export const OrganizerDashboardPage: React.FC<OrganizerDashboardPageProps> = ({
       showNotification('success', data.message || 'Event published to Outside.vip discovery!');
     },
     onError: (err: any) => {
+      const status = err?.statusCode || err?.status;
+      if (status === 401) {
+        clearSessionState?.();
+        return;
+      }
       showNotification('error', err?.message || 'Failed to publish event. Ensure all required fields and ticket tiers are valid.');
     },
   });
@@ -113,6 +138,11 @@ export const OrganizerDashboardPage: React.FC<OrganizerDashboardPageProps> = ({
       showNotification('success', data.message || 'Event reverted to draft status.');
     },
     onError: (err: any) => {
+      const status = err?.statusCode || err?.status;
+      if (status === 401) {
+        clearSessionState?.();
+        return;
+      }
       showNotification('error', err?.message || 'Failed to unpublish event.');
     },
   });
@@ -128,6 +158,11 @@ export const OrganizerDashboardPage: React.FC<OrganizerDashboardPageProps> = ({
     },
     onError: (err: any) => {
       setIsDeleting(false);
+      const status = err?.statusCode || err?.status;
+      if (status === 401) {
+        clearSessionState?.();
+        return;
+      }
       showNotification('error', err?.message || 'Failed to delete event. Events with sold tickets cannot be deleted.');
     },
   });
@@ -179,7 +214,62 @@ export const OrganizerDashboardPage: React.FC<OrganizerDashboardPageProps> = ({
     );
   }
 
-  const rawEvents = eventsData?.events || [];
+  const rawEvents = initialEvents !== undefined ? initialEvents : (eventsData?.events || []);
+  const isPlatformAdmin = user.role === 'ADMIN';
+  const ownedEvents = rawEvents.filter((evt) => evt.isOwner ?? evt.organizerId === user.id);
+  const assignedAdminEvents = rawEvents.filter(
+    (evt) => !(evt.isOwner ?? evt.organizerId === user.id)
+  );
+  const isAssignedAdminOnlyView = ownedEvents.length === 0 && assignedAdminEvents.length > 0;
+  const isMixedRoleView = ownedEvents.length > 0 && assignedAdminEvents.length > 0;
+  const useCombinedEventKpis = isAssignedAdminOnlyView || isMixedRoleView;
+
+  const isEventRevenueVisible = (evt: OrganizerEventItem) =>
+    Boolean(evt.isOwner ?? evt.organizerId === user.id) ||
+    isPlatformAdmin ||
+    Boolean(evt.permissions?.canViewOrders);
+
+  const displayedTotalEvents = useCombinedEventKpis
+    ? rawEvents.length
+    : stats?.totalEvents ?? ownedEvents.length;
+  const displayedPublishedEvents = useCombinedEventKpis
+    ? rawEvents.filter((e) => e.status === 'PUBLISHED').length
+    : stats?.publishedEvents ?? ownedEvents.filter((e) => e.status === 'PUBLISHED').length;
+  const displayedDraftEvents = useCombinedEventKpis
+    ? rawEvents.filter((e) => e.status === 'DRAFT').length
+    : stats?.draftEvents ?? ownedEvents.filter((e) => e.status === 'DRAFT').length;
+  const displayedTicketsSold = useCombinedEventKpis
+    ? rawEvents.reduce((sum, e) => sum + (e.ticketsSold || 0), 0)
+    : stats?.ticketsSold ?? 0;
+
+  // S4R-06: Strictly aggregate revenue ONLY from events where the user holds financial visibility
+  // (event owner, Platform Admin, or Event Admin with canViewOrders: true). Never aggregate or
+  // expose restricted Event Admin revenue, and clearly distinguish restricted from $0.00.
+  const financiallyVisibleEvents = rawEvents.filter(isEventRevenueVisible);
+  const hasRestrictedRevenueEvents =
+    rawEvents.length > 0 && financiallyVisibleEvents.length < rawEvents.length;
+  const permittedRevenueCents = financiallyVisibleEvents.reduce(
+    (sum, e) => sum + (e.revenueInCents || 0),
+    0
+  );
+  const formatUsd = (cents: number) =>
+    `$${(cents / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+  const displayedRevenueFormatted = useCombinedEventKpis
+    ? financiallyVisibleEvents.length === 0
+      ? 'Restricted'
+      : formatUsd(permittedRevenueCents)
+    : stats?.grossRevenueFormatted ?? '$0';
+
+  const displayedRevenueSubtitle = useCombinedEventKpis
+    ? financiallyVisibleEvents.length === 0
+      ? 'Requires View Orders permission'
+      : hasRestrictedRevenueEvents
+        ? 'Permitted events only (some restricted)'
+        : isMixedRoleView
+          ? 'Owned & permitted admin events'
+          : 'Permitted assigned events'
+    : 'Completed transactions';
   const filteredEvents = rawEvents.filter((evt) => {
     if (filterStatus === 'PUBLISHED' && evt.status !== 'PUBLISHED') return false;
     if (filterStatus === 'DRAFT' && evt.status !== 'DRAFT') return false;
@@ -256,12 +346,14 @@ export const OrganizerDashboardPage: React.FC<OrganizerDashboardPageProps> = ({
       )}
 
       <div className="relative z-10 max-w-[1536px] mx-auto px-4 sm:px-6 lg:px-8 xl:px-10 py-8 sm:py-10 space-y-8">
-        <OrganizerWorkspaceSetupBanner
-          onCreated={() => {
-            refetchStats();
-            refetchEvents();
-          }}
-        />
+        {!isAssignedAdminOnlyView && (
+          <OrganizerWorkspaceSetupBanner
+            onCreated={() => {
+              refetchStats();
+              refetchEvents();
+            }}
+          />
+        )}
         <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 pb-6 border-b border-stone-200/90">
           <div>
             <div className="flex items-center gap-2 mb-1.5">
@@ -315,15 +407,19 @@ export const OrganizerDashboardPage: React.FC<OrganizerDashboardPageProps> = ({
           <div className="p-4 sm:p-5 rounded-2xl bg-white border border-stone-200/90 shadow-xs hover:border-stone-300 transition-colors space-y-2">
             <div className="flex items-center justify-between text-stone-500">
               <span className="text-[10px] sm:text-[11px] font-mono uppercase tracking-wider font-semibold">
-                Total Events
+                {isAssignedAdminOnlyView ? 'Assigned Events' : 'Total Events'}
               </span>
               <Calendar className="w-4 h-4 text-stone-400" />
             </div>
             <div className="font-display font-black text-2xl sm:text-3xl text-stone-900">
-              {isLoadingStats ? '—' : stats?.totalEvents ?? 0}
+              {isLoadingStats && !useCombinedEventKpis ? '—' : displayedTotalEvents}
             </div>
             <div className="text-[11px] font-mono text-stone-400">
-              Across all lifecycles
+              {isAssignedAdminOnlyView
+                ? 'Event Admin access'
+                : isMixedRoleView
+                  ? `${ownedEvents.length} owned · ${assignedAdminEvents.length} admin`
+                  : 'Across all lifecycles'}
             </div>
           </div>
 
@@ -335,7 +431,7 @@ export const OrganizerDashboardPage: React.FC<OrganizerDashboardPageProps> = ({
               <Radio className="w-4 h-4 text-emerald-600" />
             </div>
             <div className="font-display font-black text-2xl sm:text-3xl text-emerald-800">
-              {isLoadingStats ? '—' : stats?.publishedEvents ?? 0}
+              {isLoadingStats && !useCombinedEventKpis ? '—' : displayedPublishedEvents}
             </div>
             <div className="text-[11px] font-mono text-stone-400">
               Visible on discovery
@@ -350,7 +446,7 @@ export const OrganizerDashboardPage: React.FC<OrganizerDashboardPageProps> = ({
               <Clock className="w-4 h-4 text-amber-600" />
             </div>
             <div className="font-display font-black text-2xl sm:text-3xl text-amber-800">
-              {isLoadingStats ? '—' : stats?.draftEvents ?? 0}
+              {isLoadingStats && !useCombinedEventKpis ? '—' : displayedDraftEvents}
             </div>
             <div className="text-[11px] font-mono text-stone-400">
               Unpublished workflows
@@ -365,10 +461,14 @@ export const OrganizerDashboardPage: React.FC<OrganizerDashboardPageProps> = ({
               <Ticket className="w-4 h-4 text-stone-400" />
             </div>
             <div className="font-display font-black text-2xl sm:text-3xl text-stone-900">
-              {isLoadingStats ? '—' : (stats?.ticketsSold ?? 0).toLocaleString()}
+              {isLoadingStats && !useCombinedEventKpis ? '—' : displayedTicketsSold.toLocaleString()}
             </div>
             <div className="text-[11px] font-mono text-stone-400">
-              Actual database sales
+              {isAssignedAdminOnlyView
+                ? 'Across assigned events'
+                : isMixedRoleView
+                  ? 'Across owned & assigned events'
+                  : 'Actual database sales'}
             </div>
           </div>
 
@@ -380,10 +480,10 @@ export const OrganizerDashboardPage: React.FC<OrganizerDashboardPageProps> = ({
               <TrendingUp className="w-4 h-4 text-emerald-600" />
             </div>
             <div className="font-display font-black text-2xl sm:text-3xl text-stone-900 truncate">
-              {isLoadingStats ? '—' : stats?.grossRevenueFormatted ?? '$0'}
+              {isLoadingStats && !useCombinedEventKpis ? '—' : displayedRevenueFormatted}
             </div>
             <div className="text-[11px] font-mono text-stone-400">
-              Completed transactions
+              {displayedRevenueSubtitle}
             </div>
           </div>
         </div>
@@ -500,6 +600,25 @@ export const OrganizerDashboardPage: React.FC<OrganizerDashboardPageProps> = ({
                     const sold = evt.ticketsSold || 0;
                     const capacity = evt.totalCapacity || 1;
                     const percent = Math.min(100, Math.round((sold / capacity) * 100));
+                    const isEventOwner = evt.isOwner ?? (evt.organizerId === user.id);
+                    const perms = evt.permissions || null;
+                    const canManageTeam = isEventOwner || isPlatformAdmin || Boolean(perms?.canManageTeam);
+                    const canViewPromotions =
+                      isEventOwner ||
+                      isPlatformAdmin ||
+                      Boolean(perms?.canManagePromotions || perms?.canViewAnalytics);
+                    const canViewWaitlist = isEventOwner;
+                    const canEditEvent =
+                      isEventOwner ||
+                      isPlatformAdmin ||
+                      Boolean(perms?.canEditDetails || perms?.canManageTickets);
+                    const canPublishOrUnpublish = isEventOwner || isPlatformAdmin;
+                    const canDeleteEvent =
+                      (isEventOwner || isPlatformAdmin || Boolean(perms?.canDeleteEvent)) &&
+                      !isPublished &&
+                      sold === 0;
+                    const canSeeEventRevenue =
+                      isEventOwner || isPlatformAdmin || Boolean(perms?.canViewOrders);
 
                     return (
                       <tr
@@ -520,8 +639,19 @@ export const OrganizerDashboardPage: React.FC<OrganizerDashboardPageProps> = ({
                               />
                             </div>
                             <div className="space-y-1 min-w-0">
-                              <div className="font-bold text-stone-900 text-sm truncate max-w-sm xl:max-w-md group-hover:text-stone-700 transition-colors">
-                                {evt.title}
+                              <div className="flex items-center gap-2">
+                                <span className="font-bold text-stone-900 text-sm truncate max-w-sm xl:max-w-md group-hover:text-stone-700 transition-colors">
+                                  {evt.title}
+                                </span>
+                                <span
+                                  className={`px-2 py-0.5 rounded-full text-[9px] font-mono uppercase tracking-wider font-bold border shrink-0 ${
+                                    isEventOwner
+                                      ? 'bg-stone-900 text-white border-stone-900'
+                                      : 'bg-purple-50 text-purple-800 border-purple-200'
+                                  }`}
+                                >
+                                  {isEventOwner ? 'Owner' : 'Event Admin'}
+                                </span>
                               </div>
                               <div className="flex items-center gap-2 text-[11px] font-mono text-stone-400">
                                 <span className="px-2 py-0.5 rounded-full bg-[#EFECE5] border border-[#DDD7CB]/70 text-[#7A7165] font-semibold text-[10px] uppercase tracking-wider">
@@ -596,37 +726,43 @@ export const OrganizerDashboardPage: React.FC<OrganizerDashboardPageProps> = ({
                         </td>
 
                         <td className="px-6 py-4.5 align-middle font-mono font-bold text-sm text-stone-900 whitespace-nowrap">
-                          {evt.revenueFormatted || '$0'}
+                          {canSeeEventRevenue ? (evt.revenueFormatted || '$0') : '—'}
                         </td>
 
                         <td className="px-6 py-4.5 align-middle text-right">
                           <div className="flex items-center justify-end gap-1.5 whitespace-nowrap">
-                            <button
-                              type="button"
-                              onClick={() => setTeamEvent(evt)}
-                              className="p-2 rounded-lg bg-stone-100/80 hover:bg-stone-200/80 text-stone-600 hover:text-stone-900 border border-stone-200/90 transition-colors shadow-2xs cursor-pointer"
-                              title="Manage Event Team & Hosts"
-                            >
-                              <Users className="w-3.5 h-3.5 text-stone-700" />
-                            </button>
+                            {canManageTeam && (
+                              <button
+                                type="button"
+                                onClick={() => setTeamEvent(evt)}
+                                className="p-2 rounded-lg bg-stone-100/80 hover:bg-stone-200/80 text-stone-600 hover:text-stone-900 border border-stone-200/90 transition-colors shadow-2xs cursor-pointer"
+                                title="Manage Event Team & Hosts"
+                              >
+                                <Users className="w-3.5 h-3.5 text-stone-700" />
+                              </button>
+                            )}
 
-                            <button
-                              type="button"
-                              onClick={() => setPromotionsEvent(evt)}
-                              className="p-2 rounded-lg bg-stone-100/80 hover:bg-stone-200/80 text-stone-600 hover:text-stone-900 border border-stone-200/90 transition-colors shadow-2xs cursor-pointer"
-                              title="Campaign Links & Traffic Analytics"
-                            >
-                              <TrendingUp className="w-3.5 h-3.5 text-stone-700" />
-                            </button>
+                            {canViewPromotions && (
+                              <button
+                                type="button"
+                                onClick={() => setPromotionsEvent(evt)}
+                                className="p-2 rounded-lg bg-stone-100/80 hover:bg-stone-200/80 text-stone-600 hover:text-stone-900 border border-stone-200/90 transition-colors shadow-2xs cursor-pointer"
+                                title="Campaign Links & Traffic Analytics"
+                              >
+                                <TrendingUp className="w-3.5 h-3.5 text-stone-700" />
+                              </button>
+                            )}
 
-                            <button
-                              type="button"
-                              onClick={() => setWaitlistEvent(evt)}
-                              className="p-2 rounded-lg bg-stone-100/80 hover:bg-stone-200/80 text-stone-600 hover:text-stone-900 border border-stone-200/90 transition-colors shadow-2xs cursor-pointer"
-                              title="View Event Waitlist"
-                            >
-                              <Clock className="w-3.5 h-3.5 text-amber-600" />
-                            </button>
+                            {canViewWaitlist && (
+                              <button
+                                type="button"
+                                onClick={() => setWaitlistEvent(evt)}
+                                className="p-2 rounded-lg bg-stone-100/80 hover:bg-stone-200/80 text-stone-600 hover:text-stone-900 border border-stone-200/90 transition-colors shadow-2xs cursor-pointer"
+                                title="View Event Waitlist"
+                              >
+                                <Clock className="w-3.5 h-3.5 text-amber-600" />
+                              </button>
+                            )}
 
                             <Link
                               to={`/organizer/events/${evt.id}/preview`}
@@ -636,32 +772,36 @@ export const OrganizerDashboardPage: React.FC<OrganizerDashboardPageProps> = ({
                               <Eye className="w-3.5 h-3.5" />
                             </Link>
 
-                            <Link
-                              to={`/organizer/events/${evt.id}/edit`}
-                              className="p-2 rounded-lg bg-stone-100/80 hover:bg-stone-200/80 text-stone-600 hover:text-stone-900 border border-stone-200/90 transition-colors shadow-2xs"
-                              title="Edit Event & Ticket Tiers"
-                            >
-                              <Edit3 className="w-3.5 h-3.5" />
-                            </Link>
+                            {canEditEvent && (
+                              <Link
+                                to={`/organizer/events/${evt.id}/edit`}
+                                className="p-2 rounded-lg bg-stone-100/80 hover:bg-stone-200/80 text-stone-600 hover:text-stone-900 border border-stone-200/90 transition-colors shadow-2xs"
+                                title="Edit Event & Ticket Tiers"
+                              >
+                                <Edit3 className="w-3.5 h-3.5" />
+                              </Link>
+                            )}
 
-                            {isPublished ? (
-                              <button
-                                onClick={() => unpublishMutation.mutate(evt.id)}
-                                disabled={unpublishMutation.isPending}
-                                className="px-3 py-1.5 rounded-lg bg-white hover:bg-stone-100 text-stone-700 hover:text-stone-900 border border-stone-300 text-[11px] font-mono uppercase font-semibold tracking-wider transition-colors shadow-2xs disabled:opacity-50"
-                                title="Unpublish event (hide from discovery)"
-                              >
-                                Unpublish
-                              </button>
-                            ) : (
-                              <button
-                                onClick={() => publishMutation.mutate(evt.id)}
-                                disabled={publishMutation.isPending}
-                                className="px-3 py-1.5 rounded-lg bg-stone-900 hover:bg-black text-white text-[11px] font-mono uppercase font-semibold tracking-wider transition-colors shadow-2xs disabled:opacity-50"
-                                title="Publish event to Outside.vip"
-                              >
-                                Publish
-                              </button>
+                            {canPublishOrUnpublish && (
+                              isPublished ? (
+                                <button
+                                  onClick={() => unpublishMutation.mutate(evt.id)}
+                                  disabled={unpublishMutation.isPending}
+                                  className="px-3 py-1.5 rounded-lg bg-white hover:bg-stone-100 text-stone-700 hover:text-stone-900 border border-stone-300 text-[11px] font-mono uppercase font-semibold tracking-wider transition-colors shadow-2xs disabled:opacity-50"
+                                  title="Unpublish event (hide from discovery)"
+                                >
+                                  Unpublish
+                                </button>
+                              ) : (
+                                <button
+                                  onClick={() => publishMutation.mutate(evt.id)}
+                                  disabled={publishMutation.isPending}
+                                  className="px-3 py-1.5 rounded-lg bg-stone-900 hover:bg-black text-white text-[11px] font-mono uppercase font-semibold tracking-wider transition-colors shadow-2xs disabled:opacity-50"
+                                  title="Publish event to Outside.vip"
+                                >
+                                  Publish
+                                </button>
+                              )
                             )}
 
                             {isPublished && (
@@ -674,7 +814,7 @@ export const OrganizerDashboardPage: React.FC<OrganizerDashboardPageProps> = ({
                               </Link>
                             )}
 
-                            {!isPublished && sold === 0 && (
+                            {canDeleteEvent && (
                               <button
                                 onClick={() => setEventToDelete(evt)}
                                 className="p-2 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 hover:text-rose-900 border border-rose-200 transition-colors shadow-2xs"

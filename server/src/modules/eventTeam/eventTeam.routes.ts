@@ -1,5 +1,9 @@
 import { Router } from 'express';
-import { requireAuth, requireVerifiedEmail } from '../../middleware/auth.js';
+import {
+  requireAuth,
+  requireFreshUserVerification,
+  requireVerifiedEmail,
+} from '../../middleware/auth.js';
 import {
   handleInviteTeamMember,
   handleInspectTeamInvitation,
@@ -30,6 +34,7 @@ teamRouter.get('/invitations/:token', handleInspectTeamInvitation);
 teamRouter.post(
   '/invitations/:token/accept',
   requireAuth,
+  requireFreshUserVerification,
   requireVerifiedEmail,
   handleAcceptTeamInvitation
 );

@@ -384,8 +384,10 @@ describe('Stage 3 Implementation 2: Centralized Route Guards', () => {
       expect(appSource).toMatch(/<Route\s+path="\/orders\/:orderNumber"\s+element=\{<OrderConfirmationPage \/>\}/);
     });
 
-    it('verifies /teams is protected with RequireRole for ORGANIZER and ADMIN', () => {
-      expect(appSource).toMatch(/<Route[\s\S]*?path="\/teams"[\s\S]*?<RequireRole\s+allowedRoles=\{\['ORGANIZER',\s*'ADMIN'\]\}>[\s\S]*?<TeamsPage \/>/);
+    it('verifies /teams, /orders, and /atendees are protected with RequireAuth (event-scoped auth rather than global RequireRole)', () => {
+      expect(appSource).toMatch(/<Route[\s\S]*?path="\/teams"[\s\S]*?<RequireAuth>[\s\S]*?<TeamsPage \/>/);
+      expect(appSource).toMatch(/<Route[\s\S]*?path="\/orders"[\s\S]*?<RequireAuth>[\s\S]*?<OrdersPage \/>/);
+      expect(appSource).toMatch(/<Route[\s\S]*?path="\/atendees"[\s\S]*?<RequireAuth>[\s\S]*?<AtendeePage \/>/);
     });
 
     it('verifies all organizer routes are protected with RequireAuth', () => {

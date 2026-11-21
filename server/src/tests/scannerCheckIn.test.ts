@@ -493,6 +493,8 @@ describe('Organizer Check-In & Scanner Validation API', () => {
     });
 
     it('returns 403 Forbidden when an ATTENDEE attempts to check in tickets', async () => {
+      vi.spyOn(prisma.eventStaff, 'findFirst').mockResolvedValueOnce(null);
+      vi.spyOn(prisma.event, 'findFirst').mockResolvedValueOnce(null);
       const res = await request(app)
         .post('/api/organizer/check-in')
         .set('Authorization', `Bearer ${attendeeToken}`)

@@ -88,9 +88,12 @@ export function csrfProtection(req: Request, _res: Response, next: NextFunction)
         (req.headers['x-csrf-token'] as string | undefined) ||
         (req.headers['csrf-token'] as string | undefined);
 
+      const requestPathname = requestPath.split('?')[0];
       const isCredentialAuthEntry =
         requestPath.startsWith('/api/auth/login') ||
-        requestPath.startsWith('/api/auth/register');
+        requestPath.startsWith('/api/auth/register') ||
+        requestPathname === '/api/auth/otp/request' ||
+        requestPathname === '/api/auth/otp/verify';
 
       if (!incomingToken || typeof incomingToken !== 'string') {
         if (!isCredentialAuthEntry) {

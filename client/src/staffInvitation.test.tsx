@@ -59,36 +59,27 @@ describe('Door Staff Invitation & Account Mismatch Prevention', () => {
   });
 
   // =========================================================================
-  // 2. Recovery Token Lifecycle
+  // 2. Stage 2 One-Time Invitation Security & Zero Token Persistence (STG2-02)
   // =========================================================================
-  describe('2. Scanner Recovery Token Lifecycle', () => {
-    it('does not prematurely clear outside_scanner_invite_token during OTP verification or session accept', () => {
-      // Confirm handleVerifyOtp and handleAcceptWithSession do NOT remove outside_scanner_invite_token
-      const handleVerifyOtpBlock = staffInvitationSource.slice(
-        staffInvitationSource.indexOf('const handleVerifyOtp'),
-        staffInvitationSource.indexOf('const handleAcceptWithSession')
-      );
-      expect(handleVerifyOtpBlock).not.toContain("sessionStorage.removeItem('outside_scanner_invite_token')");
-
-      const handleAcceptBlock = staffInvitationSource.slice(
-        staffInvitationSource.indexOf('const handleAcceptWithSession'),
-        staffInvitationSource.indexOf('if (isLoading)')
-      );
-      expect(handleAcceptBlock).not.toContain("sessionStorage.removeItem('outside_scanner_invite_token')");
+  describe('2. Stage 2 One-Time Invitation Security (STG2-02)', () => {
+    it('never persists outside_scanner_invite_token in sessionStorage on StaffInvitationPage or ScannerPage', () => {
+      expect(staffInvitationSource).not.toContain("sessionStorage.setItem('outside_scanner_invite_token'");
+      expect(scannerSource).not.toContain("sessionStorage.setItem('outside_scanner_invite_token'");
+      expect(scannerSource).not.toContain("sessionStorage.getItem('outside_scanner_invite_token'");
     });
 
-    it('ScannerPage clears outside_scanner_invite_token only after gate access is verified and established', () => {
-      expect(scannerSource).toContain("sessionStorage.removeItem('outside_scanner_invite_token')");
-      expect(scannerSource).toMatch(
-        /if \(matched\)\s*\{[\s\S]*?sessionStorage\.removeItem\('outside_scanner_invite_token'\);/
-      );
+    it('restricts invitation OTP verification strictly to PENDING invitations and retires ACCEPTED OTP resumption', () => {
+      expect(staffInvitationSource).toContain("invitation.status === 'PENDING' && (");
+      expect(staffInvitationSource).not.toContain('Resume Scanner Session');
+      expect(staffInvitationSource).not.toContain('Staff Session Resumption');
+      expect(staffInvitationSource).toContain('Invitation Already Accepted');
+      expect(staffInvitationSource).toContain('Go to Door Scanner Sign-In');
     });
 
-    it('clears recovery token when invitation is confirmed EXPIRED, REVOKED, or assignment inactive', () => {
-      expect(staffInvitationSource).toMatch(
-        /res\.invitation\.status === 'EXPIRED'\s*\|\|\s*res\.invitation\.status === 'REVOKED'\s*\|\|\s*res\.invitation\.isAssignmentActive === false/
-      );
-      expect(staffInvitationSource).toContain("sessionStorage.removeItem('outside_scanner_invite_token')");
+    it('preserves PENDING onboarding OTP verification and authenticated session acceptance flows', () => {
+      expect(staffInvitationSource).toContain('Verify Email Address');
+      expect(staffInvitationSource).toContain('Accept & Open Scanner');
+      expect(staffInvitationSource).toContain("invitation.status === 'PENDING' && invitation.requiresLogin");
     });
   });
 
