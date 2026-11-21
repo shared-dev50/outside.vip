@@ -183,10 +183,13 @@ export async function resolveEventAuthorization(
     }
   }
 
-  // 3. Platform Admin fallback: Platform ADMIN does NOT have automatic access to organizer financial credentials
+  // 3. Platform Admin fallback: Platform ADMIN does NOT have automatic access to organizer financial credentials or refund delegation
   if (user.role === Role.ADMIN) {
     if (requiredPermission === 'canManagePayouts') {
       throw new ForbiddenError('Platform administrators cannot access organizer financial credentials.');
+    }
+    if (requiredPermission === 'canManageRefunds') {
+      throw new ForbiddenError('Refund management is not supported via event team authorization.');
     }
     return {
       isOwner: false,

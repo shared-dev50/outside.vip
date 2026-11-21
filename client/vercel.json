@@ -6,15 +6,15 @@
       "destination": "https://outside-vip.onrender.com/r/:path*"
     },
     {
-      "source": "/events/:slug*",
+      "source": "/events/:slug",
       "has": [
         {
           "type": "header",
           "key": "user-agent",
-          "value": ".*([bB][oO][tT]|[cC][rR][aA][wW][lL]|[sS][pP][iI][dD][eE][rR]|[sS][lL][uU][rR][pP]|[fF]acebook[eE]xternal[hH]it|[wW]hats[aA]pp|[tT]elegram[bB]ot|[tT]witter[bB]ot|[lL]inked[iI]n[bB]ot|[sS]lack[bB]ot|[dD]iscord[bB]ot|[bB]ing[pP]review|[gG]oogle-[sS]tructured-[dD]ata-[tT]esting-[tT]ool|[aA]pple[bB]ot|[sS]napchat|[pP]interest|[mM]eta-[eE]xternal[aA]gent).*"
+          "value": ".*([bB][oO][tT]|[cC][rR][aA][wW][lL]|[sS][pP][iI][dD][eE][rR]|[sS][lL][uU][rR][pP]|[fF][aA][cC][eE][bB][oO][oO][kK][eE][xX][tT][eE][rR][nN][aA][lL][hH][iI][tT]|[wW][hH][aA][tT][sS][aA][pP][pP]|[bB][iI][nN][gG][pP][rR][eE][vV][iI][eE][wW]|[gG][oO][oO][gG][lL][eE]-[sS][tT][rR][uU][cC][tT][uU][rR][eE][dD]-[dD][aA][tT][aA]-[tT][eE][sS][tT][iI][nN][gG]-[tT][oO][oO][lL]|[sS][nN][aA][pP][cC][hH][aA][tT]|[pP][iI][nN][tT][eE][rR][eE][sS][tT]|[mM][eE][tT][aA]-[eE][xX][tT][eE][rR][nN][aA][lL][aA][gG][eE][nN][tT]).*"
         }
       ],
-      "destination": "https://outside-vip.onrender.com/events/:slug*"
+      "destination": "https://outside-vip.onrender.com/events/:slug"
     },
     {
       "source": "/api/:path*",

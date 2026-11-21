@@ -1,6 +1,9 @@
+import fs from 'fs';
+import path from 'path';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   buildEventSocialMetadata,
+  isEventPubliclyPublished,
   renderCrawlerHtml,
   escapeHtml,
 } from '../modules/events/eventMetadata.service.js';
@@ -230,38 +233,86 @@ describe('Outside.vip — Event Social Preview Metadata & Crawler Handling', () 
   });
 
   // =========================================================================
-  // 4. Vercel Rewrite Regex Validation (No PCRE inline (?i) flag)
+  // 4. Vercel Rewrite Configuration & Regex Validation (No PCRE inline (?i) flag)
   // =========================================================================
-  describe('4. Vercel Rewrite Regex Validation', () => {
-    const vercelRegex = new RegExp(
-      '.*([bB][oO][tT]|[cC][rR][aA][wW][lL]|[sS][pP][iI][dD][eE][rR]|[sS][lL][uU][rR][pP]|[fF]acebook[eE]xternal[hH]it|[wW]hats[aA]pp|[tT]elegram[bB]ot|[tT]witter[bB]ot|[lL]inked[iI]n[bB]ot|[sS]lack[bB]ot|[dD]iscord[bB]ot|[bB]ing[pP]review|[gG]oogle-[sS]tructured-[dD]ata-[tT]esting-[tT]ool|[aA]pple[bB]ot|[sS]napchat|[pP]interest|[mM]eta-[eE]xternal[aA]gent).*'
-    );
+  describe('4. Vercel Rewrite Configuration & Regex Validation', () => {
+    const rootVercelPath = path.resolve(__dirname, '../../../vercel.json');
+    const clientVercelPath = path.resolve(__dirname, '../../../client/vercel.json');
+    const rootVercelRaw = fs.readFileSync(rootVercelPath, 'utf8');
+    const clientVercelRaw = fs.readFileSync(clientVercelPath, 'utf8');
+    const rootVercel = JSON.parse(rootVercelRaw);
+    const clientVercel = JSON.parse(clientVercelRaw);
 
-    it('matches all known crawler user agents without requiring PCRE flags', () => {
+    const crawlerRule = rootVercel.rewrites.find(
+      (r: any) => r.source === '/events/:slug' && Array.isArray(r.has)
+    );
+    const vercelRegex = new RegExp(crawlerRule.has[0].value);
+
+    it('validates both root vercel.json and client/vercel.json have no (?i) flag, stay in sync, and preserve rewrite ordering', () => {
+      expect(rootVercelRaw).not.toContain('(?i)');
+      expect(clientVercelRaw).not.toContain('(?i)');
+      expect(rootVercel).toEqual(clientVercel);
+
+      const rewrites = rootVercel.rewrites as Array<{
+        source: string;
+        destination: string;
+        has?: Array<{ type: string; key: string; value: string }>;
+      }>;
+
+      const shortLinkIdx = rewrites.findIndex((r) => r.source === '/r/:path*');
+      const crawlerIdx = rewrites.findIndex((r) => r.source === '/events/:slug');
+      const apiIdx = rewrites.findIndex((r) => r.source === '/api/:path*');
+      const spaIdx = rewrites.findIndex((r) => r.source === '/(.*)');
+
+      expect(shortLinkIdx).toBe(0);
+      expect(crawlerIdx).toBe(1);
+      expect(apiIdx).toBe(2);
+      expect(spaIdx).toBe(3);
+
+      // Preserve /r/:slug short-link rewrite
+      expect(rewrites[shortLinkIdx].destination).toBe('https://outside-vip.onrender.com/r/:path*');
+      // Single-segment /events/:slug avoids hijacking /events Discover page
+      expect(rewrites[crawlerIdx].destination).toBe('https://outside-vip.onrender.com/events/:slug');
+      expect(rewrites[crawlerIdx].has?.[0]).toMatchObject({
+        type: 'header',
+        key: 'user-agent',
+      });
+      expect(rewrites[spaIdx].destination).toBe('/index.html');
+    });
+
+    it('matches all known crawler user agents across lowercase, CamelCase, and UPPERCASE without PCRE flags', () => {
       const crawlers = [
         'Twitterbot/1.0',
         'twitterbot/1.0',
+        'TWITTERBOT/1.0',
         'facebookexternalhit/1.1',
         'FacebookExternalHit/1.1',
+        'FACEBOOKEXTERNALHIT/1.1',
         'WhatsApp/2.21.12.21 A',
         'whatsapp/2.21.12.21 A',
+        'WHATSAPP/2.21.12.21 A',
         'TelegramBot (like TwitterBot)',
         'LinkedInBot/1.0',
         'Slackbot-LinkExpanding 1.0',
         'Discordbot/2.0',
         'BingPreview/1.0b',
+        'BINGPREVIEW/1.0b',
         'Googlebot/2.1',
         'bingbot/2.0',
         'Applebot/0.1',
         'applebot/0.1',
         'Snapchat/11.0',
+        'SNAPCHAT/11.0',
         'Pinterest/0.2',
+        'PINTEREST/0.2',
         'Meta-ExternalAgent/1.0',
         'meta-externalagent/1.0',
+        'META-EXTERNALAGENT/1.0',
         'Slurp',
         'slurp',
         'Baiduspider/2.0',
         'google-structured-data-testing-tool',
+        'GOOGLE-STRUCTURED-DATA-TESTING-TOOL',
         'YandexBot/3.0',
       ];
 
@@ -535,6 +586,65 @@ describe('Outside.vip — Event Social Preview Metadata & Crawler Handling', () 
 
       expect(capturedError).toBeInstanceOf(NotFoundError);
       expect(capturedError?.message).toBe('Event not found');
+    });
+
+    it('enforces one consistent PUBLISHED-only eligibility helper across crawler and metadata routes', () => {
+      expect(isEventPubliclyPublished({ status: EventStatus.PUBLISHED })).toBe(true);
+      expect(isEventPubliclyPublished({ status: EventStatus.DRAFT })).toBe(false);
+      expect(isEventPubliclyPublished({ status: EventStatus.CANCELLED })).toBe(false);
+      expect(isEventPubliclyPublished({ status: EventStatus.ARCHIVED })).toBe(false);
+      expect(isEventPubliclyPublished({ status: null })).toBe(false);
+      expect(isEventPubliclyPublished(null)).toBe(false);
+      expect(isEventPubliclyPublished(undefined)).toBe(false);
+    });
+
+    it('handlePublicEventCrawler sets Vary: User-Agent and never calls res.redirect (prevents /events/:slug redirect loops)', async () => {
+      vi.spyOn(prisma.event, 'findFirst').mockResolvedValueOnce({
+        id: 'evt_published_no_loop',
+        slug: 'no-loop-event',
+        title: 'No Loop Festival',
+        tagline: 'Loop-free social preview',
+        description: 'Direct crawler response',
+        coverImageUrl: 'https://outside.vip/no-loop.jpg',
+        isPasswordProtected: false,
+        status: EventStatus.PUBLISHED,
+      } as any);
+
+      const headers: Record<string, string> = {};
+      let statusCode = 0;
+      let sentBody = '';
+      const redirectSpy = vi.fn();
+
+      const req: any = {
+        params: { slug: 'no-loop-event' },
+        headers: { 'user-agent': 'WhatsApp/2.21.12.21 A' },
+      };
+      const res: any = {
+        set: (name: string, value: string) => {
+          headers[name] = value;
+          return res;
+        },
+        status: (code: number) => {
+          statusCode = code;
+          return res;
+        },
+        type: () => res,
+        send: (body: string) => {
+          sentBody = body;
+          return res;
+        },
+        redirect: redirectSpy,
+      };
+      const next = vi.fn();
+
+      await handlePublicEventCrawler(req, res, next);
+
+      expect(statusCode).toBe(200);
+      expect(headers['Vary']).toBe('User-Agent');
+      expect(redirectSpy).not.toHaveBeenCalled();
+      expect(sentBody).toContain('<meta property="og:title" content="No Loop Festival | Outside.vip" />');
+      expect(sentBody).not.toContain('http-equiv="refresh"');
+      expect(next).not.toHaveBeenCalled();
     });
 
     it('getEventSocialMetadata returns metadata when event is PUBLISHED', async () => {

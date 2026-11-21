@@ -530,6 +530,7 @@ export async function getOrganizerEventById(req: Request, res: Response, next: N
       ticketTiers: enrichedTicketTiers,
       passwordHash: undefined,
       payoutDetails: sanitizedPayout,
+      payoutDetailsId: isOwner ? event.payoutDetailsId : null,
       organizer: sanitizedOrganizer,
     };
 
@@ -1593,6 +1594,7 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
           ...updatedEvent,
           passwordHash: undefined,
           payoutDetails: isOwner ? sanitizePayoutDetails(updatedEvent?.payoutDetails) : null,
+          payoutDetailsId: isOwner ? (updatedEvent?.payoutDetailsId ?? null) : null,
         },
       },
     });

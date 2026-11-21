@@ -530,26 +530,58 @@ describe('Outside.vip Client Library', () => {
       expect(Array.isArray(rootConfig.rewrites)).toBe(true);
     });
 
-    it('contains API proxy rule followed by SPA catch-all fallback to index.html', () => {
+    it('contains /r short-link, crawler /events/:slug, API proxy, and SPA catch-all rules in order without (?i)', () => {
       const clientConfigPath = path.resolve(__dirname, '../vercel.json');
-      const clientConfig = JSON.parse(fs.readFileSync(clientConfigPath, 'utf8'));
+      const rootConfigPath = path.resolve(__dirname, '../../vercel.json');
+      const clientRaw = fs.readFileSync(clientConfigPath, 'utf8');
+      const rootRaw = fs.readFileSync(rootConfigPath, 'utf8');
 
-      const rewrites = clientConfig.rewrites as Array<{ source: string; destination: string }>;
-      expect(rewrites.length).toBeGreaterThanOrEqual(2);
+      // Unsupported PCRE inline (?i) flag must not appear in Vercel config
+      expect(clientRaw).not.toContain('(?i)');
+      expect(rootRaw).not.toContain('(?i)');
 
-      // Rule 1: API requests route to Render backend
+      const clientConfig = JSON.parse(clientRaw);
+      const rootConfig = JSON.parse(rootRaw);
+      expect(clientConfig).toEqual(rootConfig);
+
+      const rewrites = clientConfig.rewrites as Array<{
+        source: string;
+        destination: string;
+        has?: Array<{ type: string; key: string; value: string }>;
+      }>;
+      expect(rewrites.length).toBeGreaterThanOrEqual(4);
+
+      const shortLinkRewrite = rewrites.find((r) => r.source === '/r/:path*');
+      expect(shortLinkRewrite).toBeDefined();
+      expect(shortLinkRewrite!.destination).toBe('https://outside-vip.onrender.com/r/:path*');
+
+      const crawlerRewrite = rewrites.find((r) => r.source === '/events/:slug');
+      expect(crawlerRewrite).toBeDefined();
+      expect(crawlerRewrite!.destination).toBe('https://outside-vip.onrender.com/events/:slug');
+      expect(crawlerRewrite!.has?.[0]?.type).toBe('header');
+      expect(crawlerRewrite!.has?.[0]?.key).toBe('user-agent');
+      const crawlerRegex = new RegExp(crawlerRewrite!.has![0].value);
+      expect(crawlerRegex.test('WhatsApp/2.21.12.21 A')).toBe(true);
+      expect(crawlerRegex.test('WHATSAPP/2.21.12.21 A')).toBe(true);
+      expect(crawlerRegex.test('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/120.0.0.0')).toBe(false);
+
+      // Rule 3: API requests route to Render backend
       const apiRewrite = rewrites.find((r) => r.source === '/api/:path*');
       expect(apiRewrite).toBeDefined();
       expect(apiRewrite!.destination).toBe('https://outside-vip.onrender.com/api/:path*');
 
-      // Rule 2: SPA catch-all routes to /index.html
+      // Rule 4: SPA catch-all routes to /index.html
       const spaCatchAll = rewrites.find((r) => r.source === '/(.*)');
       expect(spaCatchAll).toBeDefined();
       expect(spaCatchAll!.destination).toBe('/index.html');
 
-      // Crucial: API rule MUST precede the SPA catch-all rule
+      // Crucial ordering: /r -> crawler /events/:slug -> /api -> SPA catch-all
+      const shortLinkIndex = rewrites.indexOf(shortLinkRewrite!);
+      const crawlerIndex = rewrites.indexOf(crawlerRewrite!);
       const apiIndex = rewrites.indexOf(apiRewrite!);
       const spaIndex = rewrites.indexOf(spaCatchAll!);
+      expect(shortLinkIndex).toBeLessThan(crawlerIndex);
+      expect(crawlerIndex).toBeLessThan(apiIndex);
       expect(apiIndex).toBeLessThan(spaIndex);
     });
 
@@ -610,6 +642,73 @@ describe('Outside.vip Client Library', () => {
         destination: 'https://outside-vip.onrender.com/api/:path*',
         type: 'api',
       });
+    });
+
+    it('routes /events/:slug crawlers to Render, /events/:slug humans and /events Discover to SPA, and preserves /r/:slug', () => {
+      const rootConfigPath = path.resolve(__dirname, '../../vercel.json');
+      const rootConfig = JSON.parse(fs.readFileSync(rootConfigPath, 'utf8'));
+      const rewrites = rootConfig.rewrites as Array<{
+        source: string;
+        destination: string;
+        has?: Array<{ type: string; key: string; value: string }>;
+      }>;
+
+      function simulateVercelRewrite(requestPath: string, userAgent: string): string {
+        for (const rule of rewrites) {
+          let pathMatches = false;
+          if (rule.source === '/r/:path*') {
+            pathMatches = /^\/r(?:\/.*)?$/.test(requestPath);
+          } else if (rule.source === '/events/:slug') {
+            pathMatches = /^\/events\/[^/]+$/.test(requestPath);
+          } else if (rule.source === '/api/:path*') {
+            pathMatches = /^\/api(?:\/.*)?$/.test(requestPath);
+          } else if (rule.source === '/(.*)') {
+            pathMatches = true;
+          }
+
+          if (!pathMatches) continue;
+
+          if (rule.has && rule.has.length > 0) {
+            const allMatch = rule.has.every((cond) => {
+              if (cond.type === 'header' && cond.key.toLowerCase() === 'user-agent') {
+                return new RegExp(cond.value).test(userAgent);
+              }
+              return false;
+            });
+            if (!allMatch) continue;
+          }
+
+          return rule.destination;
+        }
+        return requestPath;
+      }
+
+      const humanUA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36';
+      const crawlerUA = 'Twitterbot/1.0';
+      const upperCrawlerUA = 'FACEBOOKEXTERNALHIT/1.1';
+
+      // /events/:slug crawlers -> Render crawler endpoint
+      expect(simulateVercelRewrite('/events/sol-fest-2026', crawlerUA)).toBe(
+        'https://outside-vip.onrender.com/events/:slug'
+      );
+      expect(simulateVercelRewrite('/events/sol-fest-2026', upperCrawlerUA)).toBe(
+        'https://outside-vip.onrender.com/events/:slug'
+      );
+
+      // /events/:slug human browsers -> SPA index.html (no loop)
+      expect(simulateVercelRewrite('/events/sol-fest-2026', humanUA)).toBe('/index.html');
+
+      // /events (Discover page) -> SPA index.html even for crawlers
+      expect(simulateVercelRewrite('/events', crawlerUA)).toBe('/index.html');
+      expect(simulateVercelRewrite('/events', humanUA)).toBe('/index.html');
+
+      // /r/:slug short links preserved for both humans and crawlers
+      expect(simulateVercelRewrite('/r/vip-launch', humanUA)).toBe(
+        'https://outside-vip.onrender.com/r/:path*'
+      );
+      expect(simulateVercelRewrite('/r/vip-launch', crawlerUA)).toBe(
+        'https://outside-vip.onrender.com/r/:path*'
+      );
     });
   });
 

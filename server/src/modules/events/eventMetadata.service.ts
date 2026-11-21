@@ -1,4 +1,4 @@
-import { Event } from '@prisma/client';
+import { Event, EventStatus } from '@prisma/client';
 import { env } from '../../config/env.js';
 
 export interface EventSocialMetadata {
@@ -9,6 +9,16 @@ export interface EventSocialMetadata {
   type: string;
   twitterCard: 'summary_large_image' | 'summary';
   siteName: string;
+}
+
+/**
+ * Single authoritative publication-eligibility check for crawler HTML and public social metadata.
+ * Only events with status === PUBLISHED may expose public metadata.
+ */
+export function isEventPubliclyPublished(
+  event: { status?: EventStatus | string | null } | null | undefined
+): boolean {
+  return Boolean(event && event.status === EventStatus.PUBLISHED);
 }
 
 /**
