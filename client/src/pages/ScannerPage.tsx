@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';
 import { 
   CheckCircle2, 
   AlertTriangle, 
@@ -15,8 +14,9 @@ import {
   KeyRound,
   WifiOff,
 } from 'lucide-react';
-import { api } from '../lib/api';
+import { api, setActiveCsrfToken } from '../lib/api';
 import { useOptionalAuth } from '../context/AuthContext';
+import { useScannerSession } from '../components/auth/ScannerGuard';
 import { User } from '../types';
 import { 
   CameraStatus, 
@@ -50,63 +50,50 @@ const DEFAULT_EVENTS: EventOption[] = [];
 
 interface ScannerPageProps {
   initialUser?: User | null;
+  initialEvents?: EventOption[];
 }
 
-function useOptionalNavigate() {
-  try {
-    return useNavigate();
-  } catch {
-    return (to: any) => {
-      if (typeof window !== 'undefined') {
-        window.location.href = typeof to === 'string' ? to : to.pathname;
-      }
-    };
-  }
-}
-
-export const ScannerPage: React.FC<ScannerPageProps> = ({ initialUser }) => {
-  const navigate = useOptionalNavigate();
+export const ScannerPage: React.FC<ScannerPageProps> = ({ initialUser, initialEvents }) => {
   const auth = useOptionalAuth();
+  const scannerSession = useScannerSession();
   const user = initialUser !== undefined ? initialUser : auth?.user;
 
-  const [inviteToken] = useState<string | null>(() => {
-    if (typeof window !== 'undefined') {
-      const params = new URLSearchParams(window.location.search);
-      const paramToken = params.get('invite') || params.get('invitation') || params.get('token');
-      if (paramToken) {
-        try {
-          sessionStorage.setItem('outside_scanner_invite_token', paramToken);
-        } catch {}
-
-        // Sanitize the URL immediately: remove invite, invitation, and token query parameters
-        // using window.history.replaceState to avoid creating a new browser history entry,
-        // while preserving unrelated query parameters such as event or slug.
-        try {
-          if (window.history && typeof window.history.replaceState === 'function') {
-            const url = new URL(window.location.href);
-            url.searchParams.delete('invite');
-            url.searchParams.delete('invitation');
-            url.searchParams.delete('token');
-            const cleanSearch = url.searchParams.toString();
-            const cleanPath = url.pathname + (cleanSearch ? `?${cleanSearch}` : '') + url.hash;
-            window.history.replaceState(window.history.state, document.title, cleanPath);
-          }
-        } catch {}
-
-        return paramToken;
+  // Defensively sanitize any legacy invite/invitation/token query parameters from the URL
+  // using window.history.replaceState (preserving legitimate params such as event/slug),
+  // without ever storing invitation tokens in sessionStorage.
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      sessionStorage.removeItem('outside_scanner_invite_token');
+    } catch {}
+    try {
+      const url = new URL(window.location.href);
+      const hasLegacyParam =
+        url.searchParams.has('invite') ||
+        url.searchParams.has('invitation') ||
+        url.searchParams.has('token');
+      if (hasLegacyParam && window.history && typeof window.history.replaceState === 'function') {
+        url.searchParams.delete('invite');
+        url.searchParams.delete('invitation');
+        url.searchParams.delete('token');
+        const cleanSearch = url.searchParams.toString();
+        const cleanPath = url.pathname + (cleanSearch ? `?${cleanSearch}` : '') + url.hash;
+        window.history.replaceState(window.history.state, document.title, cleanPath);
       }
-      try {
-        return sessionStorage.getItem('outside_scanner_invite_token');
-      } catch {
-        return null;
-      }
+    } catch {}
+  }, []);
+
+  const [selectedEventId, setSelectedEventId] = useState<string>(() => {
+    if (initialEvents && initialEvents.length > 0) {
+      return initialEvents[0].slug || initialEvents[0].id;
     }
-    return null;
+    return '';
   });
-
-  const [selectedEventId, setSelectedEventId] = useState('');
-  const [eventsList, setEventsList] = useState<EventOption[]>(DEFAULT_EVENTS);
-  const [isLoadingEvents, setIsLoadingEvents] = useState(false);
+  const [eventsList, setEventsList] = useState<EventOption[]>(initialEvents ?? DEFAULT_EVENTS);
+  const [isLoadingEvents, setIsLoadingEvents] = useState<boolean>(
+    initialEvents === undefined && Boolean(user)
+  );
+  const [hasLoadedEvents, setHasLoadedEvents] = useState<boolean>(initialEvents !== undefined);
   const [refreshTrigger, setRefreshTrigger] = useState(0);
   const [ticketInput, setTicketInput] = useState('');
   const [scanStatus, setScanStatus] = useState<ScanStatus>('idle');
@@ -140,127 +127,6 @@ export const ScannerPage: React.FC<ScannerPageProps> = ({ initialUser }) => {
   useEffect(() => {
     scanStatusRef.current = scanStatus;
   }, [scanStatus]);
-
-  useEffect(() => {
-    let isMounted = true;
-    const fetchEvents = async () => {
-      setIsLoadingEvents(true);
-      try {
-        const gatesRes = await api.scanner.getGates();
-        if (isMounted && gatesRes.events && gatesRes.events.length > 0) {
-          const list: EventOption[] = gatesRes.events.map((e) => ({
-            id: e.id,
-            title: e.title,
-            slug: e.slug,
-          }));
-          setEventsList(list);
-
-          if (typeof window !== 'undefined') {
-            const params = new URLSearchParams(window.location.search);
-            const eventParam = params.get('event') || params.get('slug');
-            if (eventParam) {
-              const matched = list.find((e) => e.id === eventParam || e.slug === eventParam);
-              if (matched) {
-                setSelectedEventId(matched.id);
-                try {
-                  sessionStorage.removeItem('outside_scanner_invite_token');
-                } catch {}
-              } else {
-                setSelectedEventId(eventParam);
-                scanStatusRef.current = 'forbidden';
-                setScanStatus('forbidden');
-                setTicketMeta({
-                  note: 'You do not have permission to check in tickets for this event. You are not assigned to this event gate.',
-                });
-                setIsLoadingEvents(false);
-                return;
-              }
-            } else {
-              setSelectedEventId(list[0].id);
-              try {
-                sessionStorage.removeItem('outside_scanner_invite_token');
-              } catch {}
-            }
-          }
-          setIsLoadingEvents(false);
-          return;
-        }
-
-        if (isMounted && user?.role === 'ATTENDEE') {
-          setEventsList([]);
-          setIsLoadingEvents(false);
-          return;
-        }
-
-        if (isMounted) {
-          setEventsList([]);
-          setIsLoadingEvents(false);
-          return;
-        }
-      } catch (err: any) {
-        console.warn('Could not load scanner gates:', err);
-        const status = err?.statusCode || err?.status;
-        if (isMounted && user?.role === 'ATTENDEE') {
-          setEventsList([]);
-          setIsLoadingEvents(false);
-          if (status === 401) {
-            scanStatusRef.current = 'session_expired';
-            stopCamera();
-            setScanStatus('session_expired');
-            setTicketMeta({
-              note: 'Your scanner session has expired due to inactivity. Please resume your session.',
-            });
-            return;
-          }
-          if (status === 403) {
-            scanStatusRef.current = 'forbidden';
-            stopCamera();
-            setScanStatus('forbidden');
-            setTicketMeta({
-              note: err?.message || 'You do not have permission to check in tickets at this gate. Your staff assignment may have been revoked.',
-            });
-            return;
-          }
-        }
-        if (isMounted) {
-          setEventsList([]);
-          setIsLoadingEvents(false);
-          if (status === 401) {
-            scanStatusRef.current = 'session_expired';
-            stopCamera();
-            setScanStatus('session_expired');
-            setTicketMeta({
-              note: 'Your scanner session has expired due to inactivity. Please resume your session.',
-            });
-            return;
-          }
-          if (status === 403) {
-            scanStatusRef.current = 'forbidden';
-            stopCamera();
-            setScanStatus('forbidden');
-            setTicketMeta({
-              note: err?.message || 'You do not have permission to check in tickets at this gate. Your staff assignment may have been revoked.',
-            });
-            return;
-          }
-        }
-      }
-    };
-
-    fetchEvents();
-
-    if (typeof window !== 'undefined') {
-      const params = new URLSearchParams(window.location.search);
-      const eventParam = params.get('event') || params.get('slug');
-      if (eventParam) {
-        setSelectedEventId(eventParam);
-      }
-    }
-
-    return () => {
-      isMounted = false;
-    };
-  }, [user?.role, refreshTrigger]);
 
   // ========================================================
   // Camera & Viewfinder Resource Management
@@ -301,6 +167,123 @@ export const ScannerPage: React.FC<ScannerPageProps> = ({ initialUser }) => {
     setCameraErrorMessage(null);
   }, [stopHeartbeat]);
 
+  const handleSessionExpired = useCallback(
+    (message?: string) => {
+      const note =
+        message ||
+        'Your scanner session has expired due to inactivity. Please sign in again with a 6-digit email code.';
+      scanStatusRef.current = 'session_expired';
+      isScanningPausedRef.current = true;
+      pendingScanRef.current = null;
+      stopCamera();
+      stopHeartbeat();
+      if (scannerSession) {
+        scannerSession.notifySessionExpired(user?.email, note);
+        return;
+      }
+      if (auth?.clearSessionState) {
+        auth.clearSessionState();
+      } else {
+        setActiveCsrfToken(null);
+      }
+      setScanStatus('session_expired');
+      setTicketMeta({ note });
+    },
+    [auth, scannerSession, stopCamera, stopHeartbeat, user?.email]
+  );
+
+  const handleForbiddenAccess = useCallback(
+    (message?: string) => {
+      scanStatusRef.current = 'forbidden';
+      isScanningPausedRef.current = true;
+      pendingScanRef.current = null;
+      stopCamera();
+      stopHeartbeat();
+      setScanStatus('forbidden');
+      setTicketMeta({
+        note:
+          message ||
+          'You do not have permission to check in tickets at this gate. Your staff assignment may have been revoked.',
+      });
+    },
+    [stopCamera, stopHeartbeat]
+  );
+
+  useEffect(() => {
+    let isMounted = true;
+    const fetchEvents = async () => {
+      setIsLoadingEvents(true);
+      try {
+        const gatesRes = await api.scanner.getGates();
+        if (!isMounted) return;
+
+        if (gatesRes.events && gatesRes.events.length > 0) {
+          const list: EventOption[] = gatesRes.events.map((e) => ({
+            id: e.id,
+            title: e.title,
+            slug: e.slug,
+          }));
+          setEventsList(list);
+
+          if (typeof window !== 'undefined') {
+            const params = new URLSearchParams(window.location.search);
+            const eventParam = params.get('event') || params.get('slug');
+            if (eventParam) {
+              const matched = list.find((e) => e.id === eventParam || e.slug === eventParam);
+              if (matched) {
+                setSelectedEventId(matched.slug || matched.id);
+              } else {
+                setSelectedEventId(eventParam);
+                handleForbiddenAccess(
+                  'You do not have permission to check in tickets for this event. You are not assigned to this event gate.'
+                );
+                setHasLoadedEvents(true);
+                setIsLoadingEvents(false);
+                return;
+              }
+            } else {
+              setSelectedEventId(list[0].slug || list[0].id);
+            }
+          } else {
+            setSelectedEventId(list[0].slug || list[0].id);
+          }
+
+          setHasLoadedEvents(true);
+          setIsLoadingEvents(false);
+          return;
+        }
+
+        setEventsList([]);
+        setSelectedEventId('');
+        setHasLoadedEvents(true);
+        setIsLoadingEvents(false);
+      } catch (err: any) {
+        console.warn('Could not load scanner gates:', err);
+        if (!isMounted) return;
+        const status = err?.statusCode || err?.status;
+        setEventsList([]);
+        setHasLoadedEvents(true);
+        setIsLoadingEvents(false);
+        if (status === 401) {
+          handleSessionExpired(
+            'Your scanner session has expired due to inactivity. Please sign in again with a 6-digit email code.'
+          );
+          return;
+        }
+        if (status === 403) {
+          handleForbiddenAccess(err?.message);
+          return;
+        }
+      }
+    };
+
+    fetchEvents();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [user?.id, user?.role, refreshTrigger, handleSessionExpired, handleForbiddenAccess]);
+
   useEffect(() => {
     let isMounted = true;
 
@@ -315,29 +298,15 @@ export const ScannerPage: React.FC<ScannerPageProps> = ({ initialUser }) => {
         await api.scanner.ping();
       } catch (err: any) {
         if (!isMounted) return;
-        const status = err?.statusCode;
+        const status = err?.statusCode || err?.status;
         if (status === 401) {
-          scanStatusRef.current = 'session_expired';
-          isScanningPausedRef.current = true;
-          pendingScanRef.current = null;
-          stopCamera();
-          stopHeartbeat();
-          setScanStatus('session_expired');
-          setTicketMeta({
-            note: 'Your scanner session has expired due to inactivity. Please resume your session.',
-          });
+          handleSessionExpired(
+            'Your scanner session has expired due to inactivity. Please sign in again with a 6-digit email code.'
+          );
           return;
         }
         if (status === 403) {
-          scanStatusRef.current = 'forbidden';
-          isScanningPausedRef.current = true;
-          pendingScanRef.current = null;
-          stopCamera();
-          stopHeartbeat();
-          setScanStatus('forbidden');
-          setTicketMeta({
-            note: err?.message || 'You do not have permission to check in tickets at this gate. Your staff assignment may have been revoked.',
-          });
+          handleForbiddenAccess(err?.message);
           return;
         }
         console.warn('[Scanner Heartbeat] Transient ping failure:', err?.message || err);
@@ -381,12 +350,13 @@ export const ScannerPage: React.FC<ScannerPageProps> = ({ initialUser }) => {
         document.removeEventListener('visibilitychange', handleVisibilityChange);
       }
     };
-  }, [cameraStatus, stopCamera, stopHeartbeat]);
+  }, [cameraStatus, stopHeartbeat, handleSessionExpired, handleForbiddenAccess]);
 
   const startCamera = useCallback(async (preferredFacing: 'environment' | 'user' = facingMode) => {
     if (
       scanStatusRef.current === 'forbidden' ||
       scanStatusRef.current === 'session_expired' ||
+      isLoadingEvents ||
       (user?.role === 'ATTENDEE' && eventsList.length === 0)
     ) {
       return;
@@ -463,7 +433,7 @@ export const ScannerPage: React.FC<ScannerPageProps> = ({ initialUser }) => {
       setCameraStatus(details.type as CameraStatus);
       setCameraErrorMessage(details.message);
     }
-  }, [facingMode]);
+  }, [facingMode, isLoadingEvents, user?.role, eventsList.length]);
 
   const toggleFacingMode = () => {
     const nextMode = facingMode === 'environment' ? 'user' : 'environment';
@@ -614,25 +584,9 @@ export const ScannerPage: React.FC<ScannerPageProps> = ({ initialUser }) => {
           tier: err.data?.ticket?.tierName,
         });
       } else if (status === 401) {
-        scanStatusRef.current = 'session_expired';
-        isScanningPausedRef.current = true;
-        pendingScanRef.current = null;
-        stopCamera();
-        stopHeartbeat();
-        setScanStatus('session_expired');
-        setTicketMeta({
-          note: message || 'Your scanner session has expired due to inactivity. Please resume your session.',
-        });
+        handleSessionExpired(message);
       } else if (status === 403) {
-        scanStatusRef.current = 'forbidden';
-        isScanningPausedRef.current = true;
-        pendingScanRef.current = null;
-        stopCamera();
-        stopHeartbeat();
-        setScanStatus('forbidden');
-        setTicketMeta({
-          note: message || 'You do not have permission to check in tickets at this gate. Your staff assignment may have been revoked.',
-        });
+        handleForbiddenAccess(message);
       } else {
         // Uncertain outcome (network dropout, dropped socket, timeout)
         // Keep pendingScanRef.current so Retry Check-In sends the EXACT same idempotencyKey!
@@ -724,7 +678,10 @@ export const ScannerPage: React.FC<ScannerPageProps> = ({ initialUser }) => {
     pendingScanRef.current = null;
   };
 
-  const hasNoAssignedGates = user?.role === 'ATTENDEE' && !isLoadingEvents && eventsList.length === 0;
+  const isInitialAttendeeGateLoad =
+    user?.role === 'ATTENDEE' && isLoadingEvents && !hasLoadedEvents && eventsList.length === 0;
+  const hasNoAssignedGates =
+    user?.role === 'ATTENDEE' && !isLoadingEvents && hasLoadedEvents && eventsList.length === 0;
 
   return (
     <div className="max-w-3xl mx-auto px-4 py-10 space-y-8">
@@ -743,7 +700,14 @@ export const ScannerPage: React.FC<ScannerPageProps> = ({ initialUser }) => {
         </p>
       </div>
 
-      {hasNoAssignedGates ? (
+      {isInitialAttendeeGateLoad ? (
+        <div className="bg-white rounded-2xl p-8 sm:p-12 text-center border border-gray-200 shadow-sm space-y-3">
+          <Loader2 className="w-7 h-7 animate-spin text-gray-700 mx-auto" />
+          <p className="text-xs font-mono uppercase tracking-wider text-gray-500">
+            Loading assigned event gates...
+          </p>
+        </div>
+      ) : hasNoAssignedGates ? (
         <div className="bg-white rounded-2xl p-8 sm:p-12 text-center border border-gray-200 shadow-sm space-y-4">
           <div className="w-14 h-14 rounded-2xl bg-amber-50 text-amber-600 flex items-center justify-center mx-auto border border-amber-200/60">
             <Lock className="w-7 h-7" />
@@ -1200,30 +1164,27 @@ export const ScannerPage: React.FC<ScannerPageProps> = ({ initialUser }) => {
                 </div>
 
                 <div className="pt-2 flex flex-col sm:flex-row items-center justify-center gap-3">
-                  {inviteToken ? (
+                  <div className="w-full max-w-xs space-y-2">
+                    <p className="text-[11px] text-gray-500">
+                      Sign in directly at the scanner with a 6-digit email verification code (or password for organizers).
+                    </p>
                     <button
                       type="button"
-                      onClick={() => navigate(`/staff/invitations/${inviteToken}`)}
+                      onClick={() => {
+                        if (scannerSession) {
+                          scannerSession.notifySessionExpired(user?.email);
+                        } else if (auth?.clearSessionState) {
+                          auth.clearSessionState();
+                        } else if (typeof window !== 'undefined') {
+                          window.location.reload();
+                        }
+                      }}
                       className="inline-flex items-center gap-2 px-6 py-2.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-semibold text-xs uppercase tracking-wider transition-colors shadow-sm"
                     >
-                      <RotateCw className="w-4 h-4" />
-                      Resume Staff Session
+                      <KeyRound className="w-4 h-4" />
+                      Sign In with Email Code
                     </button>
-                  ) : (
-                    <div className="w-full max-w-xs space-y-2">
-                      <p className="text-[11px] text-gray-500">
-                        Open your original staff invitation email to restore your session with a verification code.
-                      </p>
-                      <button
-                        type="button"
-                        onClick={() => window.location.reload()}
-                        className="inline-flex items-center gap-2 px-6 py-2.5 rounded-xl bg-gray-900 hover:bg-black text-white font-semibold text-xs uppercase tracking-wider transition-colors shadow-sm"
-                      >
-                        <RefreshCw className="w-4 h-4" />
-                        Reload Scanner
-                      </button>
-                    </div>
-                  )}
+                  </div>
                 </div>
               </div>
             )}

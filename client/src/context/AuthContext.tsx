@@ -6,6 +6,13 @@ interface AuthContextType {
   user: User | null;
   isLoading: boolean;
   login: (email: string, password: string) => Promise<void>;
+  requestLoginOtp?: (email: string) => Promise<{
+    message: string;
+    cooldownSeconds: number;
+    expiresInMinutes: number;
+  }>;
+  verifyLoginOtp?: (email: string, code: string) => Promise<User>;
+  clearSessionState?: () => void;
   register: (data: {
     email: string;
     password: string;
@@ -76,6 +83,29 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setUser(data.user);
   };
 
+  const requestLoginOtp = async (email: string) => {
+    const data = await api.auth.requestLoginOtp({ email });
+    return {
+      message: data.message,
+      cooldownSeconds: data.cooldownSeconds,
+      expiresInMinutes: data.expiresInMinutes,
+    };
+  };
+
+  const verifyLoginOtp = async (email: string, code: string): Promise<User> => {
+    const data = await api.auth.verifyLoginOtp({ email, code });
+    if (data.csrfToken) {
+      setActiveCsrfToken(data.csrfToken);
+    }
+    setUser(data.user);
+    return data.user;
+  };
+
+  const clearSessionState = () => {
+    setActiveCsrfToken(null);
+    setUser(null);
+  };
+
   const register = async (input: {
     email: string;
     password: string;
@@ -124,6 +154,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         user,
         isLoading,
         login,
+        requestLoginOtp,
+        verifyLoginOtp,
+        clearSessionState,
         register,
         verifyEmail,
         resendVerification,

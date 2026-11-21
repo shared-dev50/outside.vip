@@ -185,7 +185,28 @@ describe('Passwordless Staff Acceptance & Session Issuance API', () => {
       expect(res.body.error.code).toBe('INVITATION_REVOKED');
     });
 
-    it('returns safe metadata with accepted status when invitation was already accepted', async () => {
+    it('returns minimal safe metadata without session resumption or account disclosure for unauthenticated caller on ACCEPTED invitation', async () => {
+      const mockInvite = createMockInvitation({ status: 'ACCEPTED' });
+      vi.spyOn(prisma.eventStaffInvitation, 'findUnique').mockResolvedValue(mockInvite as any);
+      const userFindSpy = vi.spyOn(prisma.user, 'findUnique');
+      const staffFindSpy = vi.spyOn(prisma.eventStaff, 'findUnique');
+
+      const res = await request(app).get(`/api/staff/invitations/${rawToken}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.data.invitation.status).toBe('ACCEPTED');
+      expect(res.body.data.invitation.isCurrentAccount).toBe(false);
+      expect(res.body.data.invitation.hasPassword).toBe(false);
+      expect(res.body.data.invitation.requiresLogin).toBe(false);
+      expect(res.body.data.invitation.isAssignmentActive).toBeUndefined();
+      expect(res.body.data.invitation.canResumeSession).toBe(false);
+      expect(res.body.data.event.title).toBe(mockEvent.title);
+      expect(userFindSpy).not.toHaveBeenCalled();
+      expect(staffFindSpy).not.toHaveBeenCalled();
+    });
+
+    it('returns isCurrentAccount: true and active status (with canResumeSession: false) when matching authenticated staff member reopens accepted link', async () => {
       const mockInvite = createMockInvitation({ status: 'ACCEPTED' });
       vi.spyOn(prisma.eventStaffInvitation, 'findUnique').mockResolvedValue(mockInvite as any);
       vi.spyOn(prisma.user, 'findUnique').mockResolvedValue({
@@ -193,30 +214,6 @@ describe('Passwordless Staff Acceptance & Session Issuance API', () => {
         email: mockInvite.email,
         passwordHash: null,
         status: AccountStatus.ACTIVE,
-      } as any);
-      vi.spyOn(prisma.eventStaff, 'findUnique').mockResolvedValue({
-        id: 'staff-assignment-1',
-        status: 'ACTIVE',
-      } as any);
-
-      const res = await request(app).get(`/api/staff/invitations/${rawToken}`);
-
-      expect(res.status).toBe(200);
-      expect(res.body.success).toBe(true);
-      expect(res.body.data.invitation.status).toBe('ACCEPTED');
-      expect(res.body.data.invitation.isAssignmentActive).toBe(true);
-      expect(res.body.data.invitation.hasPassword).toBe(false);
-      expect(res.body.data.invitation.canResumeSession).toBe(true);
-      expect(res.body.data.event.title).toBe(mockEvent.title);
-    });
-
-    it('returns isCurrentAccount: true when matching authenticated staff member reopens accepted link', async () => {
-      const mockInvite = createMockInvitation({ status: 'ACCEPTED' });
-      vi.spyOn(prisma.eventStaffInvitation, 'findUnique').mockResolvedValue(mockInvite as any);
-      vi.spyOn(prisma.user, 'findUnique').mockResolvedValue({
-        id: 'staff-user-1',
-        email: mockInvite.email,
-        passwordHash: null,
       } as any);
       vi.spyOn(prisma.eventStaff, 'findUnique').mockResolvedValue({
         id: 'staff-assignment-1',
@@ -235,21 +232,13 @@ describe('Passwordless Staff Acceptance & Session Issuance API', () => {
       expect(res.status).toBe(200);
       expect(res.body.data.invitation.status).toBe('ACCEPTED');
       expect(res.body.data.invitation.isCurrentAccount).toBe(true);
+      expect(res.body.data.invitation.isAssignmentActive).toBe(true);
       expect(res.body.data.invitation.canResumeSession).toBe(false);
     });
 
-    it('returns isCurrentAccount: false when mismatched authenticated account reopens accepted link', async () => {
+    it('returns isCurrentAccount: false and omits assignment details when mismatched authenticated account reopens accepted link', async () => {
       const mockInvite = createMockInvitation({ status: 'ACCEPTED' });
       vi.spyOn(prisma.eventStaffInvitation, 'findUnique').mockResolvedValue(mockInvite as any);
-      vi.spyOn(prisma.user, 'findUnique').mockResolvedValue({
-        id: 'staff-user-1',
-        email: mockInvite.email,
-        passwordHash: null,
-      } as any);
-      vi.spyOn(prisma.eventStaff, 'findUnique').mockResolvedValue({
-        id: 'staff-assignment-1',
-        status: 'ACTIVE',
-      } as any);
 
       const foreignToken = jwt.sign(
         { userId: 'foreign-user-2', email: 'other@outside.vip', role: Role.ATTENDEE },
@@ -262,22 +251,32 @@ describe('Passwordless Staff Acceptance & Session Issuance API', () => {
 
       expect(res.status).toBe(200);
       expect(res.body.data.invitation.isCurrentAccount).toBe(false);
+      expect(res.body.data.invitation.isAssignmentActive).toBeUndefined();
+      expect(res.body.data.invitation.canResumeSession).toBe(false);
     });
 
-    it('returns isAssignmentActive: false when accepted staff assignment has been revoked', async () => {
+    it('returns isAssignmentActive: false for matching authenticated staff when accepted staff assignment has been revoked', async () => {
       const mockInvite = createMockInvitation({ status: 'ACCEPTED' });
       vi.spyOn(prisma.eventStaffInvitation, 'findUnique').mockResolvedValue(mockInvite as any);
       vi.spyOn(prisma.user, 'findUnique').mockResolvedValue({
         id: 'staff-user-1',
         email: mockInvite.email,
         passwordHash: null,
+        status: AccountStatus.ACTIVE,
       } as any);
       vi.spyOn(prisma.eventStaff, 'findUnique').mockResolvedValue({
         id: 'staff-assignment-1',
         status: 'REVOKED',
       } as any);
 
-      const res = await request(app).get(`/api/staff/invitations/${rawToken}`);
+      const staffToken = jwt.sign(
+        { userId: 'staff-user-1', email: mockInvite.email, role: Role.ATTENDEE },
+        env.JWT_SECRET
+      );
+
+      const res = await request(app)
+        .get(`/api/staff/invitations/${rawToken}`)
+        .set('Authorization', `Bearer ${staffToken}`);
 
       expect(res.status).toBe(200);
       expect(res.body.data.invitation.isAssignmentActive).toBe(false);
@@ -462,66 +461,47 @@ describe('Passwordless Staff Acceptance & Session Issuance API', () => {
       expect(lockId).toMatch(/^[0-9a-f-]{36}$/);
     });
 
-    it('allows passwordless returning staff to request OTP on already accepted invitation with active assignment', async () => {
+    it('STG2-02 (AUTH-S02): rejects OTP request on already ACCEPTED invitation with 409 INVITATION_ALREADY_ACCEPTED without writing OTP or sending email', async () => {
       const mockInvite = createMockInvitation({ status: 'ACCEPTED' });
       vi.spyOn(prisma.eventStaffInvitation, 'findUnique').mockResolvedValue(mockInvite as any);
-      vi.spyOn(prisma.user, 'findUnique').mockResolvedValue({
-        id: 'staff-returning-1',
-        email: mockInvite.email,
-        passwordHash: null,
-        status: AccountStatus.ACTIVE,
-      } as any);
-      vi.spyOn(prisma.eventStaff, 'findUnique').mockResolvedValue({
-        id: 'staff-assignment-1',
-        status: 'ACTIVE',
-      } as any);
-
-      const updateSpy = vi.spyOn(prisma.eventStaffInvitation, 'update').mockResolvedValue({} as any);
+      const updateSpy = vi.spyOn(prisma.eventStaffInvitation, 'update');
 
       const res = await request(app).post(`/api/staff/invitations/${rawToken}/request-otp`);
 
-      expect(res.status).toBe(200);
-      expect(res.body.success).toBe(true);
-      expect(updateSpy).toHaveBeenCalledTimes(1);
-      expect(emailService.sentStaffOtpEmails.length).toBe(1);
-      expect(emailService.sentStaffOtpEmails[0].to).toBe(mockInvite.email);
-    });
-
-    it('blocks OTP request on accepted invitation if EventStaff assignment was revoked', async () => {
-      const mockInvite = createMockInvitation({ status: 'ACCEPTED' });
-      vi.spyOn(prisma.eventStaffInvitation, 'findUnique').mockResolvedValue(mockInvite as any);
-      vi.spyOn(prisma.user, 'findUnique').mockResolvedValue({
-        id: 'staff-returning-1',
-        email: mockInvite.email,
-        passwordHash: null,
-        status: AccountStatus.ACTIVE,
-      } as any);
-      vi.spyOn(prisma.eventStaff, 'findUnique').mockResolvedValue({
-        id: 'staff-assignment-1',
-        status: 'REVOKED',
-      } as any);
-
-      const res = await request(app).post(`/api/staff/invitations/${rawToken}/request-otp`);
-
-      expect(res.status).toBe(403);
-      expect(res.body.error.code).toBe('STAFF_ASSIGNMENT_NOT_ACTIVE');
+      expect(res.status).toBe(409);
+      expect(res.body.error.code).toBe('INVITATION_ALREADY_ACCEPTED');
+      expect(updateSpy).not.toHaveBeenCalled();
       expect(emailService.sentStaffOtpEmails.length).toBe(0);
     });
 
-    it('blocks OTP request on accepted invitation if account has a password set', async () => {
-      const mockInvite = createMockInvitation({ status: 'ACCEPTED' });
+    it('STG2-02: rejects OTP request on ACCEPTED invitation even if invitation expiresAt is in the past', async () => {
+      const mockInvite = createMockInvitation({
+        status: 'ACCEPTED',
+        expiresAt: new Date(Date.now() - 60_000),
+      });
       vi.spyOn(prisma.eventStaffInvitation, 'findUnique').mockResolvedValue(mockInvite as any);
-      vi.spyOn(prisma.user, 'findUnique').mockResolvedValue({
-        id: 'staff-returning-1',
-        email: mockInvite.email,
-        passwordHash: '$2a$10$hashedpasswordvalue',
-        status: AccountStatus.ACTIVE,
-      } as any);
 
       const res = await request(app).post(`/api/staff/invitations/${rawToken}/request-otp`);
 
-      expect(res.status).toBe(400);
-      expect(res.body.error.code).toBe('PASSWORD_LOGIN_REQUIRED');
+      expect(res.status).toBe(409);
+      expect(res.body.error.code).toBe('INVITATION_ALREADY_ACCEPTED');
+      expect(emailService.sentStaffOtpEmails.length).toBe(0);
+    });
+
+    it('STG2-02: rejects OTP request with 409 INVITATION_ALREADY_ACCEPTED when invitation transitions to ACCEPTED concurrently before lock read', async () => {
+      const pendingInvite = createMockInvitation({ status: 'PENDING' });
+      const acceptedInvite = createMockInvitation({ status: 'ACCEPTED' });
+      vi.spyOn(prisma.eventStaffInvitation, 'findUnique')
+        .mockResolvedValueOnce(pendingInvite as any)
+        .mockResolvedValueOnce(acceptedInvite as any);
+      vi.spyOn(prisma.user, 'findUnique').mockResolvedValue(null);
+      const updateSpy = vi.spyOn(prisma.eventStaffInvitation, 'update');
+
+      const res = await request(app).post(`/api/staff/invitations/${rawToken}/request-otp`);
+
+      expect(res.status).toBe(409);
+      expect(res.body.error.code).toBe('INVITATION_ALREADY_ACCEPTED');
+      expect(updateSpy).not.toHaveBeenCalled();
       expect(emailService.sentStaffOtpEmails.length).toBe(0);
     });
   });
@@ -555,7 +535,7 @@ describe('Passwordless Staff Acceptance & Session Issuance API', () => {
       const mockTx = {
         eventStaffInvitation: {
           findUnique: vi.fn().mockResolvedValue(mockInvite),
-          update: vi.fn().mockResolvedValue({ ...mockInvite, status: 'ACCEPTED' }),
+          updateMany: vi.fn().mockResolvedValue({ count: 1 }),
         },
         user: {
           findUnique: vi.fn().mockResolvedValue(null),
@@ -607,9 +587,9 @@ describe('Passwordless Staff Acceptance & Session Issuance API', () => {
         })
       );
 
-      expect(mockTx.eventStaffInvitation.update).toHaveBeenCalledWith(
+      expect(mockTx.eventStaffInvitation.updateMany).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { id: mockInvite.id },
+          where: { id: mockInvite.id, status: 'PENDING' },
           data: expect.objectContaining({
             status: 'ACCEPTED',
             codeHash: null,
@@ -744,7 +724,7 @@ describe('Passwordless Staff Acceptance & Session Issuance API', () => {
       const mockTx = {
         eventStaffInvitation: {
           findUnique: vi.fn().mockResolvedValue(mockInvite),
-          update: vi.fn().mockResolvedValue({ ...mockInvite, status: 'ACCEPTED' }),
+          updateMany: vi.fn().mockResolvedValue({ count: 1 }),
         },
         user: {
           findUnique: vi.fn().mockResolvedValue(existingPasswordlessUser),
@@ -791,7 +771,7 @@ describe('Passwordless Staff Acceptance & Session Issuance API', () => {
       );
     });
 
-    it('verifies valid OTP for returning passwordless staff, resumes session without creating duplicate user or staff', async () => {
+    it('STG2-02 (AUTH-S02): rejects OTP verification on ACCEPTED invitation with 409 INVITATION_ALREADY_ACCEPTED and never issues a session', async () => {
       const validCode = '778899';
       const secret = env.SESSION_SECRET || env.JWT_SECRET;
       const validHmac = crypto.createHmac('sha256', secret).update(`${invitationId}:${validCode}`).digest('hex');
@@ -803,120 +783,74 @@ describe('Passwordless Staff Acceptance & Session Issuance API', () => {
         otpExpiresAt: new Date(Date.now() + 500000),
       });
 
+      vi.spyOn(prisma.eventStaffInvitation, 'findUnique').mockResolvedValue(mockInvite as any);
+      const rotateSpy = vi.spyOn(sessionService, 'rotateSession');
+
+      const res = await request(app)
+        .post(`/api/staff/invitations/${rawToken}/verify-otp`)
+        .send({ code: validCode });
+
+      expect(res.status).toBe(409);
+      expect(res.body.error.code).toBe('INVITATION_ALREADY_ACCEPTED');
+      expect(rotateSpy).not.toHaveBeenCalled();
+      expect(res.headers['set-cookie']).toBeUndefined();
+    });
+
+    it('STG2-02: rejects OTP verification with 409 INVITATION_ALREADY_ACCEPTED if invitation transitions to ACCEPTED before transaction updateMany', async () => {
+      const validCode = '778899';
+      const secret = env.SESSION_SECRET || env.JWT_SECRET;
+      const validHmac = crypto.createHmac('sha256', secret).update(`${invitationId}:${validCode}`).digest('hex');
+
+      const pendingInvite = createMockInvitation({
+        status: 'PENDING',
+        codeHash: validHmac,
+        otpSentAt: new Date(Date.now() - 30000),
+        otpExpiresAt: new Date(Date.now() + 500000),
+      });
+
       const existingStaffUser = {
-        id: 'user-returning-staff-uuid',
-        email: mockInvite.email,
-        name: 'returningstaff',
+        id: 'user-race-staff-uuid',
+        email: pendingInvite.email,
+        name: 'racestaff',
         passwordHash: null,
         role: Role.ATTENDEE,
         status: AccountStatus.ACTIVE,
         emailVerified: true,
       };
 
-      const existingStaffRecord = {
-        id: 'staff-assignment-uuid-existing',
-        eventId,
-        userId: existingStaffUser.id,
-        status: 'ACTIVE',
-      };
-
-      vi.spyOn(prisma.eventStaffInvitation, 'findUnique').mockResolvedValue(mockInvite as any);
+      vi.spyOn(prisma.eventStaffInvitation, 'findUnique').mockResolvedValue(pendingInvite as any);
       vi.spyOn(prisma.user, 'findUnique').mockResolvedValue(existingStaffUser as any);
-      vi.spyOn(prisma.eventStaff, 'findUnique').mockResolvedValue(existingStaffRecord as any);
 
       const mockTx = {
         eventStaffInvitation: {
-          findUnique: vi.fn().mockResolvedValue(mockInvite),
-          update: vi.fn().mockResolvedValue(mockInvite),
+          findUnique: vi.fn().mockResolvedValue(pendingInvite),
+          updateMany: vi.fn().mockResolvedValue({ count: 0 }),
         },
         user: {
           findUnique: vi.fn().mockResolvedValue(existingStaffUser),
-          create: vi.fn(),
-          update: vi.fn(),
         },
         eventStaff: {
-          findUnique: vi.fn().mockResolvedValue(existingStaffRecord),
-          create: vi.fn(),
-          update: vi.fn(),
+          findUnique: vi.fn().mockResolvedValue(null),
+          create: vi.fn().mockResolvedValue({ id: 'staff-1', status: 'ACTIVE' }),
         },
       };
 
-      vi.spyOn(prisma, '$transaction').mockImplementation(async (callback: any) => {
-        return callback(mockTx);
-      });
-
-      vi.spyOn(sessionService, 'rotateSession').mockResolvedValue({
-        sessionId: 'sess-resumed-id',
-        rawCookieValue: 'sess-resumed-id.cookie-val',
-        csrfToken: 'csrf-resumed-val',
-        record: {} as any,
-      });
+      vi.spyOn(prisma, '$transaction').mockImplementation(async (callback: any) => callback(mockTx));
+      const rotateSpy = vi.spyOn(sessionService, 'rotateSession');
 
       const res = await request(app)
         .post(`/api/staff/invitations/${rawToken}/verify-otp`)
         .send({ code: validCode });
 
-      expect(res.status).toBe(200);
-      expect(res.body.success).toBe(true);
-      expect(res.body.data.user.id).toBe(existingStaffUser.id);
-      expect(res.body.data.status).toBe('ACTIVE');
-
-      // Crucial invariants: no duplicate creation and no role/password modification
-      expect(mockTx.user.create).not.toHaveBeenCalled();
-      expect(mockTx.eventStaff.create).not.toHaveBeenCalled();
-      expect(mockTx.user.update).not.toHaveBeenCalled();
-
-      // Clears OTP state on the invitation
-      expect(mockTx.eventStaffInvitation.update).toHaveBeenCalledWith(
-        expect.objectContaining({
-          where: { id: mockInvite.id },
-          data: expect.objectContaining({
-            codeHash: null,
-            otpExpiresAt: null,
-            otpSentAt: null,
-            attempts: 0,
-          }),
-        })
-      );
-    });
-
-    it('blocks OTP verification on accepted invitation if EventStaff assignment was revoked', async () => {
-      const validCode = '778899';
-      const secret = env.SESSION_SECRET || env.JWT_SECRET;
-      const validHmac = crypto.createHmac('sha256', secret).update(`${invitationId}:${validCode}`).digest('hex');
-
-      const mockInvite = createMockInvitation({
-        status: 'ACCEPTED',
-        codeHash: validHmac,
-        otpSentAt: new Date(Date.now() - 30000),
-        otpExpiresAt: new Date(Date.now() + 500000),
-      });
-
-      const existingStaffUser = {
-        id: 'user-returning-staff-uuid',
-        email: mockInvite.email,
-        passwordHash: null,
-        status: AccountStatus.ACTIVE,
-      };
-
-      vi.spyOn(prisma.eventStaffInvitation, 'findUnique').mockResolvedValue(mockInvite as any);
-      vi.spyOn(prisma.user, 'findUnique').mockResolvedValue(existingStaffUser as any);
-      vi.spyOn(prisma.eventStaff, 'findUnique').mockResolvedValue({
-        id: 'assignment-1',
-        status: 'REVOKED',
-      } as any);
-
-      const res = await request(app)
-        .post(`/api/staff/invitations/${rawToken}/verify-otp`)
-        .send({ code: validCode });
-
-      expect(res.status).toBe(403);
-      expect(res.body.error.code).toBe('STAFF_ASSIGNMENT_NOT_ACTIVE');
+      expect(res.status).toBe(409);
+      expect(res.body.error.code).toBe('INVITATION_ALREADY_ACCEPTED');
+      expect(rotateSpy).not.toHaveBeenCalled();
+      expect(res.headers['set-cookie']).toBeUndefined();
     });
   });
 
   describe('4. Existing Account Acceptance (POST /api/staff/invitations/:token/accept)', () => {
-    it('accepts already-accepted invitation idempotently for matching authenticated user', async () => {
+    it('STG2-02: rejects already-ACCEPTED invitation on authenticated accept endpoint with 409 INVITATION_ALREADY_ACCEPTED', async () => {
       const mockInvite = createMockInvitation({ status: 'ACCEPTED' });
       vi.spyOn(prisma.eventStaffInvitation, 'findUnique').mockResolvedValue(mockInvite as any);
       vi.spyOn(prisma.user, 'findUnique').mockResolvedValue({
@@ -925,10 +859,6 @@ describe('Passwordless Staff Acceptance & Session Issuance API', () => {
         role: Role.ATTENDEE,
         status: AccountStatus.ACTIVE,
         emailVerified: true,
-      } as any);
-      vi.spyOn(prisma.eventStaff, 'findUnique').mockResolvedValue({
-        id: 'staff-assignment-1',
-        status: 'ACTIVE',
       } as any);
 
       const matchingToken = jwt.sign(
@@ -940,9 +870,8 @@ describe('Passwordless Staff Acceptance & Session Issuance API', () => {
         .post(`/api/staff/invitations/${rawToken}/accept`)
         .set('Authorization', `Bearer ${matchingToken}`);
 
-      expect(res.status).toBe(200);
-      expect(res.body.success).toBe(true);
-      expect(res.body.data.status).toBe('ACTIVE');
+      expect(res.status).toBe(409);
+      expect(res.body.error.code).toBe('INVITATION_ALREADY_ACCEPTED');
     });
     it('accepts invitation for authenticated matching user, preserves role and password, and activates staff', async () => {
       const inviteEmail = 'organizer.invitee@outside.vip';
@@ -967,7 +896,7 @@ describe('Passwordless Staff Acceptance & Session Issuance API', () => {
       const mockTx = {
         eventStaffInvitation: {
           findUnique: vi.fn().mockResolvedValue(mockInvite),
-          update: vi.fn().mockResolvedValue({ ...mockInvite, status: 'ACCEPTED' }),
+          updateMany: vi.fn().mockResolvedValue({ count: 1 }),
         },
         user: {
           findUnique: vi.fn().mockResolvedValue(authenticatedUser),
@@ -1007,9 +936,9 @@ describe('Passwordless Staff Acceptance & Session Issuance API', () => {
         })
       );
 
-      expect(mockTx.eventStaffInvitation.update).toHaveBeenCalledWith(
+      expect(mockTx.eventStaffInvitation.updateMany).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { id: mockInvite.id },
+          where: { id: mockInvite.id, status: 'PENDING' },
           data: expect.objectContaining({
             status: 'ACCEPTED',
           }),
@@ -1038,7 +967,7 @@ describe('Passwordless Staff Acceptance & Session Issuance API', () => {
       const mockTx = {
         eventStaffInvitation: {
           findUnique: vi.fn().mockResolvedValue(mockInvite),
-          update: vi.fn().mockResolvedValue({ ...mockInvite, status: 'ACCEPTED' }),
+          updateMany: vi.fn().mockResolvedValue({ count: 1 }),
         },
         user: {
           findUnique: vi.fn().mockResolvedValue(authenticatedUser),
@@ -1133,6 +1062,141 @@ describe('Passwordless Staff Acceptance & Session Issuance API', () => {
       expect(res.status).toBe(409);
       expect(res.body.error.code).toBe('INVITATION_INVALID');
     });
+
+    it('STG2-02 concurrency: two concurrent authenticated accept requests on a PENDING invitation produce exactly one 200 and one 409 INVITATION_ALREADY_ACCEPTED', async () => {
+      const inviteEmail = 'concurrent.accept@outside.vip';
+      const mockInvite = createMockInvitation({ status: 'PENDING', email: inviteEmail });
+      const activeUser = {
+        id: 'user-concurrent-accept-1',
+        email: inviteEmail,
+        role: Role.ATTENDEE,
+        passwordHash: null,
+        status: AccountStatus.ACTIVE,
+        emailVerified: true,
+      };
+
+      vi.spyOn(prisma.eventStaffInvitation, 'findUnique').mockResolvedValue(mockInvite as any);
+      vi.spyOn(prisma.user, 'findUnique').mockResolvedValue(activeUser as any);
+
+      let pendingClaimed = false;
+      vi.spyOn(prisma, '$transaction').mockImplementation(async (callback: any) => {
+        const mockTx = {
+          eventStaffInvitation: {
+            findUnique: vi.fn().mockResolvedValue(mockInvite),
+            updateMany: vi.fn().mockImplementation(async () => {
+              if (!pendingClaimed) {
+                pendingClaimed = true;
+                return { count: 1 };
+              }
+              return { count: 0 };
+            }),
+          },
+          user: {
+            findUnique: vi.fn().mockResolvedValue(activeUser),
+          },
+          eventStaff: {
+            findUnique: vi.fn().mockResolvedValue(null),
+            create: vi.fn().mockResolvedValue({ id: 'staff-conc-1', status: 'ACTIVE' }),
+          },
+        };
+        return callback(mockTx);
+      });
+
+      const userToken = jwt.sign(
+        { userId: activeUser.id, email: inviteEmail, role: Role.ATTENDEE, emailVerified: true },
+        env.JWT_SECRET
+      );
+
+      const [res1, res2] = await Promise.all([
+        request(app)
+          .post(`/api/staff/invitations/${rawToken}/accept`)
+          .set('Authorization', `Bearer ${userToken}`),
+        request(app)
+          .post(`/api/staff/invitations/${rawToken}/accept`)
+          .set('Authorization', `Bearer ${userToken}`),
+      ]);
+
+      const statuses = [res1.status, res2.status].sort((a, b) => a - b);
+      expect(statuses).toEqual([200, 409]);
+      const conflictRes = res1.status === 409 ? res1 : res2;
+      expect(conflictRes.body.error.code).toBe('INVITATION_ALREADY_ACCEPTED');
+    });
+
+    it('STG2-02 concurrency: two concurrent verify-otp calls on a PENDING invitation produce exactly one 200 session and one 409 INVITATION_ALREADY_ACCEPTED', async () => {
+      const validCode = '246810';
+      const secret = env.SESSION_SECRET || env.JWT_SECRET;
+      const validHmac = crypto
+        .createHmac('sha256', secret)
+        .update(`${invitationId}:${validCode}`)
+        .digest('hex');
+
+      const mockInvite = createMockInvitation({
+        status: 'PENDING',
+        codeHash: validHmac,
+        otpSentAt: new Date(Date.now() - 30000),
+        otpExpiresAt: new Date(Date.now() + 500000),
+      });
+
+      const activeUser = {
+        id: 'user-concurrent-otp-1',
+        email: mockInvite.email,
+        name: 'concstaff',
+        role: Role.ATTENDEE,
+        passwordHash: null,
+        status: AccountStatus.ACTIVE,
+        emailVerified: true,
+      };
+
+      vi.spyOn(prisma.eventStaffInvitation, 'findUnique').mockResolvedValue(mockInvite as any);
+      vi.spyOn(prisma.user, 'findUnique').mockResolvedValue(activeUser as any);
+
+      let pendingClaimed = false;
+      vi.spyOn(prisma, '$transaction').mockImplementation(async (callback: any) => {
+        const mockTx = {
+          eventStaffInvitation: {
+            findUnique: vi.fn().mockResolvedValue(mockInvite),
+            updateMany: vi.fn().mockImplementation(async () => {
+              if (!pendingClaimed) {
+                pendingClaimed = true;
+                return { count: 1 };
+              }
+              return { count: 0 };
+            }),
+          },
+          user: {
+            findUnique: vi.fn().mockResolvedValue(activeUser),
+          },
+          eventStaff: {
+            findUnique: vi.fn().mockResolvedValue(null),
+            create: vi.fn().mockResolvedValue({ id: 'staff-conc-otp-1', status: 'ACTIVE' }),
+          },
+        };
+        return callback(mockTx);
+      });
+
+      const rotateSpy = vi.spyOn(sessionService, 'rotateSession').mockResolvedValue({
+        sessionId: 'sess-conc-win',
+        rawCookieValue: 'sess-conc-win.secret',
+        csrfToken: 'csrf-conc-win',
+        record: {} as any,
+      });
+
+      const [res1, res2] = await Promise.all([
+        request(app)
+          .post(`/api/staff/invitations/${rawToken}/verify-otp`)
+          .send({ code: validCode }),
+        request(app)
+          .post(`/api/staff/invitations/${rawToken}/verify-otp`)
+          .send({ code: validCode }),
+      ]);
+
+      const statuses = [res1.status, res2.status].sort((a, b) => a - b);
+      expect(statuses).toEqual([200, 409]);
+      expect(rotateSpy).toHaveBeenCalledTimes(1);
+      const conflictRes = res1.status === 409 ? res1 : res2;
+      expect(conflictRes.body.error.code).toBe('INVITATION_ALREADY_ACCEPTED');
+      expect(conflictRes.headers['set-cookie']).toBeUndefined();
+    });
   });
 
   describe('6. Stage 1 Security Hardening (AUTH-S01 & AUTH-S05)', () => {
@@ -1145,7 +1209,7 @@ describe('Passwordless Staff Acceptance & Session Issuance API', () => {
         .digest('hex');
 
       const mockInvite = createMockInvitation({
-        status: 'ACCEPTED',
+        status: 'PENDING',
         codeHash: validHmac,
         otpSentAt: new Date(Date.now() - 30000),
         otpExpiresAt: new Date(Date.now() + 500000),
@@ -1258,7 +1322,7 @@ describe('Passwordless Staff Acceptance & Session Issuance API', () => {
       expect(res.body.error.message).toContain('Email verification is required');
     });
 
-    it('Finding 3: invalidates auth cache, revokes all sessions, and clears cookie when account becomes SUSPENDED/DISABLED concurrently inside verifyInvitationOtp transaction (PENDING and ACCEPTED branches)', async () => {
+    it('Finding 3: invalidates auth cache, revokes all sessions, and clears cookie when account becomes SUSPENDED/DISABLED concurrently inside verifyInvitationOtp transaction (PENDING branch)', async () => {
       const validCode = '665544';
       const secret = env.SESSION_SECRET || env.JWT_SECRET;
       const validHmac = crypto
@@ -1266,17 +1330,17 @@ describe('Passwordless Staff Acceptance & Session Issuance API', () => {
         .update(`${invitationId}:${validCode}`)
         .digest('hex');
 
-      // 1) ACCEPTED branch concurrent SUSPENDED
-      const acceptedInvite = createMockInvitation({
-        status: 'ACCEPTED',
+      // 1) PENDING branch concurrent SUSPENDED inside transaction
+      const pendingTxInvite = createMockInvitation({
+        status: 'PENDING',
         codeHash: validHmac,
         otpSentAt: new Date(Date.now() - 30000),
         otpExpiresAt: new Date(Date.now() + 500000),
       });
 
       const activePreUser = {
-        id: 'user-race-accepted-904',
-        email: acceptedInvite.email,
+        id: 'user-race-pending-904',
+        email: pendingTxInvite.email,
         passwordHash: null,
         status: AccountStatus.ACTIVE,
       };
@@ -1285,12 +1349,8 @@ describe('Passwordless Staff Acceptance & Session Issuance API', () => {
         status: AccountStatus.SUSPENDED,
       };
 
-      vi.spyOn(prisma.eventStaffInvitation, 'findUnique').mockResolvedValue(acceptedInvite as any);
+      vi.spyOn(prisma.eventStaffInvitation, 'findUnique').mockResolvedValue(pendingTxInvite as any);
       vi.spyOn(prisma.user, 'findUnique').mockResolvedValue(activePreUser as any);
-      vi.spyOn(prisma.eventStaff, 'findUnique').mockResolvedValue({
-        id: 'staff-rel-accepted-1',
-        status: 'ACTIVE',
-      } as any);
 
       const invalidateSpy = vi.spyOn(sessionService, 'invalidateUserAuthCache');
       const revokeAllSpy = vi.spyOn(sessionService, 'revokeAllUserSessions');
@@ -1299,18 +1359,18 @@ describe('Passwordless Staff Acceptance & Session Issuance API', () => {
 
       vi.spyOn(prisma, '$transaction').mockImplementation(async (callback: any) =>
         callback({
-          eventStaffInvitation: { findUnique: vi.fn().mockResolvedValue(acceptedInvite) },
+          eventStaffInvitation: { findUnique: vi.fn().mockResolvedValue(pendingTxInvite) },
           user: { findUnique: vi.fn().mockResolvedValue(suspendedInTxUser) },
           eventStaff: { findUnique: vi.fn() },
         })
       );
 
-      const acceptedRes = await request(app)
+      const pendingTxRes = await request(app)
         .post(`/api/staff/invitations/${rawToken}/verify-otp`)
         .send({ code: validCode });
 
-      expect(acceptedRes.status).toBe(403);
-      expect(acceptedRes.body.error.code).toBe('ACCOUNT_SUSPENDED');
+      expect(pendingTxRes.status).toBe(403);
+      expect(pendingTxRes.body.error.code).toBe('ACCOUNT_SUSPENDED');
       expect(invalidateSpy).toHaveBeenCalledWith(activePreUser.id);
       expect(revokeAllSpy).toHaveBeenCalledWith(activePreUser.id);
       expect(clearCookieSpy).toHaveBeenCalled();

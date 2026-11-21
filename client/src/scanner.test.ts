@@ -389,7 +389,9 @@ describe('Outside.vip Organizer Scanner Utilities', () => {
         role: 'ATTENDEE',
       };
 
-      const html = renderToString(React.createElement(ScannerPage, { initialUser: attendeeUser }));
+      const html = renderToString(
+        React.createElement(ScannerPage, { initialUser: attendeeUser, initialEvents: [] })
+      );
 
       expect(html).toContain('No Assigned Event Gates');
       expect(html).toContain(
@@ -602,7 +604,8 @@ describe('Outside.vip Organizer Scanner Utilities', () => {
       const scannerSource = await import('./pages/ScannerPage?raw').then((m) => m.default || '').catch(() => '');
       expect(scannerSource).toBeTruthy();
 
-      expect(scannerSource).toContain("if (isMounted && user?.role === 'ATTENDEE')");
+      expect(scannerSource).not.toContain('api.events.list');
+      expect(scannerSource).not.toContain('api.organizer.listEvents');
       expect(scannerSource).toContain('No Assigned Event Gates');
       expect(scannerSource).toContain('You do not have any active scanner staff assignments');
     });
@@ -634,7 +637,7 @@ describe('Outside.vip Organizer Scanner Utilities', () => {
       expect(scannerSource).toContain("document.addEventListener('visibilitychange'");
       expect(scannerSource).toContain('api.scanner.ping()');
       expect(scannerSource).toContain('session_expired');
-      expect(scannerSource).toContain('Resume Staff Session');
+      expect(scannerSource).toContain('Sign In with Email Code');
     });
 
     it('simulates heartbeat lifecycle: runs while camera is active and page visible, stops when camera stops or hidden', async () => {
@@ -836,16 +839,16 @@ describe('Outside.vip Organizer Scanner Utilities', () => {
       expect(res403.ticketMeta.note).not.toContain('organizer account');
     });
 
-    it('renders session_expired UI with Resume Staff Session action and without organizer account message', async () => {
+    it('renders session_expired UI with direct email-OTP sign-in action and zero invitation-link redirects', async () => {
       const scannerSource = await import('./pages/ScannerPage?raw').then((m) => m.default || '').catch(() => '');
 
-      // Verify the session_expired UI block exists
+      // Verify the session_expired UI block exists and uses direct email-OTP recovery
       expect(scannerSource).toContain("scanStatus === 'session_expired'");
       expect(scannerSource).toContain('Scanner Session Expired');
-      expect(scannerSource).toContain('Resume Staff Session');
-      expect(scannerSource).toContain('/staff/invitations/');
+      expect(scannerSource).toContain('Sign In with Email Code');
+      expect(scannerSource).not.toContain('/staff/invitations/');
 
-      // Verify 401 does NOT set organizer account message
+      // Verify 401 does NOT set organizer-only account message
       expect(scannerSource).not.toContain('Please sign in with an organizer account.');
     });
 
@@ -909,45 +912,15 @@ describe('Outside.vip Organizer Scanner Utilities', () => {
       expect(scannerSource).toContain('window.history.replaceState');
     });
 
-    it('verifies token lifecycle: preserved in sessionStorage for recovery, cleared on verification, logout, and revocation', () => {
-      const mockStorage: Record<string, string> = {};
-      const storage = {
-        getItem: (k: string) => mockStorage[k] || null,
-        setItem: (k: string, v: string) => { mockStorage[k] = v; },
-        removeItem: (k: string) => { delete mockStorage[k]; },
-      };
+    it('verifies Stage 2 zero invitation-token persistence in ScannerGuard and ScannerPage', async () => {
+      const scannerSource = await import('./pages/ScannerPage?raw').then((m) => m.default || '').catch(() => '');
+      const guardSource = await import('./components/auth/ScannerGuard?raw').then((m) => m.default || '').catch(() => '');
 
-      // 1. Initial read on ScannerPage mounts and saves token
-      storage.setItem('outside_scanner_invite_token', 'test_recovery_token');
-      expect(storage.getItem('outside_scanner_invite_token')).toBe('test_recovery_token');
-
-      // 2. Token remains available while session is active or needs recovery
-      expect(storage.getItem('outside_scanner_invite_token')).toBe('test_recovery_token');
-
-      // 3. Preserved through OTP verification and cleared when scanner gate access is established
-      const onGateAccessEstablished = () => {
-        storage.removeItem('outside_scanner_invite_token');
-      };
-      onGateAccessEstablished();
-      expect(storage.getItem('outside_scanner_invite_token')).toBeNull();
-
-      // 4. Cleared on logout
-      storage.setItem('outside_scanner_invite_token', 'test_recovery_token_2');
-      const onLogout = () => {
-        storage.removeItem('outside_scanner_invite_token');
-      };
-      onLogout();
-      expect(storage.getItem('outside_scanner_invite_token')).toBeNull();
-
-      // 5. Cleared when invitation metadata is confirmed EXPIRED or REVOKED
-      storage.setItem('outside_scanner_invite_token', 'test_recovery_token_3');
-      const onMetadataLoaded = (status: string) => {
-        if (status === 'EXPIRED' || status === 'REVOKED') {
-          storage.removeItem('outside_scanner_invite_token');
-        }
-      };
-      onMetadataLoaded('REVOKED');
-      expect(storage.getItem('outside_scanner_invite_token')).toBeNull();
+      expect(scannerSource).not.toContain("sessionStorage.setItem('outside_scanner_invite_token'");
+      expect(guardSource).not.toContain("sessionStorage.setItem('outside_scanner_invite_token'");
+      expect(guardSource).not.toContain('/staff/invitations/');
+      expect(guardSource).toContain('requestLoginOtp');
+      expect(guardSource).toContain('verifyLoginOtp');
     });
 
     it('verifies stopCamera releases all MediaStream tracks and cancels animation frame', () => {
@@ -1194,14 +1167,15 @@ describe('Outside.vip Organizer Scanner Utilities', () => {
       // Verify stopCamera calls stopHeartbeat
       expect(scannerSource).toMatch(/const stopCamera = useCallback\(\(\) =>\s*\{[\s\S]*?stopHeartbeat\(\);/);
 
-      // Verify heartbeat 403 stops camera and heartbeat
-      expect(scannerSource).toMatch(/if \(status === 403\)\s*\{[\s\S]*?stopCamera\(\);[\s\S]*?stopHeartbeat\(\);[\s\S]*?setScanStatus\('forbidden'\);/);
+      // Verify centralized 401 and 403 handlers stop camera and heartbeat
+      expect(scannerSource).toMatch(/handleSessionExpired = useCallback\([\s\S]*?stopCamera\(\);[\s\S]*?stopHeartbeat\(\);/);
+      expect(scannerSource).toMatch(/handleForbiddenAccess = useCallback\([\s\S]*?stopCamera\(\);[\s\S]*?stopHeartbeat\(\);[\s\S]*?setScanStatus\('forbidden'\);/);
 
-      // Verify check-in 403 stops camera and heartbeat
-      expect(scannerSource).toMatch(/\} else if \(status === 403\)\s*\{[\s\S]*?stopCamera\(\);[\s\S]*?stopHeartbeat\(\);[\s\S]*?setScanStatus\('forbidden'\);/);
-
-      // Verify check-in 401 stops camera and heartbeat
-      expect(scannerSource).toMatch(/\} else if \(status === 401\)\s*\{[\s\S]*?stopCamera\(\);[\s\S]*?stopHeartbeat\(\);[\s\S]*?setScanStatus\('session_expired'\);/);
+      // Verify heartbeat and check-in invoke the centralized shutdown handlers
+      expect(scannerSource).toMatch(/if \(status === 401\)[\s\S]*?handleSessionExpired\(/);
+      expect(scannerSource).toMatch(/if \(status === 403\)[\s\S]*?handleForbiddenAccess\(/);
+      expect(scannerSource).toMatch(/\} else if \(status === 401\)[\s\S]*?handleSessionExpired\(/);
+      expect(scannerSource).toMatch(/\} else if \(status === 403\)[\s\S]*?handleForbiddenAccess\(/);
 
       // Verify handleValidateToken guards against terminal states
       expect(scannerSource).toMatch(/scanStatusRef\.current === 'forbidden'\s*\|\|\s*scanStatusRef\.current === 'session_expired'/);

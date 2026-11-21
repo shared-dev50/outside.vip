@@ -61,29 +61,17 @@ export const StaffInvitationPage: React.FC = () => {
         const res = await api.staffInvitation.getMetadata(token);
         if (isMounted) {
           setMetadata(res);
-          // Preserve valid recovery token for scanner session continuity
+          // STG2-02: Invitation tokens are one-time role-grant credentials and must never be
+          // persisted in sessionStorage for later authentication.
           try {
-            sessionStorage.setItem('outside_scanner_invite_token', token);
+            sessionStorage.removeItem('outside_scanner_invite_token');
           } catch { }
-          // If invitation is confirmed expired, revoked, or assignment is inactive, clear recovery token
-          if (
-            res.invitation.status === 'EXPIRED' ||
-            res.invitation.status === 'REVOKED' ||
-            res.invitation.isAssignmentActive === false
-          ) {
-            try {
-              sessionStorage.removeItem('outside_scanner_invite_token');
-            } catch { }
-          }
         }
       } catch (err: any) {
         if (isMounted) {
-          const status = err?.statusCode || err?.status;
-          if (status === 404 || status === 410 || status === 403) {
-            try {
-              sessionStorage.removeItem('outside_scanner_invite_token');
-            } catch { }
-          }
+          try {
+            sessionStorage.removeItem('outside_scanner_invite_token');
+          } catch { }
           setError(
             err?.message ||
             err?.error?.message ||
@@ -414,8 +402,44 @@ export const StaffInvitationPage: React.FC = () => {
         </div>
       )}
 
-      {/* Action Case 1: Existing Account with Password Required */}
-      {invitation.requiresLogin && (
+      {/* Status: Already Accepted (Unauthenticated visitor — one-time invitation retired) */}
+      {invitation.status === 'ACCEPTED' &&
+        !invitation.isCurrentAccount &&
+        !user &&
+        !isVerifyingOtp &&
+        !isAcceptingSession &&
+        !successMessage && (
+          <div className="bg-white rounded-2xl p-6 sm:p-8 border border-stone-200 shadow-sm text-center space-y-5">
+            <div className="w-14 h-14 rounded-full bg-stone-100 text-stone-700 mx-auto flex items-center justify-center border border-stone-200">
+              <CheckCircle2 className="w-7 h-7" />
+            </div>
+            <div>
+              <h3 className="font-display font-bold text-stone-900 text-lg">
+                Invitation Already Accepted
+              </h3>
+              <p className="text-xs text-stone-600 mt-1.5 max-w-sm mx-auto leading-relaxed">
+                This one-time staff invitation for <strong>{event.title}</strong> has already been accepted and can no longer be used to sign in.
+              </p>
+              <p className="text-xs text-stone-500 mt-2 max-w-sm mx-auto">
+                Returning door staff can sign in directly at the scanner with a 6-digit email verification code.
+              </p>
+            </div>
+            <div className="pt-2">
+              <button
+                type="button"
+                onClick={() => navigate(`/scanner?event=${event.slug || event.id}`)}
+                className="w-full sm:w-auto px-6 py-3 rounded-xl bg-stone-900 hover:bg-black text-white font-semibold text-xs uppercase tracking-wider transition-colors inline-flex items-center justify-center gap-2 shadow-sm"
+              >
+                <QrCode className="w-4 h-4" />
+                Go to Door Scanner Sign-In
+                <ArrowRight className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+        )}
+
+      {/* Action Case 1: Existing Account with Password Required (PENDING invitations only) */}
+      {invitation.status === 'PENDING' && invitation.requiresLogin && (
         <div className="bg-white rounded-2xl p-6 sm:p-8 border border-stone-200 shadow-sm space-y-5">
           <div className="flex items-start gap-3">
             <div className="p-2.5 rounded-xl bg-stone-100 text-stone-800 shrink-0">
@@ -483,23 +507,21 @@ export const StaffInvitationPage: React.FC = () => {
         </div>
       )}
 
-      {/* Action Case 3: Passwordless OTP Flow (Initial Acceptance or Returning Staff Resumption) */}
+      {/* Action Case 3: Passwordless OTP Flow (Initial One-Time PENDING Acceptance Only) */}
       {!invitation.hasPassword &&
         (!user || isVerifyingOtp) &&
         !successMessage &&
-        (invitation.status === 'PENDING' || (invitation.status === 'ACCEPTED' && invitation.isAssignmentActive !== false)) && (
+        invitation.status === 'PENDING' && (
           <div className="bg-white rounded-2xl p-6 sm:p-8 border border-stone-200 shadow-sm space-y-6">
             <div>
               <span className="text-[10px] font-mono uppercase tracking-wider text-stone-500 font-semibold block mb-1">
-                {invitation.status === 'ACCEPTED' ? 'Staff Session Resumption' : 'Step 1 · Passwordless Verification'}
+                Step 1 · Passwordless Verification
               </span>
               <h3 className="font-display font-bold text-stone-900 text-lg">
-                {invitation.status === 'ACCEPTED' ? 'Resume Scanner Session' : 'Verify Email Address'}
+                Verify Email Address
               </h3>
               <p className="text-xs text-stone-600 mt-1 leading-relaxed">
-                {invitation.status === 'ACCEPTED'
-                  ? `Welcome back! We'll send a 6-digit confirmation code to ${invitation.maskedEmail} to reactivate your scanner session on this device. No password required.`
-                  : `We'll send a 6-digit confirmation code to ${invitation.maskedEmail} to grant access to the scanner. No password required.`}
+                {`We'll send a 6-digit confirmation code to ${invitation.maskedEmail} to grant access to the scanner. No password required.`}
               </p>
             </div>
 

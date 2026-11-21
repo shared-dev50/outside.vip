@@ -19,6 +19,9 @@ describe('Stage 3 Implementation 3: Scanner Route Access & Authorization', () =>
     user,
     isLoading,
     login: vi.fn(),
+    requestLoginOtp: vi.fn(),
+    verifyLoginOtp: vi.fn(),
+    clearSessionState: vi.fn(),
     register: vi.fn(),
     verifyEmail: vi.fn(),
     resendVerification: vi.fn(),
@@ -135,15 +138,16 @@ describe('Stage 3 Implementation 3: Scanner Route Access & Authorization', () =>
       expect(html).toContain('Loading scanner session...');
       expect(html).not.toContain('Browser Check-In Scanner');
       expect(html).not.toContain('Start Camera');
-      expect(html).not.toContain('Scanner Authentication Required');
+      expect(html).not.toContain('Sign In to Door Scanner');
+      expect(html).not.toContain('Sign In with Password');
     });
   });
 
   // =========================================================================
-  // 2. Unauthenticated Visitors
+  // 2. Unauthenticated Visitors — Direct Email-OTP Scanner Login (STG2-01)
   // =========================================================================
-  describe('2. Unauthenticated Access & Door Staff Recovery', () => {
-    it('unauthenticated visitor without invite token renders dedicated organizer sign-in gate', () => {
+  describe('2. Unauthenticated Access & Direct Scanner OTP Login', () => {
+    it('unauthenticated visitor at /scanner renders direct email-OTP sign-in form and organizer password link', () => {
       setupMockWindow('https://outside.vip/scanner');
       const authVal = createMockAuthContext(null, false);
 
@@ -159,23 +163,25 @@ describe('Stage 3 Implementation 3: Scanner Route Access & Authorization', () =>
         </QueryClientProvider>
       );
 
-      expect(html).toContain('Scanner Authentication Required');
-      expect(html).toContain('Sign In as Organizer');
+      expect(html).toContain('Sign In to Door Scanner');
+      expect(html).toContain('Staff Email Address');
+      expect(html).toContain('Send Sign-In Code');
+      expect(html).toContain('Sign In with Password (Organizers &amp; Admins)');
       expect(html).toContain('/login?redirect=%2Fscanner');
-      expect(html).toContain('Event door staff: Please click the invitation link received by email');
+      expect(html).not.toContain('/staff/invitations/');
+      expect(html).not.toContain('Resume Staff Session');
       expect(html).not.toContain('Browser Check-In Scanner');
-      expect(html).not.toContain('Hold attendee ticket QR code inside viewfinder');
       expect(html).not.toContain('Start Camera');
     });
 
-    it('unauthenticated door staff with stored recovery token renders door staff resumption flow', () => {
-      setupMockWindow('https://outside.vip/scanner', 'inv_staff_recovery_abc123');
+    it('preserves ?event= query parameter on organizer password login link while stripping legacy invite params', () => {
+      setupMockWindow('https://outside.vip/scanner?event=sol-fest&invite=legacy_tok_123');
       const authVal = createMockAuthContext(null, false);
 
       const html = renderToString(
         <QueryClientProvider client={queryClient}>
           <AuthContext.Provider value={authVal}>
-            <MemoryRouter initialEntries={['/scanner']}>
+            <MemoryRouter initialEntries={['/scanner?event=sol-fest&invite=legacy_tok_123']}>
               <ScannerGuard>
                 <ScannerPage />
               </ScannerGuard>
@@ -184,23 +190,21 @@ describe('Stage 3 Implementation 3: Scanner Route Access & Authorization', () =>
         </QueryClientProvider>
       );
 
-      expect(html).toContain('Staff Authentication Required');
-      expect(html).toContain('Door Staff Access');
-      expect(html).toContain('Resume Staff Session');
-      expect(html).toContain('Sign in with password (Organizers)');
-      expect(html).not.toContain('Browser Check-In Scanner');
-      expect(html).not.toContain('Start Camera');
+      expect(html).toContain('/login?redirect=%2Fscanner%3Fevent%3Dsol-fest');
+      expect(html).not.toContain('legacy_tok_123');
+      expect(html).not.toContain('Resume Staff Session');
+      expect((global as any).sessionStorage.setItem).not.toHaveBeenCalled();
     });
 
-    it('unauthenticated door staff with invite token in URL stores token and displays staff recovery', () => {
-      setupMockWindow('https://outside.vip/scanner?invite=tok_url_param_xyz987');
+    it('renders session-expired notice and prefills previously authenticated email without invitation links', () => {
+      setupMockWindow('https://outside.vip/scanner?event=sol-fest');
       const authVal = createMockAuthContext(null, false);
 
       const html = renderToString(
         <QueryClientProvider client={queryClient}>
           <AuthContext.Provider value={authVal}>
-            <MemoryRouter initialEntries={['/scanner?invite=tok_url_param_xyz987']}>
-              <ScannerGuard>
+            <MemoryRouter initialEntries={['/scanner?event=sol-fest']}>
+              <ScannerGuard initialSessionExpired={true} initialEmail="staff@eventvenue.com">
                 <ScannerPage />
               </ScannerGuard>
             </MemoryRouter>
@@ -208,12 +212,11 @@ describe('Stage 3 Implementation 3: Scanner Route Access & Authorization', () =>
         </QueryClientProvider>
       );
 
-      expect(html).toContain('Staff Authentication Required');
-      expect(html).toContain('Resume Staff Session');
-      expect((global as any).sessionStorage.setItem).toHaveBeenCalledWith(
-        'outside_scanner_invite_token',
-        'tok_url_param_xyz987'
-      );
+      expect(html).toContain('Scanner Session Expired');
+      expect(html).toContain('staff@eventvenue.com');
+      expect(html).toContain('Send Sign-In Code');
+      expect(html).not.toContain('/staff/invitations/');
+      expect(html).not.toContain('original staff invitation email');
     });
   });
 
@@ -247,8 +250,8 @@ describe('Stage 3 Implementation 3: Scanner Route Access & Authorization', () =>
   // =========================================================================
   // 4. Door Staff Scanning Authorization (ATTENDEE Role)
   // =========================================================================
-  describe('4. Door Staff Scanner Authorization', () => {
-    it('passwordless ATTENDEE with active gate assignment renders scanner interface', () => {
+  describe('4. Door Staff Scanner Authorization & Gate Loading (STG2-03)', () => {
+    it('shows dedicated gate-loading state on initial mount and does NOT flash No Assigned Event Gates or Start Camera', () => {
       setupMockWindow();
       const authVal = createMockAuthContext(mockStaffAttendee, false);
 
@@ -264,12 +267,39 @@ describe('Stage 3 Implementation 3: Scanner Route Access & Authorization', () =>
         </QueryClientProvider>
       );
 
-      expect(html).toContain('Browser Check-In Scanner');
-      expect(html).toContain('Outside.vip Door Operations');
-      expect(html).not.toContain('Scanner Authentication Required');
+      expect(html).toContain('Loading assigned event gates...');
+      expect(html).not.toContain('No Assigned Event Gates');
+      expect(html).not.toContain('Start Camera');
     });
 
-    it('ATTENDEE with 0 assigned gates renders explicit empty state and cannot start camera', () => {
+    it('passwordless ATTENDEE with active gate assignment renders scanner interface with matching selected option value', () => {
+      setupMockWindow();
+      const authVal = createMockAuthContext(mockStaffAttendee, false);
+      const assignedEvents = [
+        { id: 'evt-sol-1', title: 'SOL FEST 2026', slug: 'sol-fest-2026' },
+      ];
+
+      const html = renderToString(
+        <QueryClientProvider client={queryClient}>
+          <AuthContext.Provider value={authVal}>
+            <MemoryRouter initialEntries={['/scanner']}>
+              <ScannerGuard>
+                <ScannerPage initialUser={mockStaffAttendee} initialEvents={assignedEvents} />
+              </ScannerGuard>
+            </MemoryRouter>
+          </AuthContext.Provider>
+        </QueryClientProvider>
+      );
+
+      expect(html).toContain('Browser Check-In Scanner');
+      expect(html).toContain('Outside.vip Door Operations');
+      expect(html).toContain('SOL FEST 2026');
+      expect(html).toContain('value="sol-fest-2026" selected=""');
+      expect(html).toContain('Start Camera');
+      expect(html).not.toContain('No Assigned Event Gates');
+    });
+
+    it('ATTENDEE with 0 assigned gates after loading renders explicit empty state and cannot start camera', () => {
       setupMockWindow();
       const authVal = createMockAuthContext(mockStaffAttendee, false);
 
@@ -278,7 +308,7 @@ describe('Stage 3 Implementation 3: Scanner Route Access & Authorization', () =>
           <AuthContext.Provider value={authVal}>
             <MemoryRouter initialEntries={['/scanner']}>
               <ScannerGuard>
-                <ScannerPage initialUser={mockStaffAttendee} />
+                <ScannerPage initialUser={mockStaffAttendee} initialEvents={[]} />
               </ScannerGuard>
             </MemoryRouter>
           </AuthContext.Provider>
@@ -347,19 +377,21 @@ describe('Stage 3 Implementation 3: Scanner Route Access & Authorization', () =>
   // 6. Terminal State Security (401 vs 403 Differentiation)
   // =========================================================================
   describe('6. Terminal Authorization States & Resource Cleanup', () => {
-    it('verifies 401 response sets session_expired and offers OTP resumption without organizer message', async () => {
+    it('verifies 401 response triggers direct email-OTP session expiry recovery without invitation links or organizer-only message', async () => {
       const scannerSource = await import('./pages/ScannerPage?raw')
         .then((m) => m.default || '')
         .catch(() => '');
 
       expect(scannerSource).toContain("scanStatus === 'session_expired'");
       expect(scannerSource).toContain('Scanner Session Expired');
-      expect(scannerSource).toContain('Resume Staff Session');
-      expect(scannerSource).toContain('/staff/invitations/');
+      expect(scannerSource).toContain('Sign In with Email Code');
+      expect(scannerSource).toContain('scannerSession.notifySessionExpired');
+      expect(scannerSource).not.toContain('/staff/invitations/');
       expect(scannerSource).not.toContain('Please sign in with an organizer account.');
+      expect(scannerSource).not.toContain("sessionStorage.setItem('outside_scanner_invite_token'");
     });
 
-    it('verifies 403 response sets forbidden state, stops camera/heartbeat, and denies OTP resumption', async () => {
+    it('verifies 403 response sets forbidden state, stops camera/heartbeat, and does not clear session or offer OTP recovery', async () => {
       const scannerSource = await import('./pages/ScannerPage?raw')
         .then((m) => m.default || '')
         .catch(() => '');
@@ -368,27 +400,22 @@ describe('Stage 3 Implementation 3: Scanner Route Access & Authorization', () =>
       expect(scannerSource).toContain('Unauthorized Gate Staff');
       expect(scannerSource).toContain('Your staff assignment may have been revoked');
       expect(scannerSource).toMatch(
-        /if \(status === 403\)\s*\{[\s\S]*?stopCamera\(\);[\s\S]*?stopHeartbeat\(\);[\s\S]*?setScanStatus\('forbidden'\);/
+        /handleForbiddenAccess = useCallback\([\s\S]*?stopCamera\(\);[\s\S]*?stopHeartbeat\(\);[\s\S]*?setScanStatus\('forbidden'\);/
       );
     });
 
-    it('verifies camera and heartbeat are stopped on 401 and 403 across both heartbeat and check-in', async () => {
+    it('verifies camera and heartbeat are stopped on both 401 and 403 across gates, heartbeat, and check-in', async () => {
       const scannerSource = await import('./pages/ScannerPage?raw')
         .then((m) => m.default || '')
         .catch(() => '');
 
-      // Heartbeat 401/403
       expect(scannerSource).toMatch(
-        /if \(status === 401\)\s*\{[\s\S]*?stopCamera\(\);[\s\S]*?stopHeartbeat\(\);[\s\S]*?setScanStatus\('session_expired'\);/
+        /handleSessionExpired = useCallback\([\s\S]*?stopCamera\(\);[\s\S]*?stopHeartbeat\(\);/
       );
-      // Check-in 403
-      expect(scannerSource).toMatch(
-        /\} else if \(status === 403\)\s*\{[\s\S]*?stopCamera\(\);[\s\S]*?stopHeartbeat\(\);[\s\S]*?setScanStatus\('forbidden'\);/
-      );
-      // Check-in 401
-      expect(scannerSource).toMatch(
-        /\} else if \(status === 401\)\s*\{[\s\S]*?stopCamera\(\);[\s\S]*?stopHeartbeat\(\);[\s\S]*?setScanStatus\('session_expired'\);/
-      );
+      expect(scannerSource).toMatch(/if \(status === 401\)[\s\S]*?handleSessionExpired\(/);
+      expect(scannerSource).toMatch(/if \(status === 403\)[\s\S]*?handleForbiddenAccess\(/);
+      expect(scannerSource).toMatch(/\} else if \(status === 401\)[\s\S]*?handleSessionExpired\(/);
+      expect(scannerSource).toMatch(/\} else if \(status === 403\)[\s\S]*?handleForbiddenAccess\(/);
     });
   });
 
@@ -408,7 +435,7 @@ describe('Stage 3 Implementation 3: Scanner Route Access & Authorization', () =>
       expect(appSource).not.toMatch(/<Route\s+path="\/scanner"\s+element=\{\s*<RequireRole>/);
     });
 
-    it('verifies ScannerPage sanitizes invite and token query parameters with replaceState', async () => {
+    it('verifies ScannerPage sanitizes invite and token query parameters with replaceState without persisting tokens', async () => {
       const scannerSource = await import('./pages/ScannerPage?raw')
         .then((m) => m.default || '')
         .catch(() => '');
@@ -417,15 +444,112 @@ describe('Stage 3 Implementation 3: Scanner Route Access & Authorization', () =>
       expect(scannerSource).toContain("url.searchParams.delete('invitation')");
       expect(scannerSource).toContain("url.searchParams.delete('token')");
       expect(scannerSource).toContain('window.history.replaceState');
+      expect(scannerSource).not.toContain('sessionStorage.setItem');
     });
 
-    it('verifies startCamera blocks activation when forbidden, session_expired, or ATTENDEE has 0 gates', async () => {
+    it('verifies startCamera blocks activation when loading, forbidden, session_expired, or ATTENDEE has 0 gates, with fresh dependencies', async () => {
       const scannerSource = await import('./pages/ScannerPage?raw')
         .then((m) => m.default || '')
         .catch(() => '');
 
       expect(scannerSource).toMatch(
-        /scanStatusRef\.current === 'forbidden'\s*\|\|\s*scanStatusRef\.current === 'session_expired'\s*\|\|\s*\(user\?\.role === 'ATTENDEE' && eventsList\.length === 0\)/
+        /scanStatusRef\.current === 'forbidden'\s*\|\|\s*scanStatusRef\.current === 'session_expired'\s*\|\|\s*isLoadingEvents\s*\|\|\s*\(user\?\.role === 'ATTENDEE' && eventsList\.length === 0\)/
+      );
+      expect(scannerSource).toContain('[facingMode, isLoadingEvents, user?.role, eventsList.length]');
+      expect(scannerSource).toContain('[user?.id, user?.role, refreshTrigger, handleSessionExpired, handleForbiddenAccess]');
+    });
+  });
+
+  // =========================================================================
+  // 8. Stage 2 API Client: Standalone OTP & Retry-After Surface
+  // =========================================================================
+  describe('8. Direct Scanner OTP API Client & ApiError retryAfter', () => {
+    it('wires api.auth.requestLoginOtp and api.auth.verifyLoginOtp and parses retryAfter on 429', async () => {
+      const { api, ApiError, getActiveCsrfToken, setActiveCsrfToken } = await import('./lib/api');
+      setActiveCsrfToken(null);
+
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+      // 1. requestLoginOtp success
+      fetchSpy.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        headers: new Headers(),
+        json: async () => ({
+          success: true,
+          data: {
+            message: 'If this email is associated with an eligible passwordless account, a 6-digit sign-in code has been sent.',
+            cooldownSeconds: 60,
+            expiresInMinutes: 10,
+          },
+        }),
+      } as any);
+
+      const reqRes = await api.auth.requestLoginOtp({ email: 'staff@eventvenue.com' });
+      expect(reqRes.cooldownSeconds).toBe(60);
+      expect(fetchSpy).toHaveBeenCalledWith(
+        '/api/auth/otp/request',
+        expect.objectContaining({
+          method: 'POST',
+          credentials: 'include',
+          body: JSON.stringify({ email: 'staff@eventvenue.com' }),
+        })
+      );
+
+      // 2. 429 cooldown surfaces retryAfter on ApiError
+      fetchSpy.mockResolvedValueOnce({
+        ok: false,
+        status: 429,
+        headers: new Headers({ 'Retry-After': '42' }),
+        json: async () => ({
+          success: false,
+          error: {
+            message: 'Please wait 42 seconds before requesting another sign-in code.',
+            statusCode: 429,
+            code: 'OTP_RESEND_COOLDOWN',
+            retryAfter: 42,
+          },
+        }),
+      } as any);
+
+      let caught: any = null;
+      try {
+        await api.auth.requestLoginOtp({ email: 'staff@eventvenue.com' });
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(ApiError);
+      expect(caught.statusCode).toBe(429);
+      expect(caught.code).toBe('OTP_RESEND_COOLDOWN');
+      expect(caught.retryAfter).toBe(42);
+
+      // 3. verifyLoginOtp captures csrfToken and returns user
+      fetchSpy.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        headers: new Headers({ 'x-csrf-token': 'csrf_direct_scanner_xyz' }),
+        json: async () => ({
+          success: true,
+          data: {
+            user: mockStaffAttendee,
+            csrfToken: 'csrf_direct_scanner_xyz',
+          },
+        }),
+      } as any);
+
+      const verRes = await api.auth.verifyLoginOtp({
+        email: 'staff@eventvenue.com',
+        code: '123456',
+      });
+      expect(verRes.user.id).toBe(mockStaffAttendee.id);
+      expect(getActiveCsrfToken()).toBe('csrf_direct_scanner_xyz');
+      expect(fetchSpy).toHaveBeenCalledWith(
+        '/api/auth/otp/verify',
+        expect.objectContaining({
+          method: 'POST',
+          credentials: 'include',
+          body: JSON.stringify({ email: 'staff@eventvenue.com', code: '123456' }),
+        })
       );
     });
   });
