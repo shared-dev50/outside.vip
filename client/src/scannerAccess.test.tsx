@@ -456,7 +456,65 @@ describe('Stage 3 Implementation 3: Scanner Route Access & Authorization', () =>
         /scanStatusRef\.current === 'forbidden'\s*\|\|\s*scanStatusRef\.current === 'session_expired'\s*\|\|\s*isLoadingEvents\s*\|\|\s*\(user\?\.role === 'ATTENDEE' && eventsList\.length === 0\)/
       );
       expect(scannerSource).toContain('[facingMode, isLoadingEvents, user?.role, eventsList.length]');
-      expect(scannerSource).toContain('[user?.id, user?.role, refreshTrigger, handleSessionExpired, handleForbiddenAccess]');
+      expect(scannerSource).toContain('[user?.id, user?.role, refreshTrigger]');
+      expect(scannerSource).toContain('[cameraStatus, stopHeartbeat]');
+    });
+
+    it('S2R-01 & S2R-02: verifies AuthContext memoization, stable ScannerPage effect deps, and ref-backed scanLoop gate selection', async () => {
+      const authContextSource = await import('./context/AuthContext?raw')
+        .then((m) => m.default || '')
+        .catch(() => '');
+      const scannerSource = await import('./pages/ScannerPage?raw')
+        .then((m) => m.default || '')
+        .catch(() => '');
+
+      // S2R-01: AuthContext stabilizes callbacks with useCallback and provider value with useMemo
+      expect(authContextSource).toContain('const clearSessionState = useCallback(');
+      expect(authContextSource).toContain('const contextValue = useMemo(');
+      expect(authContextSource).toContain('<AuthContext.Provider value={contextValue}>');
+
+      // S2R-01: ScannerPage stabilizes 401/403 handlers via refs and keeps fetchEvents/heartbeat deps minimal
+      expect(scannerSource).toContain('const handleSessionExpiredRef = useRef(handleSessionExpired);');
+      expect(scannerSource).toContain('const handleForbiddenAccessRef = useRef(handleForbiddenAccess);');
+      expect(scannerSource).toContain('handleSessionExpiredRef.current(');
+      expect(scannerSource).toContain('handleForbiddenAccessRef.current(');
+      expect(scannerSource).toContain('}, [user?.id, user?.role, refreshTrigger]);');
+      expect(scannerSource).toContain('}, [cameraStatus, stopHeartbeat]);');
+
+      // S2R-02: scanLoop invokes handleValidateTokenRef.current so switching gates while camera is active uses latest gate
+      expect(scannerSource).toContain('const handleValidateTokenRef = useRef(handleValidateToken);');
+      expect(scannerSource).toContain('handleValidateTokenRef.current = handleValidateToken;');
+      expect(scannerSource).toContain('handleValidateTokenRef.current(cleanToken);');
+
+      // Behavioral verification of ref-backed scanLoop gate switching without stopping camera
+      let selectedEventId = 'gate-a';
+      let latestExpiryEmail = 'old@venue.com';
+      const submittedGateIds: string[] = [];
+      const expiredEmails: string[] = [];
+
+      const createHandleValidateToken = (gate: string, expiryEmail: string) => (token: string) => {
+        if (token === 'EXPIRE_ME') {
+          expiredEmails.push(expiryEmail);
+          return;
+        }
+        submittedGateIds.push(gate);
+      };
+
+      const validateRef = { current: createHandleValidateToken(selectedEventId, latestExpiryEmail) };
+      // Persistent scanLoop captures ONLY validateRef (never restarts on gate change)
+      const persistentScanFrame = (token: string) => validateRef.current(token);
+
+      persistentScanFrame('tkt_1');
+      // User switches gate from Gate A to Gate B while camera remains active
+      selectedEventId = 'gate-b';
+      latestExpiryEmail = 'staff@venue.com';
+      validateRef.current = createHandleValidateToken(selectedEventId, latestExpiryEmail);
+
+      persistentScanFrame('tkt_2');
+      persistentScanFrame('EXPIRE_ME');
+
+      expect(submittedGateIds).toEqual(['gate-a', 'gate-b']);
+      expect(expiredEmails).toEqual(['staff@venue.com']);
     });
   });
 

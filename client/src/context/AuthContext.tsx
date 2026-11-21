@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useMemo } from 'react';
 import { User } from '../types';
 import { api, setActiveCsrfToken } from '../lib/api';
 
@@ -32,7 +32,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [user, setUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
 
-  const refreshUser = async (): Promise<User | null> => {
+  const refreshUser = useCallback(async (): Promise<User | null> => {
     try {
       const { user: fetchedUser, csrfToken } = await api.auth.me();
       if (csrfToken) {
@@ -45,7 +45,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setUser(null);
       return null;
     }
-  };
+  }, []);
 
   useEffect(() => {
     let isMounted = true;
@@ -75,38 +75,38 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     };
   }, []);
 
-  const login = async (email: string, password: string) => {
+  const login = useCallback(async (email: string, password: string) => {
     const data = await api.auth.login({ email, password });
     if (data.csrfToken) {
       setActiveCsrfToken(data.csrfToken);
     }
     setUser(data.user);
-  };
+  }, []);
 
-  const requestLoginOtp = async (email: string) => {
+  const requestLoginOtp = useCallback(async (email: string) => {
     const data = await api.auth.requestLoginOtp({ email });
     return {
       message: data.message,
       cooldownSeconds: data.cooldownSeconds,
       expiresInMinutes: data.expiresInMinutes,
     };
-  };
+  }, []);
 
-  const verifyLoginOtp = async (email: string, code: string): Promise<User> => {
+  const verifyLoginOtp = useCallback(async (email: string, code: string): Promise<User> => {
     const data = await api.auth.verifyLoginOtp({ email, code });
     if (data.csrfToken) {
       setActiveCsrfToken(data.csrfToken);
     }
     setUser(data.user);
     return data.user;
-  };
+  }, []);
 
-  const clearSessionState = () => {
+  const clearSessionState = useCallback(() => {
     setActiveCsrfToken(null);
     setUser(null);
-  };
+  }, []);
 
-  const register = async (input: {
+  const register = useCallback(async (input: {
     email: string;
     password: string;
     name: string;
@@ -118,26 +118,26 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setActiveCsrfToken(data.csrfToken);
     }
     setUser(data.user);
-  };
+  }, []);
 
-  const verifyEmail = async (code: string): Promise<User> => {
+  const verifyEmail = useCallback(async (code: string): Promise<User> => {
     const data = await api.auth.verifyEmail({ code });
     if (data.csrfToken) {
       setActiveCsrfToken(data.csrfToken);
     }
     setUser(data.user);
     return data.user;
-  };
+  }, []);
 
-  const resendVerification = async () => {
+  const resendVerification = useCallback(async () => {
     const data = await api.auth.resendVerification();
     return {
       message: data.message,
       cooldownSeconds: data.cooldownSeconds,
     };
-  };
+  }, []);
 
-  const logout = async () => {
+  const logout = useCallback(async () => {
     try {
       await api.auth.logout();
     } catch {
@@ -146,24 +146,39 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setActiveCsrfToken(null);
       setUser(null);
     }
-  };
+  }, []);
+
+  const contextValue = useMemo(
+    () => ({
+      user,
+      isLoading,
+      login,
+      requestLoginOtp,
+      verifyLoginOtp,
+      clearSessionState,
+      register,
+      verifyEmail,
+      resendVerification,
+      refreshUser,
+      logout,
+    }),
+    [
+      user,
+      isLoading,
+      login,
+      requestLoginOtp,
+      verifyLoginOtp,
+      clearSessionState,
+      register,
+      verifyEmail,
+      resendVerification,
+      refreshUser,
+      logout,
+    ]
+  );
 
   return (
-    <AuthContext.Provider
-      value={{
-        user,
-        isLoading,
-        login,
-        requestLoginOtp,
-        verifyLoginOtp,
-        clearSessionState,
-        register,
-        verifyEmail,
-        resendVerification,
-        refreshUser,
-        logout,
-      }}
-    >
+    <AuthContext.Provider value={contextValue}>
       {children}
     </AuthContext.Provider>
   );

@@ -2221,45 +2221,64 @@ export async function checkInTicket(req: Request, res: Response, next: NextFunct
         return;
       }
 
-      if (!isOrganizerRole || record?.authorizedVia === 'STAFF') {
-        let targetEventId: string | null =
-          typeof record?.resolvedEventId === 'string' && record.resolvedEventId.trim()
-            ? record.resolvedEventId.trim()
-            : null;
+      // Post-deployment organizer-owned check-in replays explicitly carry authorizedVia === 'OWNER'.
+      // Never trust missing legacy metadata as proof of authorization (S2R-04).
+      if (isOrganizerRole && record?.authorizedVia === 'OWNER') {
+        return;
+      }
 
-        if (!targetEventId && typeof record?.ticketId === 'string' && record.ticketId.trim()) {
-          const ticketRow = await prisma.ticket.findUnique({
-            where: { id: record.ticketId.trim() },
-            select: { eventId: true },
-          });
-          targetEventId = ticketRow?.eventId ?? null;
-        }
+      let targetEventId: string | null =
+        typeof record?.resolvedEventId === 'string' && record.resolvedEventId.trim()
+          ? record.resolvedEventId.trim()
+          : null;
 
-        if (!targetEventId && typeof record?.eventId === 'string' && record.eventId.trim()) {
-          const ev = await prisma.event.findFirst({
-            where: { OR: [{ id: record.eventId.trim() }, { slug: record.eventId.trim() }] },
-            select: { id: true },
-          });
-          targetEventId = ev?.id ?? null;
-        }
-
-        if (!targetEventId) {
-          throw new ForbiddenError('You do not have permission to check in attendees for this event');
-        }
-
-        const staffMember = await prisma.eventStaff.findUnique({
-          where: {
-            eventId_userId: {
-              eventId: targetEventId,
-              userId: scannerUserId,
-            },
-          },
-          select: { status: true },
+      if (!targetEventId && typeof record?.ticketId === 'string' && record.ticketId.trim()) {
+        const ticketRow = await prisma.ticket.findUnique({
+          where: { id: record.ticketId.trim() },
+          select: { eventId: true },
         });
+        targetEventId = ticketRow?.eventId ?? null;
+      }
 
-        if (!staffMember || staffMember.status !== 'ACTIVE') {
-          throw new ForbiddenError('You do not have permission to check in attendees for this event');
+      if (!targetEventId && typeof record?.eventId === 'string' && record.eventId.trim()) {
+        const ev = await prisma.event.findFirst({
+          where: { OR: [{ id: record.eventId.trim() }, { slug: record.eventId.trim() }] },
+          select: { id: true },
+        });
+        targetEventId = ev?.id ?? null;
+      }
+
+      if (!targetEventId) {
+        throw new ForbiddenError('You do not have permission to check in attendees for this event');
+      }
+
+      // For legacy ORGANIZER records lacking authorizedVia, allow replay if the organizer
+      // currently owns the target event; otherwise require an ACTIVE EventStaff assignment.
+      if (isOrganizerRole && !record?.authorizedVia) {
+        const ownedEvent = await prisma.event.findFirst({
+          where: {
+            id: targetEventId,
+            organizerId: scannerUserId,
+          },
+          select: { id: true },
+        });
+        if (ownedEvent) {
+          return;
         }
+      }
+
+      const staffMember = await prisma.eventStaff.findUnique({
+        where: {
+          eventId_userId: {
+            eventId: targetEventId,
+            userId: scannerUserId,
+          },
+        },
+        select: { status: true },
+      });
+
+      if (!staffMember || staffMember.status !== 'ACTIVE') {
+        throw new ForbiddenError('You do not have permission to check in attendees for this event');
       }
     };
 

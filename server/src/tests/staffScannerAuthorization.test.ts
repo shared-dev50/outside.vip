@@ -701,6 +701,192 @@ describe('Staff Scanner Authorization & Dedicated Scanner Router API', () => {
       expect(replayRes.body.success).toBe(false);
       expect(replayRes.body.error.message).toContain('You do not have permission');
     });
+
+    it('S2R-04 / S2R-06: rejects legacy COMPLETED Redis idempotency record missing resolvedEventId and authorizedVia via ticketId fallback when ATTENDEE staff was revoked', async () => {
+      const legacyStaffId = `usr-legacy-attendee-${Date.now()}`;
+      const legacyStaffToken = signToken({ userId: legacyStaffId, role: Role.ATTENDEE });
+      const idemKey = `scan_legacy_att_${Date.now()}`;
+      const redis = getRedisClient();
+
+      // Seed realistic pre-Stage-2 COMPLETED Redis entry lacking resolvedEventId and authorizedVia
+      await redis.setPx(
+        `checkin_idem:${legacyStaffId}:${idemKey}`,
+        JSON.stringify({
+          scannerUserId: legacyStaffId,
+          token: mockAssignedTicket.ticketToken,
+          eventId: '',
+          ticketId: mockAssignedTicket.id,
+          status: 'COMPLETED',
+          responseStatus: 200,
+          responseBody: { success: true, data: { result: 'SUCCESS' } },
+          createdAt: Date.now() - 5000,
+        }),
+        60_000
+      );
+
+      // Staff still active on another event (so pre-check passes), but revoked on ticket's event
+      vi.spyOn(prisma.eventStaff, 'findFirst').mockResolvedValueOnce({ id: 'staff-other-active' } as any);
+      vi.spyOn(prisma.ticket, 'findUnique').mockResolvedValueOnce({
+        eventId: mockAssignedEvent.id,
+      } as any);
+      vi.spyOn(prisma.eventStaff, 'findUnique').mockResolvedValueOnce({
+        status: EventStaffStatus.REVOKED,
+      } as any);
+
+      const res = await request(app)
+        .post('/api/scanner/check-in')
+        .set('Authorization', `Bearer ${legacyStaffToken}`)
+        .send({
+          token: mockAssignedTicket.ticketToken,
+          idempotencyKey: idemKey,
+        });
+
+      expect(res.status).toBe(403);
+      expect(res.body.success).toBe(false);
+    });
+
+    it('S2R-04 / S2R-06: rejects ORGANIZER acting as STAFF on another organizer event after EventStaff revocation for both post-deploy and legacy Redis records', async () => {
+      const guestOrgId = `usr-guest-org-staff-${Date.now()}`;
+      const guestOrgToken = signToken({ userId: guestOrgId, role: Role.ORGANIZER });
+      const redis = getRedisClient();
+
+      // Case 1: Post-deploy record with authorizedVia: 'STAFF'
+      const postDeployKey = `scan_org_staff_new_${Date.now()}`;
+      await redis.setPx(
+        `checkin_idem:${guestOrgId}:${postDeployKey}`,
+        JSON.stringify({
+          scannerUserId: guestOrgId,
+          token: mockAssignedTicket.ticketToken,
+          eventId: '',
+          resolvedEventId: mockUnassignedEvent.id,
+          authorizedVia: 'STAFF',
+          ticketId: 'tkt-other-org-1',
+          status: 'COMPLETED',
+          responseStatus: 200,
+          responseBody: { success: true, data: { result: 'SUCCESS' } },
+          createdAt: Date.now() - 5000,
+        }),
+        60_000
+      );
+
+      vi.spyOn(prisma.eventStaff, 'findUnique').mockResolvedValueOnce({
+        status: EventStaffStatus.REVOKED,
+      } as any);
+
+      const postDeployRes = await request(app)
+        .post('/api/scanner/check-in')
+        .set('Authorization', `Bearer ${guestOrgToken}`)
+        .send({
+          token: mockAssignedTicket.ticketToken,
+          idempotencyKey: postDeployKey,
+        });
+
+      expect(postDeployRes.status).toBe(403);
+
+      // Case 2: Legacy record missing authorizedVia and resolvedEventId (must NOT bypass ownership/staff check)
+      const legacyKey = `scan_org_staff_leg_${Date.now()}`;
+      await redis.setPx(
+        `checkin_idem:${guestOrgId}:${legacyKey}`,
+        JSON.stringify({
+          scannerUserId: guestOrgId,
+          token: mockAssignedTicket.ticketToken,
+          eventId: '',
+          ticketId: 'tkt-other-org-2',
+          status: 'COMPLETED',
+          responseStatus: 200,
+          responseBody: { success: true, data: { result: 'SUCCESS' } },
+          createdAt: Date.now() - 5000,
+        }),
+        60_000
+      );
+
+      vi.spyOn(prisma.ticket, 'findUnique').mockResolvedValueOnce({
+        eventId: mockUnassignedEvent.id,
+      } as any);
+      // Organizer does NOT own mockUnassignedEvent
+      vi.spyOn(prisma.event, 'findFirst').mockResolvedValueOnce(null);
+      // And EventStaff assignment was revoked
+      vi.spyOn(prisma.eventStaff, 'findUnique').mockResolvedValueOnce({
+        status: EventStaffStatus.REVOKED,
+      } as any);
+
+      const legacyRes = await request(app)
+        .post('/api/scanner/check-in')
+        .set('Authorization', `Bearer ${guestOrgToken}`)
+        .send({
+          token: mockAssignedTicket.ticketToken,
+          idempotencyKey: legacyKey,
+        });
+
+      expect(legacyRes.status).toBe(403);
+    });
+
+    it('S2R-04 / S2R-06: preserves valid legacy replay for event-owning ORGANIZER and for platform ADMIN', async () => {
+      const redis = getRedisClient();
+
+      // 1. Legacy record for ORGANIZER who owns the target event -> 200 OK
+      const ownerLegacyKey = `scan_org_owner_leg_${Date.now()}`;
+      await redis.setPx(
+        `checkin_idem:${organizerId}:${ownerLegacyKey}`,
+        JSON.stringify({
+          scannerUserId: organizerId,
+          token: mockAssignedTicket.ticketToken,
+          eventId: '',
+          ticketId: mockAssignedTicket.id,
+          status: 'COMPLETED',
+          responseStatus: 200,
+          responseBody: { success: true, data: { result: 'SUCCESS', ticket: { id: mockAssignedTicket.id } } },
+          createdAt: Date.now() - 5000,
+        }),
+        60_000
+      );
+
+      vi.spyOn(prisma.ticket, 'findUnique').mockResolvedValueOnce({
+        eventId: mockAssignedEvent.id,
+      } as any);
+      vi.spyOn(prisma.event, 'findFirst').mockResolvedValueOnce({
+        id: mockAssignedEvent.id,
+      } as any);
+
+      const ownerRes = await request(app)
+        .post('/api/scanner/check-in')
+        .set('Authorization', `Bearer ${organizerToken}`)
+        .send({
+          token: mockAssignedTicket.ticketToken,
+          idempotencyKey: ownerLegacyKey,
+        });
+
+      expect(ownerRes.status).toBe(200);
+      expect(ownerRes.body.data.result).toBe('SUCCESS');
+
+      // 2. Legacy record for platform ADMIN -> 200 OK
+      const adminLegacyKey = `scan_admin_leg_${Date.now()}`;
+      await redis.setPx(
+        `checkin_idem:${adminId}:${adminLegacyKey}`,
+        JSON.stringify({
+          scannerUserId: adminId,
+          token: mockAssignedTicket.ticketToken,
+          eventId: '',
+          ticketId: mockAssignedTicket.id,
+          status: 'COMPLETED',
+          responseStatus: 200,
+          responseBody: { success: true, data: { result: 'SUCCESS', ticket: { id: mockAssignedTicket.id } } },
+          createdAt: Date.now() - 5000,
+        }),
+        60_000
+      );
+
+      const adminRes = await request(app)
+        .post('/api/scanner/check-in')
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({
+          token: mockAssignedTicket.ticketToken,
+          idempotencyKey: adminLegacyKey,
+        });
+
+      expect(adminRes.status).toBe(200);
+      expect(adminRes.body.data.result).toBe('SUCCESS');
+    });
   });
 });
 

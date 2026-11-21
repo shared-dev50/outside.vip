@@ -291,6 +291,23 @@ describe('Passwordless Staff Acceptance & Session Issuance API', () => {
       expect(res.status).toBe(404);
       expect(res.body.error.code).toBe('INVITATION_NOT_FOUND');
     });
+
+    it('S2R-05: rejects explicitly persisted status EXPIRED with 410 INVITATION_EXPIRED without querying user or eventStaff', async () => {
+      const mockInvite = createMockInvitation({
+        status: 'EXPIRED',
+        expiresAt: new Date(Date.now() + 3600_000),
+      });
+      vi.spyOn(prisma.eventStaffInvitation, 'findUnique').mockResolvedValue(mockInvite as any);
+      const userSpy = vi.spyOn(prisma.user, 'findUnique');
+      const staffSpy = vi.spyOn(prisma.eventStaff, 'findUnique');
+
+      const res = await request(app).get(`/api/staff/invitations/${rawToken}`);
+
+      expect(res.status).toBe(410);
+      expect(res.body.error.code).toBe('INVITATION_EXPIRED');
+      expect(userSpy).not.toHaveBeenCalled();
+      expect(staffSpy).not.toHaveBeenCalled();
+    });
   });
 
   describe('2. OTP Request & Resend (POST /api/staff/invitations/:token/request-otp)', () => {
@@ -1032,6 +1049,33 @@ describe('Passwordless Staff Acceptance & Session Issuance API', () => {
       const res = await request(app).post(`/api/staff/invitations/${rawToken}/accept`);
       expect(res.status).toBe(401);
     });
+
+    it('S2R-05: rejects explicitly persisted status EXPIRED on authenticated accept endpoint with 410 INVITATION_EXPIRED', async () => {
+      const mockInvite = createMockInvitation({
+        status: 'EXPIRED',
+        expiresAt: new Date(Date.now() + 3600_000),
+      });
+      vi.spyOn(prisma.eventStaffInvitation, 'findUnique').mockResolvedValue(mockInvite as any);
+      vi.spyOn(prisma.user, 'findUnique').mockResolvedValue({
+        id: 'matching-expired-user',
+        email: mockInvite.email,
+        role: Role.ATTENDEE,
+        status: AccountStatus.ACTIVE,
+        emailVerified: true,
+      } as any);
+
+      const userToken = jwt.sign(
+        { userId: 'matching-expired-user', email: mockInvite.email, role: Role.ATTENDEE, emailVerified: true },
+        env.JWT_SECRET
+      );
+
+      const res = await request(app)
+        .post(`/api/staff/invitations/${rawToken}/accept`)
+        .set('Authorization', `Bearer ${userToken}`);
+
+      expect(res.status).toBe(410);
+      expect(res.body.error.code).toBe('INVITATION_EXPIRED');
+    });
   });
 
   describe('5. Concurrency & State Invariants', () => {
@@ -1196,6 +1240,235 @@ describe('Passwordless Staff Acceptance & Session Issuance API', () => {
       const conflictRes = res1.status === 409 ? res1 : res2;
       expect(conflictRes.body.error.code).toBe('INVITATION_ALREADY_ACCEPTED');
       expect(conflictRes.headers['set-cookie']).toBeUndefined();
+    });
+
+    it('S2R-03: executes conditional updateMany claim BEFORE user.create and eventStaff.create in verifyInvitationOtp and skips writes on count=0', async () => {
+      const validCode = '135790';
+      const secret = env.SESSION_SECRET || env.JWT_SECRET;
+      const validHmac = crypto
+        .createHmac('sha256', secret)
+        .update(`${invitationId}:${validCode}`)
+        .digest('hex');
+
+      const mockInvite = createMockInvitation({
+        status: 'PENDING',
+        codeHash: validHmac,
+        otpSentAt: new Date(Date.now() - 30000),
+        otpExpiresAt: new Date(Date.now() + 500000),
+      });
+
+      vi.spyOn(prisma.eventStaffInvitation, 'findUnique').mockResolvedValue(mockInvite as any);
+      vi.spyOn(prisma.user, 'findUnique').mockResolvedValue(null);
+
+      const callOrder: string[] = [];
+      const createdUser = {
+        id: 'user-order-verify-1',
+        email: mockInvite.email,
+        name: 'orderstaff',
+        passwordHash: null,
+        role: Role.ATTENDEE,
+        status: AccountStatus.ACTIVE,
+        emailVerified: true,
+      };
+
+      const mockTx = {
+        eventStaffInvitation: {
+          findUnique: vi.fn().mockResolvedValue(mockInvite),
+          updateMany: vi.fn().mockImplementation(async () => {
+            callOrder.push('invitation.updateMany');
+            return { count: 1 };
+          }),
+        },
+        user: {
+          findUnique: vi.fn().mockResolvedValue(null),
+          create: vi.fn().mockImplementation(async () => {
+            callOrder.push('user.create');
+            return createdUser;
+          }),
+        },
+        eventStaff: {
+          findUnique: vi.fn().mockResolvedValue(null),
+          create: vi.fn().mockImplementation(async () => {
+            callOrder.push('eventStaff.create');
+            return { id: 'staff-order-1', status: 'ACTIVE' };
+          }),
+        },
+      };
+
+      vi.spyOn(prisma, '$transaction').mockImplementation(async (callback: any) => callback(mockTx));
+      vi.spyOn(sessionService, 'rotateSession').mockResolvedValue({
+        sessionId: 'sess-order-1',
+        rawCookieValue: 'sess-order-1.secret',
+        csrfToken: 'csrf-order-1',
+        record: {} as any,
+      });
+
+      const res = await request(app)
+        .post(`/api/staff/invitations/${rawToken}/verify-otp`)
+        .send({ code: validCode });
+
+      expect(res.status).toBe(200);
+      expect(callOrder).toEqual(['invitation.updateMany', 'user.create', 'eventStaff.create']);
+
+      // Now verify count=0 aborts before user.create or eventStaff.create
+      mockTx.eventStaffInvitation.updateMany.mockResolvedValueOnce({ count: 0 });
+      mockTx.user.create.mockClear();
+      mockTx.eventStaff.create.mockClear();
+
+      const loserRes = await request(app)
+        .post(`/api/staff/invitations/${rawToken}/verify-otp`)
+        .send({ code: validCode });
+
+      expect(loserRes.status).toBe(409);
+      expect(loserRes.body.error.code).toBe('INVITATION_ALREADY_ACCEPTED');
+      expect(mockTx.user.create).not.toHaveBeenCalled();
+      expect(mockTx.eventStaff.create).not.toHaveBeenCalled();
+    });
+
+    it('S2R-03: executes conditional updateMany claim BEFORE eventStaff.create in acceptInvitationWithSession and resolves concurrent verify-otp vs accept deterministically', async () => {
+      const validCode = '975310';
+      const secret = env.SESSION_SECRET || env.JWT_SECRET;
+      const validHmac = crypto
+        .createHmac('sha256', secret)
+        .update(`${invitationId}:${validCode}`)
+        .digest('hex');
+
+      const mockInvite = createMockInvitation({
+        status: 'PENDING',
+        codeHash: validHmac,
+        otpSentAt: new Date(Date.now() - 30000),
+        otpExpiresAt: new Date(Date.now() + 500000),
+      });
+
+      const activeUser = {
+        id: 'user-race-verify-accept-1',
+        email: mockInvite.email,
+        name: 'raceuser',
+        passwordHash: null,
+        role: Role.ATTENDEE,
+        status: AccountStatus.ACTIVE,
+        emailVerified: true,
+      };
+
+      vi.spyOn(prisma.eventStaffInvitation, 'findUnique').mockResolvedValue(mockInvite as any);
+      vi.spyOn(prisma.user, 'findUnique').mockResolvedValue(activeUser as any);
+
+      let pendingClaimed = false;
+      const callOrder: string[] = [];
+      let staffCreateCalls = 0;
+
+      vi.spyOn(prisma, '$transaction').mockImplementation(async (callback: any) => {
+        const mockTx = {
+          eventStaffInvitation: {
+            findUnique: vi.fn().mockResolvedValue(mockInvite),
+            updateMany: vi.fn().mockImplementation(async () => {
+              callOrder.push('invitation.updateMany');
+              if (!pendingClaimed) {
+                pendingClaimed = true;
+                return { count: 1 };
+              }
+              return { count: 0 };
+            }),
+          },
+          user: {
+            findUnique: vi.fn().mockResolvedValue(activeUser),
+          },
+          eventStaff: {
+            findUnique: vi.fn().mockResolvedValue(null),
+            create: vi.fn().mockImplementation(async () => {
+              callOrder.push('eventStaff.create');
+              staffCreateCalls++;
+              return { id: 'staff-race-va-1', status: 'ACTIVE' };
+            }),
+          },
+        };
+        return callback(mockTx);
+      });
+
+      vi.spyOn(sessionService, 'rotateSession').mockResolvedValue({
+        sessionId: 'sess-va-win',
+        rawCookieValue: 'sess-va-win.secret',
+        csrfToken: 'csrf-va-win',
+        record: {} as any,
+      });
+
+      const userToken = jwt.sign(
+        { userId: activeUser.id, email: activeUser.email, role: Role.ATTENDEE, emailVerified: true },
+        env.JWT_SECRET
+      );
+
+      // Concurrent mocked verify-otp vs authenticated accept
+      const [otpRes, acceptRes] = await Promise.all([
+        request(app)
+          .post(`/api/staff/invitations/${rawToken}/verify-otp`)
+          .send({ code: validCode }),
+        request(app)
+          .post(`/api/staff/invitations/${rawToken}/accept`)
+          .set('Authorization', `Bearer ${userToken}`),
+      ]);
+
+      const statuses = [otpRes.status, acceptRes.status].sort((a, b) => a - b);
+      expect(statuses).toEqual([200, 409]);
+      expect(staffCreateCalls).toBe(1);
+      expect(callOrder.indexOf('invitation.updateMany')).toBeLessThan(
+        callOrder.indexOf('eventStaff.create')
+      );
+      const conflictRes = otpRes.status === 409 ? otpRes : acceptRes;
+      expect(conflictRes.body.error.code).toBe('INVITATION_ALREADY_ACCEPTED');
+    });
+
+    it('S2R-03: failed user.create inside verifyInvitationOtp aborts transaction cleanly without issuing follow-up tx queries or session', async () => {
+      const validCode = '112233';
+      const secret = env.SESSION_SECRET || env.JWT_SECRET;
+      const validHmac = crypto
+        .createHmac('sha256', secret)
+        .update(`${invitationId}:${validCode}`)
+        .digest('hex');
+
+      const mockInvite = createMockInvitation({
+        status: 'PENDING',
+        codeHash: validHmac,
+        otpSentAt: new Date(Date.now() - 30000),
+        otpExpiresAt: new Date(Date.now() + 500000),
+      });
+
+      vi.spyOn(prisma.eventStaffInvitation, 'findUnique').mockResolvedValue(mockInvite as any);
+      vi.spyOn(prisma.user, 'findUnique').mockResolvedValue(null);
+
+      const userFindInTx = vi.fn().mockResolvedValue(null);
+      const staffCreateInTx = vi.fn();
+      const txError = Object.assign(new Error('Unique constraint failed'), { code: 'P2002' });
+
+      vi.spyOn(prisma, '$transaction').mockImplementation(async (callback: any) => {
+        const mockTx = {
+          eventStaffInvitation: {
+            findUnique: vi.fn().mockResolvedValue(mockInvite),
+            updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+          },
+          user: {
+            findUnique: userFindInTx,
+            create: vi.fn().mockRejectedValue(txError),
+          },
+          eventStaff: {
+            findUnique: vi.fn(),
+            create: staffCreateInTx,
+          },
+        };
+        return callback(mockTx);
+      });
+
+      const rotateSpy = vi.spyOn(sessionService, 'rotateSession');
+
+      const res = await request(app)
+        .post(`/api/staff/invitations/${rawToken}/verify-otp`)
+        .send({ code: validCode });
+
+      expect(res.status).toBeGreaterThanOrEqual(400);
+      // user.findUnique was called ONLY once (pre-check), NEVER retried inside aborted tx
+      expect(userFindInTx).toHaveBeenCalledTimes(1);
+      expect(staffCreateInTx).not.toHaveBeenCalled();
+      expect(rotateSpy).not.toHaveBeenCalled();
+      expect(res.headers['set-cookie']).toBeUndefined();
     });
   });
 

@@ -209,6 +209,12 @@ export const ScannerPage: React.FC<ScannerPageProps> = ({ initialUser, initialEv
     [stopCamera, stopHeartbeat]
   );
 
+  const handleSessionExpiredRef = useRef(handleSessionExpired);
+  handleSessionExpiredRef.current = handleSessionExpired;
+
+  const handleForbiddenAccessRef = useRef(handleForbiddenAccess);
+  handleForbiddenAccessRef.current = handleForbiddenAccess;
+
   useEffect(() => {
     let isMounted = true;
     const fetchEvents = async () => {
@@ -234,7 +240,7 @@ export const ScannerPage: React.FC<ScannerPageProps> = ({ initialUser, initialEv
                 setSelectedEventId(matched.slug || matched.id);
               } else {
                 setSelectedEventId(eventParam);
-                handleForbiddenAccess(
+                handleForbiddenAccessRef.current(
                   'You do not have permission to check in tickets for this event. You are not assigned to this event gate.'
                 );
                 setHasLoadedEvents(true);
@@ -265,13 +271,13 @@ export const ScannerPage: React.FC<ScannerPageProps> = ({ initialUser, initialEv
         setHasLoadedEvents(true);
         setIsLoadingEvents(false);
         if (status === 401) {
-          handleSessionExpired(
+          handleSessionExpiredRef.current(
             'Your scanner session has expired due to inactivity. Please sign in again with a 6-digit email code.'
           );
           return;
         }
         if (status === 403) {
-          handleForbiddenAccess(err?.message);
+          handleForbiddenAccessRef.current(err?.message);
           return;
         }
       }
@@ -282,7 +288,7 @@ export const ScannerPage: React.FC<ScannerPageProps> = ({ initialUser, initialEv
     return () => {
       isMounted = false;
     };
-  }, [user?.id, user?.role, refreshTrigger, handleSessionExpired, handleForbiddenAccess]);
+  }, [user?.id, user?.role, refreshTrigger]);
 
   useEffect(() => {
     let isMounted = true;
@@ -300,13 +306,13 @@ export const ScannerPage: React.FC<ScannerPageProps> = ({ initialUser, initialEv
         if (!isMounted) return;
         const status = err?.statusCode || err?.status;
         if (status === 401) {
-          handleSessionExpired(
+          handleSessionExpiredRef.current(
             'Your scanner session has expired due to inactivity. Please sign in again with a 6-digit email code.'
           );
           return;
         }
         if (status === 403) {
-          handleForbiddenAccess(err?.message);
+          handleForbiddenAccessRef.current(err?.message);
           return;
         }
         console.warn('[Scanner Heartbeat] Transient ping failure:', err?.message || err);
@@ -350,7 +356,7 @@ export const ScannerPage: React.FC<ScannerPageProps> = ({ initialUser, initialEv
         document.removeEventListener('visibilitychange', handleVisibilityChange);
       }
     };
-  }, [cameraStatus, stopHeartbeat, handleSessionExpired, handleForbiddenAccess]);
+  }, [cameraStatus, stopHeartbeat]);
 
   const startCamera = useCallback(async (preferredFacing: 'environment' | 'user' = facingMode) => {
     if (
@@ -615,6 +621,9 @@ export const ScannerPage: React.FC<ScannerPageProps> = ({ initialUser, initialEv
     );
   };
 
+  const handleValidateTokenRef = useRef(handleValidateToken);
+  handleValidateTokenRef.current = handleValidateToken;
+
   useEffect(() => {
     if (cameraStatus !== 'active') return;
 
@@ -643,7 +652,7 @@ export const ScannerPage: React.FC<ScannerPageProps> = ({ initialUser, initialEv
             if (cleanToken && !isDuplicateScan(cleanToken, lastScannedRef.current, 3500)) {
               lastScannedRef.current = { token: cleanToken, timestamp: now };
               isScanningPausedRef.current = true;
-              handleValidateToken(cleanToken);
+              handleValidateTokenRef.current(cleanToken);
             }
           }
         } catch {

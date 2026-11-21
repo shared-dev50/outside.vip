@@ -125,7 +125,10 @@ export async function getInvitationMetadata(
     }
 
     const now = new Date();
-    if (invitation.status === 'PENDING' && invitation.expiresAt.getTime() <= now.getTime()) {
+    if (
+      invitation.status === 'EXPIRED' ||
+      (invitation.status === 'PENDING' && invitation.expiresAt.getTime() <= now.getTime())
+    ) {
       throw new AppError('This invitation has expired.', 410, true, 'INVITATION_EXPIRED');
     }
 
@@ -606,36 +609,47 @@ export async function verifyInvitationOtp(
         );
       }
 
+      // S2R-03: Claim the PENDING invitation atomically BEFORE any User or EventStaff writes
+      // so PostgreSQL acquires the invitation row lock immediately and serializes concurrent
+      // accept/verify-otp transactions cleanly without P2002 / aborted-tx (25P02) collisions.
+      const acceptedUpdate = await tx.eventStaffInvitation.updateMany({
+        where: {
+          id: lockedInvite.id,
+          status: 'PENDING',
+        },
+        data: {
+          status: 'ACCEPTED',
+          acceptedAt: new Date(),
+          codeHash: null,
+          otpExpiresAt: null,
+          otpSentAt: null,
+          attempts: 0,
+        },
+      });
+
+      if (acceptedUpdate.count !== 1) {
+        throw new ConflictError(
+          'This invitation has already been accepted. Returning scanner staff must sign in directly at /scanner.',
+          'INVITATION_ALREADY_ACCEPTED'
+        );
+      }
+
       if (!user) {
-        try {
-          user = await tx.user.create({
-            data: {
-              email: normEmail,
-              name: normEmail.split('@')[0],
-              passwordHash: null,
-              role: Role.ATTENDEE,
-              status: AccountStatus.ACTIVE,
-              emailVerified: true,
-              emailVerifiedAt: new Date(),
-            },
-          });
-        } catch {
-          user = await tx.user.findUnique({ where: { email: normEmail } });
-          if (!user) throw new ServiceUnavailableError('Unable to resolve user account.');
-          if (user.status !== AccountStatus.ACTIVE) {
-            blockedNonActiveUserId = user.id;
-            throw new ForbiddenError(
-              `Your account has been ${String(user.status || 'disabled').toLowerCase()}.`,
-              `ACCOUNT_${user.status || 'DISABLED'}`
-            );
-          }
-          if (user.passwordHash !== null) {
-            throw new BadRequestError(
-              'This account has a password set. Please sign in with your password to accept this invitation.',
-              'PASSWORD_LOGIN_REQUIRED'
-            );
-          }
-        }
+        // Never catch a unique-constraint failure and query again inside the same
+        // PostgreSQL transaction (doing so triggers 25P02 aborted-transaction errors).
+        // Any conflict here cleanly rolls back the entire transaction including the
+        // invitation claim above.
+        user = await tx.user.create({
+          data: {
+            email: normEmail,
+            name: normEmail.split('@')[0],
+            passwordHash: null,
+            role: Role.ATTENDEE,
+            status: AccountStatus.ACTIVE,
+            emailVerified: true,
+            emailVerifiedAt: new Date(),
+          },
+        });
       } else if (user.emailVerified !== true) {
         user = await tx.user.update({
           where: { id: user.id },
@@ -677,28 +691,6 @@ export async function verifyInvitationOtp(
             assignedByUserId: lockedInvite.invitedByUserId,
           },
         });
-      }
-
-      const acceptedUpdate = await tx.eventStaffInvitation.updateMany({
-        where: {
-          id: lockedInvite.id,
-          status: 'PENDING',
-        },
-        data: {
-          status: 'ACCEPTED',
-          acceptedAt: new Date(),
-          codeHash: null,
-          otpExpiresAt: null,
-          otpSentAt: null,
-          attempts: 0,
-        },
-      });
-
-      if (acceptedUpdate.count !== 1) {
-        throw new ConflictError(
-          'This invitation has already been accepted. Returning scanner staff must sign in directly at /scanner.',
-          'INVITATION_ALREADY_ACCEPTED'
-        );
       }
 
       return { user, staffRecord };
@@ -823,7 +815,7 @@ export async function acceptInvitationWithSession(
     }
 
     const now = Date.now();
-    if (invitation.expiresAt.getTime() <= now) {
+    if (invitation.status === 'EXPIRED' || invitation.expiresAt.getTime() <= now) {
       throw new AppError('This invitation has expired.', 410, true, 'INVITATION_EXPIRED');
     }
 
@@ -876,6 +868,30 @@ export async function acceptInvitationWithSession(
         );
       }
 
+      // S2R-03: Claim the PENDING invitation atomically BEFORE EventStaff creation/update
+      // so concurrent accept / verify-otp requests serialize cleanly on the invitation row.
+      const acceptedUpdate = await tx.eventStaffInvitation.updateMany({
+        where: {
+          id: lockedInvite.id,
+          status: 'PENDING',
+        },
+        data: {
+          status: 'ACCEPTED',
+          acceptedAt: new Date(),
+          codeHash: null,
+          otpExpiresAt: null,
+          otpSentAt: null,
+          attempts: 0,
+        },
+      });
+
+      if (acceptedUpdate.count !== 1) {
+        throw new ConflictError(
+          'This invitation has already been accepted. Returning scanner staff must sign in directly at /scanner.',
+          'INVITATION_ALREADY_ACCEPTED'
+        );
+      }
+
       const existingStaff = await tx.eventStaff.findUnique({
         where: {
           eventId_userId: {
@@ -907,28 +923,6 @@ export async function acceptInvitationWithSession(
             assignedByUserId: lockedInvite.invitedByUserId,
           },
         });
-      }
-
-      const acceptedUpdate = await tx.eventStaffInvitation.updateMany({
-        where: {
-          id: lockedInvite.id,
-          status: 'PENDING',
-        },
-        data: {
-          status: 'ACCEPTED',
-          acceptedAt: new Date(),
-          codeHash: null,
-          otpExpiresAt: null,
-          otpSentAt: null,
-          attempts: 0,
-        },
-      });
-
-      if (acceptedUpdate.count !== 1) {
-        throw new ConflictError(
-          'This invitation has already been accepted. Returning scanner staff must sign in directly at /scanner.',
-          'INVITATION_ALREADY_ACCEPTED'
-        );
       }
 
       return { user: dbUser, staffRecord };
