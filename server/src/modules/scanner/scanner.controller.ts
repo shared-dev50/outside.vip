@@ -14,7 +14,6 @@ export async function getScannerGates(
     }
 
     const isAdmin = user.role === 'ADMIN';
-    const isOrganizer = user.role === 'ORGANIZER';
 
     let events: Array<{
       id: string;
@@ -47,7 +46,10 @@ export async function getScannerGates(
       });
 
       events = dbEvents.map((e) => ({ ...e, role: 'ADMIN' as const }));
-    } else if (isOrganizer) {
+    } else {
+      // Query event ownership directly by organizerId (independent of global user.role)
+      // alongside explicit ACTIVE EventStaff assignments.
+      // Hosts and Event Admins do not receive implicit scanner access.
       const [ownedEvents, staffAssignments] = await Promise.all([
         prisma.event.findMany({
           where: {
@@ -86,6 +88,7 @@ export async function getScannerGates(
               },
             },
           },
+          orderBy: { event: { startAt: 'asc' } },
         }),
       ]);
 
@@ -100,34 +103,6 @@ export async function getScannerGates(
           events.push({ ...s.event, role: 'STAFF' as const });
         }
       }
-    } else {
-      const staffAssignments = await prisma.eventStaff.findMany({
-        where: {
-          userId: user.userId,
-          status: 'ACTIVE',
-          event: { status: 'PUBLISHED' },
-        },
-        select: {
-          event: {
-            select: {
-              id: true,
-              title: true,
-              slug: true,
-              startAt: true,
-              endAt: true,
-              venueName: true,
-              city: true,
-              country: true,
-            },
-          },
-        },
-        orderBy: { event: { startAt: 'asc' } },
-      });
-
-      events = staffAssignments.map((s) => ({
-        ...s.event,
-        role: 'STAFF' as const,
-      }));
     }
 
     res.json({

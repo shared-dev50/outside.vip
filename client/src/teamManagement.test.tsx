@@ -738,7 +738,7 @@ describe('Stage 3: Event Team Management & Admin Permissions Frontend', () => {
       expect(modalSource).toContain('api.team.resendInvitation(event.id, invitationId)');
     });
 
-    it('ensures TeamsPage enforces RequireRole and embeds unified EventTeamModal', () => {
+    it('ensures TeamsPage enforces RequireAuth with event-scoped authorization and embeds unified EventTeamModal', () => {
       const appSource = fs.readFileSync(
         path.resolve(__dirname, './App.tsx'),
         'utf-8'
@@ -748,9 +748,9 @@ describe('Stage 3: Event Team Management & Admin Permissions Frontend', () => {
         'utf-8'
       );
 
-      // Route-level authorization protection in App.tsx
-      expect(appSource).toContain("<RequireRole allowedRoles={['ORGANIZER', 'ADMIN']}>");
-      expect(appSource).toContain('<TeamsPage />');
+      // Route-level authentication protection in App.tsx (event-scoped authorization enforced in TeamsPage + backend)
+      expect(appSource).toMatch(/path="\/teams"[\s\S]*?<RequireAuth>[\s\S]*?<TeamsPage \/>/);
+      expect(teamsPageSource).toContain('canManageTeam');
 
       // Embeds unified EventTeamModal in inline mode
       expect(teamsPageSource).toContain('<EventTeamModal');

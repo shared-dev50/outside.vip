@@ -658,6 +658,9 @@ export interface OrganizerDashboardStats {
 }
 
 export interface OrganizerEventItem extends Event {
+  isOwner?: boolean;
+  accessRole?: 'OWNER' | 'ADMIN';
+  permissions?: EventAdminPermissions | null;
   totalCapacity: number;
   ticketsSold: number;
   revenueInCents: number;

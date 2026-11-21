@@ -18,7 +18,9 @@ export const AuthPage: React.FC = () => {
     ? 'register'
     : location.pathname.startsWith('/forgot-password')
       ? 'forgot-password'
-      : 'login';
+      : searchParams.get('mode') === 'otp'
+        ? 'otp-login'
+        : 'login';
 
   useEffect(() => {
     if (!isLoading && user && user.emailVerified !== false) {

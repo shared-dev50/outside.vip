@@ -21,6 +21,7 @@ import {
   Globe,
 } from 'lucide-react';
 import { api } from '../lib/api';
+import { useOptionalAuth } from '../context/AuthContext';
 import {
   StripeConnectedAccountStatus,
   StripeBalanceResponse,
@@ -129,6 +130,8 @@ function formatDate(dateStr: string | null | undefined): string {
 
 export const FinanceOrganizationPage: React.FC = () => {
   const [searchParams, setSearchParams] = useSearchParams();
+  const auth = useOptionalAuth();
+  const clearSessionState = auth?.clearSessionState;
 
   useEffect(() => {
     const originalBg = document.body.style.backgroundColor;
@@ -249,6 +252,11 @@ export const FinanceOrganizationPage: React.FC = () => {
       } catch {
       }
     } catch (err: any) {
+      const status = err?.statusCode || err?.status;
+      if (status === 401) {
+        clearSessionState?.();
+        return;
+      }
       console.error('Failed to load finance data:', err);
       if (err?.code === 'STRIPE_CONFIGURATION_UNAVAILABLE') {
         setError('Stripe Connect is currently being configured on Outside.vip. Payouts and account management will be available shortly.');
@@ -263,7 +271,7 @@ export const FinanceOrganizationPage: React.FC = () => {
       setIsLoading(false);
       setIsRefreshing(false);
     }
-  }, []);
+  }, [clearSessionState]);
 
   useEffect(() => {
     const isReturn = searchParams.get('stripe_return') === 'true';

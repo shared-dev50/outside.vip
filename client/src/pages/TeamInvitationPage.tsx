@@ -1,5 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useContext } from 'react';
 import { useParams, useNavigate, useLocation, Link } from 'react-router-dom';
+import { QueryClientContext } from '@tanstack/react-query';
 import {
   Shield,
   Megaphone,
@@ -16,22 +17,33 @@ import {
   LogOut,
   ArrowRight,
   Sparkles,
+  KeyRound,
+  RotateCw,
 } from 'lucide-react';
-import { api } from '../lib/api';
+import { api, setActiveCsrfToken } from '../lib/api';
 import { TeamInvitationMetadata, AcceptTeamInvitationResult } from '../types';
 import { useOptionalAuth } from '../context/AuthContext';
 
-export const TeamInvitationPage: React.FC = () => {
+export interface TeamInvitationPageProps {
+  initialInvitation?: TeamInvitationMetadata | null;
+}
+
+export const TeamInvitationPage: React.FC<TeamInvitationPageProps> = ({
+  initialInvitation,
+}) => {
   const { token } = useParams<{ token: string }>();
   const navigate = useNavigate();
   const location = useLocation();
   const auth = useOptionalAuth();
+  const queryClient = useContext(QueryClientContext);
   const user = auth?.user;
   const isAuthLoading = auth?.isLoading ?? false;
 
-  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [isLoading, setIsLoading] = useState<boolean>(initialInvitation === undefined);
   const [error, setError] = useState<string | null>(null);
-  const [invitation, setInvitation] = useState<TeamInvitationMetadata | null>(null);
+  const [invitation, setInvitation] = useState<TeamInvitationMetadata | null>(
+    initialInvitation ?? null
+  );
 
   // Acceptance state
   const [isAccepting, setIsAccepting] = useState<boolean>(false);
@@ -39,10 +51,29 @@ export const TeamInvitationPage: React.FC = () => {
   const [isAccountMismatch, setIsAccountMismatch] = useState<boolean>(false);
   const [acceptanceResult, setAcceptanceResult] = useState<AcceptTeamInvitationResult | null>(null);
 
+  // Inline passwordless email-OTP sign-in state (HOST invitations ONLY — existing passwordless accounts)
+  const [otpEmail, setOtpEmail] = useState<string>('');
+  const [otpRequested, setOtpRequested] = useState<boolean>(false);
+  const [otpCode, setOtpCode] = useState<string>('');
+  const [otpInfoMessage, setOtpInfoMessage] = useState<string | null>(null);
+  const [otpError, setOtpError] = useState<string | null>(null);
+  const [isSendingOtp, setIsSendingOtp] = useState<boolean>(false);
+  const [isVerifyingOtp, setIsVerifyingOtp] = useState<boolean>(false);
+  const [otpCooldownSeconds, setOtpCooldownSeconds] = useState<number>(0);
+
   // Link copy state
   const [copiedLink, setCopiedLink] = useState<boolean>(false);
 
   useEffect(() => {
+    if (otpCooldownSeconds <= 0) return;
+    const timer = setInterval(() => {
+      setOtpCooldownSeconds((prev) => Math.max(0, prev - 1));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [otpCooldownSeconds]);
+
+  useEffect(() => {
+    if (initialInvitation !== undefined) return;
     let isMounted = true;
 
     async function inspectInvitation() {
@@ -78,7 +109,81 @@ export const TeamInvitationPage: React.FC = () => {
     return () => {
       isMounted = false;
     };
-  }, [token]);
+  }, [token, initialInvitation]);
+
+  const handleRequestHostOtp = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    const cleanEmail = otpEmail.trim();
+    if (!cleanEmail) {
+      setOtpError('Please enter your registered email address.');
+      return;
+    }
+    if (isSendingOtp || otpCooldownSeconds > 0) return;
+
+    setIsSendingOtp(true);
+    setOtpError(null);
+    try {
+      const res = auth?.requestLoginOtp
+        ? await auth.requestLoginOtp(cleanEmail)
+        : await api.auth.requestLoginOtp({ email: cleanEmail });
+      setOtpRequested(true);
+      setOtpCode('');
+      setOtpInfoMessage(
+        res.message ||
+          'If an eligible passwordless account exists for this email, a 6-digit sign-in code has been sent.'
+      );
+      setOtpCooldownSeconds(res.cooldownSeconds || 60);
+    } catch (err: any) {
+      if (typeof err?.retryAfter === 'number' && err.retryAfter > 0) {
+        setOtpCooldownSeconds(Math.ceil(err.retryAfter));
+      }
+      setOtpError(err?.message || 'Unable to send sign-in code. Please try again.');
+    } finally {
+      setIsSendingOtp(false);
+    }
+  };
+
+  const handleVerifyHostOtp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanEmail = otpEmail.trim();
+    const cleanCode = otpCode.trim().replace(/\D/g, '');
+    if (!cleanEmail) {
+      setOtpError('Please enter your email address.');
+      return;
+    }
+    if (cleanCode.length !== 6) {
+      setOtpError('Please enter the complete 6-digit sign-in code sent to your email.');
+      return;
+    }
+    if (isVerifyingOtp) return;
+
+    setIsVerifyingOtp(true);
+    setOtpError(null);
+    try {
+      if (auth?.verifyLoginOtp) {
+        await auth.verifyLoginOtp(cleanEmail, cleanCode);
+      } else {
+        const res = await api.auth.verifyLoginOtp({ email: cleanEmail, code: cleanCode });
+        if (res.csrfToken) {
+          setActiveCsrfToken(res.csrfToken);
+        }
+        await auth?.refreshUser?.();
+      }
+      setOtpRequested(false);
+      setOtpCode('');
+      setOtpInfoMessage(null);
+    } catch (err: any) {
+      if (typeof err?.retryAfter === 'number' && err.retryAfter > 0) {
+        setOtpCooldownSeconds(Math.ceil(err.retryAfter));
+      }
+      setOtpError(
+        err?.message ||
+          'Invalid or expired sign-in code. Password-based accounts must sign in with their password.'
+      );
+    } finally {
+      setIsVerifyingOtp(false);
+    }
+  };
 
   const handleAccept = async () => {
     if (!token) return;
@@ -89,7 +194,21 @@ export const TeamInvitationPage: React.FC = () => {
     try {
       const result = await api.team.acceptInvitation(token);
       setAcceptanceResult(result);
+      await Promise.all([
+        queryClient?.invalidateQueries({ queryKey: ['host-events'] }),
+        queryClient?.invalidateQueries({ queryKey: ['organizer-events'] }),
+        queryClient?.invalidateQueries({ queryKey: ['organizer-dashboard'] }),
+        auth?.refreshUser?.(),
+      ]);
+      if (result.role === 'HOST') {
+        navigate('/host', { replace: true });
+      }
     } catch (err: any) {
+      const status = err?.statusCode || err?.status;
+      if (status === 401) {
+        auth?.clearSessionState?.();
+        return;
+      }
       const msg = err?.message || err?.error?.message || 'Failed to accept invitation.';
       if (
         msg.toLowerCase().includes('match') ||
@@ -131,43 +250,69 @@ export const TeamInvitationPage: React.FC = () => {
     );
   }
 
-  // Error / Invalid / Expired State
+  // Error / Invalid / Expired / Already Accepted State
   if (error || !invitation) {
     const isRevoked = error?.toLowerCase().includes('revoked');
+    const isAlreadyAccepted = error?.toLowerCase().includes('already been accepted');
     const isExpired = error?.toLowerCase().includes('expired');
 
     return (
       <div className="max-w-md mx-auto px-4 py-16 text-center space-y-6">
         <div
           className={`w-14 h-14 rounded-2xl mx-auto flex items-center justify-center border ${
-            isRevoked
-              ? 'bg-rose-50 text-rose-600 border-rose-200'
-              : 'bg-amber-50 text-amber-600 border-amber-200'
+            isAlreadyAccepted
+              ? 'bg-emerald-50 text-emerald-600 border-emerald-200'
+              : isRevoked
+                ? 'bg-rose-50 text-rose-600 border-rose-200'
+                : 'bg-amber-50 text-amber-600 border-amber-200'
           }`}
         >
-          <AlertTriangle className="w-7 h-7" />
+          {isAlreadyAccepted ? (
+            <CheckCircle2 className="w-7 h-7" />
+          ) : (
+            <AlertTriangle className="w-7 h-7" />
+          )}
         </div>
 
         <div className="space-y-2">
           <h1 className="font-display font-bold text-2xl text-stone-900">
-            {isRevoked
-              ? 'Invitation Revoked'
-              : isExpired
-              ? 'Invitation Expired'
-              : 'Invitation Unavailable'}
+            {isAlreadyAccepted
+              ? 'Invitation Already Accepted'
+              : isRevoked
+                ? 'Invitation Revoked'
+                : isExpired
+                  ? 'Invitation Expired'
+                  : 'Invitation Unavailable'}
           </h1>
           <p className="text-xs text-stone-600 leading-relaxed max-w-sm mx-auto">
             {error || 'This invitation could not be found or has already been used.'}
           </p>
         </div>
 
-        <div className="pt-2">
-          <Link
-            to="/events"
-            className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-stone-900 hover:bg-black text-white text-xs font-mono uppercase font-bold tracking-wider transition-colors shadow-xs"
-          >
-            Explore Events
-          </Link>
+        <div className="pt-2 flex flex-wrap items-center justify-center gap-3">
+          {isAlreadyAccepted ? (
+            <>
+              <Link
+                to="/host"
+                className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-stone-900 hover:bg-black text-white text-xs font-mono uppercase font-bold tracking-wider transition-colors shadow-xs"
+              >
+                Go to Host Workspace
+              </Link>
+              <Link
+                to="/organizer"
+                className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl border border-stone-200 bg-white hover:bg-stone-50 text-stone-800 text-xs font-mono uppercase font-bold tracking-wider transition-colors shadow-2xs"
+              >
+                Organizer Studio
+              </Link>
+            </>
+          ) : (
+            <Link
+              to="/events"
+              className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-stone-900 hover:bg-black text-white text-xs font-mono uppercase font-bold tracking-wider transition-colors shadow-xs"
+            >
+              Explore Events
+            </Link>
+          )}
         </div>
       </div>
     );
@@ -306,42 +451,194 @@ export const TeamInvitationPage: React.FC = () => {
                 <ArrowRight className="w-4 h-4" />
               </Link>
             ) : (
-              <Link
-                to={`/events/${invitation.eventSlug}`}
-                className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl bg-stone-900 hover:bg-black text-white text-xs font-mono uppercase font-bold tracking-wider transition-colors shadow-xs"
-              >
-                View Public Event
-                <ExternalLink className="w-4 h-4" />
-              </Link>
+              <>
+                <Link
+                  to="/host"
+                  className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl bg-stone-900 hover:bg-black text-white text-xs font-mono uppercase font-bold tracking-wider transition-colors shadow-xs"
+                >
+                  Go to Host Workspace
+                  <ArrowRight className="w-4 h-4" />
+                </Link>
+                <Link
+                  to={`/events/${invitation.eventSlug}`}
+                  className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl border border-stone-200 bg-white hover:bg-stone-50 text-stone-800 text-xs font-mono uppercase font-bold tracking-wider transition-colors shadow-2xs"
+                >
+                  View Public Event
+                  <ExternalLink className="w-4 h-4" />
+                </Link>
+              </>
             )}
           </div>
         </div>
       ) : !user ? (
         /* Unauthenticated State */
-        <div className="bg-white rounded-2xl p-6 border border-stone-200 shadow-sm text-center space-y-4">
-          <div className="w-12 h-12 rounded-2xl bg-stone-100 text-stone-600 mx-auto flex items-center justify-center">
-            <Mail className="w-6 h-6" />
+        <div className="bg-white rounded-2xl p-6 border border-stone-200 shadow-sm space-y-6">
+          <div className="text-center space-y-3">
+            <div className="w-12 h-12 rounded-2xl bg-stone-100 text-stone-600 mx-auto flex items-center justify-center">
+              <Mail className="w-6 h-6" />
+            </div>
+
+            <div className="space-y-1">
+              <h3 className="font-display font-bold text-stone-900 text-base">
+                Sign In to Accept Invitation
+              </h3>
+              <p className="text-xs text-stone-600 max-w-sm mx-auto leading-relaxed">
+                To accept, you must sign in or register with your verified Outside.vip account matching{' '}
+                <strong className="font-mono text-stone-900">{invitation.emailMasked}</strong>.
+              </p>
+            </div>
+
+            <div className="pt-1">
+              <Link
+                to={`/login?redirect=${encodeURIComponent(location.pathname)}`}
+                className="inline-flex items-center gap-2 px-6 py-2.5 rounded-xl bg-stone-900 hover:bg-black text-white text-xs font-mono uppercase font-bold tracking-wider transition-colors shadow-xs"
+              >
+                {isHost ? 'Sign In or Create Password Account' : 'Sign In / Register'}
+                <ArrowRight className="w-4 h-4" />
+              </Link>
+            </div>
           </div>
 
-          <div className="space-y-1">
-            <h3 className="font-display font-bold text-stone-900 text-base">
-              Sign In to Accept Invitation
-            </h3>
-            <p className="text-xs text-stone-600 max-w-sm mx-auto leading-relaxed">
-              To accept, you must sign in or register with your verified Outside.vip account matching{' '}
-              <strong className="font-mono text-stone-900">{invitation.emailMasked}</strong>.
-            </p>
-          </div>
+          {/* Passwordless Email-Code Sign-In: strictly for HOST invitations & existing passwordless accounts */}
+          {isHost && (
+            <div className="pt-5 border-t border-stone-200 space-y-4">
+              <div className="text-center space-y-1">
+                <div className="inline-flex items-center gap-1.5 text-[11px] font-mono uppercase tracking-wider font-bold text-stone-700">
+                  <KeyRound className="w-3.5 h-3.5 text-amber-600" />
+                  <span>Already Have a Passwordless Account?</span>
+                </div>
+                <p className="text-[11px] text-stone-500 max-w-sm mx-auto leading-relaxed">
+                  Existing door scanner or passwordless accounts matching{' '}
+                  <strong className="font-mono text-stone-800">{invitation.emailMasked}</strong> can sign in with a 6-digit email code below without creating a second account.
+                </p>
+              </div>
 
-          <div className="pt-2">
-            <Link
-              to={`/login?redirect=${encodeURIComponent(location.pathname)}`}
-              className="inline-flex items-center gap-2 px-6 py-2.5 rounded-xl bg-stone-900 hover:bg-black text-white text-xs font-mono uppercase font-bold tracking-wider transition-colors shadow-xs"
-            >
-              Sign In / Register
-              <ArrowRight className="w-4 h-4" />
-            </Link>
-          </div>
+              {otpError && (
+                <div
+                  role="alert"
+                  className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs flex items-start gap-2"
+                >
+                  <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-600" />
+                  <span>{otpError}</span>
+                </div>
+              )}
+
+              {!otpRequested ? (
+                <form onSubmit={handleRequestHostOtp} className="space-y-3">
+                  <div>
+                    <label
+                      htmlFor="host-invite-otp-email"
+                      className="block text-[11px] font-mono uppercase tracking-wider text-stone-600 mb-1"
+                    >
+                      Registered Email Address
+                    </label>
+                    <input
+                      id="host-invite-otp-email"
+                      type="email"
+                      required
+                      autoComplete="email"
+                      value={otpEmail}
+                      onChange={(e) => setOtpEmail(e.target.value)}
+                      placeholder="you@example.com"
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-stone-50 border border-stone-200 text-sm text-stone-900 placeholder:text-stone-400 focus:outline-none focus:border-stone-900"
+                    />
+                  </div>
+                  <button
+                    type="submit"
+                    disabled={isSendingOtp || otpCooldownSeconds > 0 || !otpEmail.trim()}
+                    className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl border border-stone-300 bg-stone-50 hover:bg-stone-100 text-stone-900 font-semibold text-xs font-mono uppercase tracking-wider transition-colors disabled:opacity-50 cursor-pointer"
+                  >
+                    {isSendingOtp ? (
+                      <>
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        Sending Code...
+                      </>
+                    ) : otpCooldownSeconds > 0 ? (
+                      <>
+                        <RotateCw className="w-3.5 h-3.5" />
+                        Wait {otpCooldownSeconds}s
+                      </>
+                    ) : (
+                      <>
+                        <Mail className="w-3.5 h-3.5" />
+                        Send 6-Digit Email Code
+                      </>
+                    )}
+                  </button>
+                </form>
+              ) : (
+                <form onSubmit={handleVerifyHostOtp} className="space-y-3">
+                  {otpInfoMessage && (
+                    <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs leading-relaxed">
+                      {otpInfoMessage}
+                    </div>
+                  )}
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <label
+                        htmlFor="host-invite-otp-code"
+                        className="block text-[11px] font-mono uppercase tracking-wider text-stone-600"
+                      >
+                        6-Digit Verification Code
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setOtpRequested(false);
+                          setOtpCode('');
+                          setOtpInfoMessage(null);
+                          setOtpError(null);
+                        }}
+                        className="text-[11px] text-stone-500 hover:text-stone-900"
+                      >
+                        Change email
+                      </button>
+                    </div>
+                    <input
+                      id="host-invite-otp-code"
+                      type="text"
+                      inputMode="numeric"
+                      autoComplete="one-time-code"
+                      maxLength={6}
+                      required
+                      value={otpCode}
+                      onChange={(e) => setOtpCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                      placeholder="123456"
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-stone-50 border border-stone-200 text-center font-mono text-lg tracking-[0.35em] text-stone-900 focus:outline-none focus:border-stone-900"
+                    />
+                  </div>
+                  <button
+                    type="submit"
+                    disabled={isVerifyingOtp || otpCode.length !== 6}
+                    className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-stone-900 hover:bg-black text-white font-semibold text-xs font-mono uppercase tracking-wider transition-colors disabled:opacity-50 cursor-pointer"
+                  >
+                    {isVerifyingOtp ? (
+                      <>
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        Verifying Code...
+                      </>
+                    ) : (
+                      <>
+                        <Check className="w-3.5 h-3.5" />
+                        Verify Code &amp; Continue
+                      </>
+                    )}
+                  </button>
+                  <div className="flex justify-end">
+                    <button
+                      type="button"
+                      onClick={() => handleRequestHostOtp()}
+                      disabled={isSendingOtp || otpCooldownSeconds > 0}
+                      className="inline-flex items-center gap-1 text-[11px] font-mono text-stone-600 hover:text-stone-900 disabled:opacity-50"
+                    >
+                      <RotateCw className="w-3 h-3" />
+                      {otpCooldownSeconds > 0 ? `Resend in ${otpCooldownSeconds}s` : 'Resend Code'}
+                    </button>
+                  </div>
+                </form>
+              )}
+            </div>
+          )}
         </div>
       ) : user.emailVerified === false ? (
         /* Email Not Verified */

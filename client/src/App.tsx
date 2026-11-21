@@ -18,7 +18,7 @@ import { AuthPage } from './pages/AuthPage';
 import { StaffInvitationPage } from './pages/StaffInvitationPage';
 import { TeamInvitationPage } from './pages/TeamInvitationPage';
 import { HostDashboardPage } from './pages/HostDashboardPage';
-import { RequireAuth, RequireRole } from './components/auth/RequireAuth';
+import { RequireAuth } from './components/auth/RequireAuth';
 import { ScannerGuard } from './components/auth/ScannerGuard';
 
 export const App: React.FC = () => {
@@ -57,9 +57,23 @@ export const App: React.FC = () => {
           <Route path="/events" element={<DiscoverPage />} />
           <Route path="/events/:slug" element={<EventDetailPage />} />
 
-          {/* Conditional & Specialized Access Routes (outside generic guards) */}
-          <Route path="/orders" element={<OrdersPage />} />
-          <Route path="/atendees" element={<AtendeePage />} />
+          {/* Authenticated Orders & Attendees */}
+          <Route
+            path="/orders"
+            element={
+              <RequireAuth>
+                <OrdersPage />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/atendees"
+            element={
+              <RequireAuth>
+                <AtendeePage />
+              </RequireAuth>
+            }
+          />
           <Route path="/staff/invitations/:token" element={<StaffInvitationPage />} />
           <Route path="/team/invitations/:token" element={<TeamInvitationPage />} />
           <Route
@@ -72,13 +86,13 @@ export const App: React.FC = () => {
           />
           <Route path="/orders/:orderNumber" element={<OrderConfirmationPage />} />
 
-          {/* Role-Restricted Route (/teams requires ORGANIZER or ADMIN) */}
+          {/* Event-Scoped Team Workspace (Owners, Platform Admins, and Event Admins with canManageTeam) */}
           <Route
             path="/teams"
             element={
-              <RequireRole allowedRoles={['ORGANIZER', 'ADMIN']}>
+              <RequireAuth>
                 <TeamsPage />
-              </RequireRole>
+              </RequireAuth>
             }
           />
 

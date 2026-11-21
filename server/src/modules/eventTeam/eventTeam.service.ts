@@ -352,13 +352,14 @@ export async function inspectTeamInvitation(rawToken: string) {
     throw new ForbiddenError('This invitation has been revoked');
   }
 
+  if (invitation.status === TeamInvitationStatus.ACCEPTED) {
+    throw new ConflictError(
+      'This invitation has already been accepted. Please sign in to access your workspace.',
+      'INVITATION_ALREADY_ACCEPTED'
+    );
+  }
+
   if (invitation.status === TeamInvitationStatus.EXPIRED || invitation.expiresAt < new Date()) {
-    if (invitation.status === TeamInvitationStatus.PENDING) {
-      await prisma.eventTeamInvitation.update({
-        where: { id: invitation.id },
-        data: { status: TeamInvitationStatus.EXPIRED },
-      });
-    }
     throw new ForbiddenError('This invitation has expired');
   }
 
@@ -415,46 +416,22 @@ export async function acceptTeamInvitation(
     throw new ForbiddenError('This invitation has been revoked');
   }
 
+  if (invitation.status === TeamInvitationStatus.ACCEPTED) {
+    throw new ConflictError(
+      'This invitation has already been accepted',
+      'INVITATION_ALREADY_ACCEPTED'
+    );
+  }
+
   if (invitation.status === TeamInvitationStatus.EXPIRED || invitation.expiresAt < new Date()) {
     throw new ForbiddenError('This invitation has expired');
   }
 
-  if (invitation.status === TeamInvitationStatus.ACCEPTED) {
-    // If already accepted, return existing membership
-    const member = await prisma.eventTeamMember.findUnique({
-      where: {
-        eventId_userId: {
-          eventId: invitation.eventId,
-          userId: user.userId,
-        },
-      },
-      include: {
-        hostedLinks: {
-          where: { status: { not: 'ARCHIVED' } },
-          include: { slugRegistry: { where: { isPrimary: true } } },
-        },
-      },
-    });
-
-    if (member) {
-      const primaryLink = member.hostedLinks[0];
-      const primarySlug = primaryLink?.slugRegistry[0]?.slug;
-      return {
-        memberId: member.id,
-        eventId: member.eventId,
-        role: member.role,
-        status: member.status,
-        hostLink: primaryLink && primarySlug ? {
-          id: primaryLink.id,
-          slug: primarySlug,
-          name: primaryLink.name,
-        } : undefined,
-      };
-    }
-  }
-
   if (invitation.status !== TeamInvitationStatus.PENDING) {
-    throw new BadRequestError(`Invitation is already ${invitation.status.toLowerCase()}`);
+    throw new ConflictError(
+      `Invitation is already ${String(invitation.status).toLowerCase()}`,
+      'INVITATION_NOT_PENDING'
+    );
   }
 
   // Verify signed-in email matches recipient
@@ -503,16 +480,38 @@ export async function acceptTeamInvitation(
     }
   }
 
-  // Execute acceptance in an atomic transaction
+  // Execute acceptance in an atomic transaction with conditional single-use claim
   return await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
-    // 1. Mark invitation accepted
-    await tx.eventTeamInvitation.update({
-      where: { id: invitation.id },
+    // 1. Atomically claim PENDING non-expired invitation before any membership/link writes
+    const claimNow = new Date();
+    const claimed = await tx.eventTeamInvitation.updateMany({
+      where: {
+        id: invitation.id,
+        status: TeamInvitationStatus.PENDING,
+        expiresAt: { gt: claimNow },
+      },
       data: {
         status: TeamInvitationStatus.ACCEPTED,
-        acceptedAt: new Date(),
+        acceptedAt: claimNow,
       },
     });
+
+    if (claimed.count !== 1) {
+      const currentInv = await tx.eventTeamInvitation.findUnique({
+        where: { id: invitation.id },
+        select: { status: true, expiresAt: true },
+      });
+      if (!currentInv || currentInv.status === TeamInvitationStatus.REVOKED) {
+        throw new ForbiddenError('This invitation has been revoked');
+      }
+      if (currentInv.status === TeamInvitationStatus.ACCEPTED) {
+        throw new ConflictError(
+          'This invitation has already been accepted',
+          'INVITATION_ALREADY_ACCEPTED'
+        );
+      }
+      throw new ForbiddenError('This invitation has expired');
+    }
 
     // 1b. If transitioning an existing HOST member to a non-HOST role (e.g., ADMIN),
     // archive their active or disabled personal Host promotional links first within the same

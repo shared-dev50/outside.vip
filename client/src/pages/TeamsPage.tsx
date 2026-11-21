@@ -4,37 +4,74 @@ import {
   Users,
   ShieldCheck,
   Loader2,
+  ShieldAlert,
 } from 'lucide-react';
 import { api } from '../lib/api';
 import { OrganizerEventItem } from '../types';
+import { useOptionalAuth } from '../context/AuthContext';
 import { EventTeamModal } from '../components/team/EventTeamModal';
 
-export const TeamsPage: React.FC = () => {
+export interface TeamsPageProps {
+  initialEvents?: OrganizerEventItem[];
+}
+
+export const TeamsPage: React.FC<TeamsPageProps> = ({ initialEvents }) => {
   const [searchParams, setSearchParams] = useSearchParams();
+  const auth = useOptionalAuth();
+  const user = auth?.user;
+  const clearSessionState = auth?.clearSessionState;
 
-  const [events, setEvents] = useState<OrganizerEventItem[]>([]);
-  const [selectedEventId, setSelectedEventId] = useState<string>('');
-  const [isLoadingEvents, setIsLoadingEvents] = useState<boolean>(true);
+  const filterTeamAuthorizedEvents = (rawEvents: OrganizerEventItem[]) =>
+    rawEvents.filter((evt) => {
+      if (user?.role === 'ADMIN') return true;
+      const isOwner = evt.isOwner ?? (user ? evt.organizerId === user.id : false);
+      return isOwner || Boolean(evt.permissions?.canManageTeam);
+    });
 
-  // Load organizer events
+  const initialAuthorized = initialEvents ? filterTeamAuthorizedEvents(initialEvents) : [];
+
+  const [events, setEvents] = useState<OrganizerEventItem[]>(initialAuthorized);
+  const [selectedEventId, setSelectedEventId] = useState<string>(
+    initialAuthorized[0]?.id || ''
+  );
+  const [isLoadingEvents, setIsLoadingEvents] = useState<boolean>(
+    initialEvents === undefined
+  );
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  // Load events where caller is Event Owner, Platform Admin, or Event Admin with canManageTeam
   useEffect(() => {
+    if (initialEvents !== undefined) return;
     let isMounted = true;
     async function fetchEvents() {
       setIsLoadingEvents(true);
+      setLoadError(null);
       try {
         const res = await api.organizer.listEvents();
         if (isMounted && res.events) {
-          setEvents(res.events);
+          const teamEligible = filterTeamAuthorizedEvents(res.events);
+          setEvents(teamEligible);
           const paramEvent = searchParams.get('event');
-          if (paramEvent && res.events.some((e) => e.id === paramEvent || e.slug === paramEvent)) {
-            const found = res.events.find((e) => e.id === paramEvent || e.slug === paramEvent);
+          if (
+            paramEvent &&
+            teamEligible.some((e) => e.id === paramEvent || e.slug === paramEvent)
+          ) {
+            const found = teamEligible.find((e) => e.id === paramEvent || e.slug === paramEvent);
             if (found) setSelectedEventId(found.id);
-          } else if (res.events.length > 0) {
-            setSelectedEventId(res.events[0].id);
+          } else if (teamEligible.length > 0) {
+            setSelectedEventId(teamEligible[0].id);
+          } else {
+            setSelectedEventId('');
           }
         }
       } catch (err: any) {
-        console.error('Failed to load organizer events:', err);
+        if (!isMounted) return;
+        const status = err?.statusCode || err?.status;
+        if (status === 401) {
+          clearSessionState?.();
+          return;
+        }
+        setLoadError(err?.message || 'Failed to load team-authorized events.');
       } finally {
         if (isMounted) setIsLoadingEvents(false);
       }
@@ -44,7 +81,7 @@ export const TeamsPage: React.FC = () => {
     return () => {
       isMounted = false;
     };
-  }, []);
+  }, [initialEvents, user?.id, user?.role, clearSessionState]);
 
   // Sync selected event to URL param
   const handleSelectEvent = (id: string) => {
@@ -122,8 +159,33 @@ export const TeamsPage: React.FC = () => {
         <EventTeamModal event={selectedEvent} isInline={true} />
       ) : (
         !isLoadingEvents && (
-          <div className="p-12 text-center bg-white rounded-2xl border border-stone-200 text-stone-400 font-mono text-xs">
-            Select an event above to view and manage its team members, promotional hosts, and scanner staff.
+          <div className="p-10 text-center bg-white rounded-2xl border border-stone-200 space-y-4">
+            <div className="w-12 h-12 rounded-2xl bg-amber-50 border border-amber-200 text-amber-700 flex items-center justify-center mx-auto">
+              <ShieldAlert className="w-6 h-6" />
+            </div>
+            <div className="space-y-1.5">
+              <h2 className="font-display font-bold text-base text-stone-900">
+                {loadError ? 'Unable to Load Event Teams' : 'No Team Management Access'}
+              </h2>
+              <p className="text-xs text-stone-600 max-w-md mx-auto leading-relaxed">
+                {loadError ||
+                  'Team management requires owning an event or holding an active Event Admin membership with the Manage Event Team permission.'}
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center justify-center gap-3 pt-1">
+              <Link
+                to="/organizer"
+                className="px-4 py-2 rounded-xl bg-stone-900 hover:bg-black text-white text-xs font-mono uppercase font-semibold tracking-wider transition-colors"
+              >
+                Organizer Dashboard
+              </Link>
+              <Link
+                to="/host"
+                className="px-4 py-2 rounded-xl border border-stone-200 bg-white hover:bg-stone-50 text-stone-700 text-xs font-mono uppercase font-semibold tracking-wider transition-colors"
+              >
+                Host Workspace
+              </Link>
+            </div>
           </div>
         )
       )}

@@ -142,6 +142,7 @@ describe('Staff Scanner Authorization & Dedicated Scanner Router API', () => {
     });
 
     it('returns only active assigned events for STAFF attendee', async () => {
+      vi.spyOn(prisma.event, 'findMany').mockResolvedValue([]);
       vi.spyOn(prisma.eventStaff, 'findMany').mockResolvedValue([
         { event: mockAssignedEvent } as any,
       ]);
@@ -158,6 +159,7 @@ describe('Staff Scanner Authorization & Dedicated Scanner Router API', () => {
     });
 
     it('returns empty list for attendee with no staff assignments', async () => {
+      vi.spyOn(prisma.event, 'findMany').mockResolvedValue([]);
       vi.spyOn(prisma.eventStaff, 'findMany').mockResolvedValue([]);
 
       const res = await request(app)
@@ -538,6 +540,7 @@ describe('Staff Scanner Authorization & Dedicated Scanner Router API', () => {
       expect(csrfToken).toBeTruthy();
 
       // 3. GET /api/scanner/gates returns ONLY assigned event
+      vi.spyOn(prisma.event, 'findMany').mockResolvedValue([]);
       vi.spyOn(prisma.eventStaff, 'findMany').mockResolvedValue([
         { event: mockAssignedEvent } as any,
       ]);
@@ -607,6 +610,7 @@ describe('Staff Scanner Authorization & Dedicated Scanner Router API', () => {
       const cookieHeader = extractSessionCookieHeader(verRes.headers['set-cookie']);
       const csrfToken = verRes.body.data.csrfToken;
 
+      vi.spyOn(prisma.event, 'findMany').mockResolvedValue([]);
       vi.spyOn(prisma.eventStaff, 'findMany').mockResolvedValue([]);
       const gatesRes = await request(app).get('/api/scanner/gates').set('Cookie', cookieHeader);
       expect(gatesRes.status).toBe(200);

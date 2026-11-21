@@ -14,6 +14,7 @@ import {
 import { calculateCombinedEarnings } from '../checkout/checkout.financials.js';
 import { NotFoundError, ForbiddenError, BadRequestError, ConflictError, UnauthorizedError } from '../../utils/errors.js';
 import { getRedisClient } from '../../lib/redis.js';
+import { invalidateUserAuthCache } from '../../lib/session.service.js';
 import { calculateOccurrences, formatOccurrenceSlugSuffix } from '../events/recurrence.service.js';
 import { assertStripeReadyForPaidPublishing } from '../finance/finance.service.js';
 import { recordAdminAuditLog } from '../../lib/auditLogger.js';
@@ -167,6 +168,7 @@ export async function ensureOrganizerWorkspaceForUser(
         where: { id: user.id },
         data: { role: Role.ORGANIZER },
       });
+      await invalidateUserAuthCache(user.id).catch(() => {});
     }
 
     return createdProfile;
@@ -256,6 +258,7 @@ export async function upsertOrganizerWorkspace(
         where: { id: userId },
         data: { role: Role.ORGANIZER },
       });
+      await invalidateUserAuthCache(userId).catch(() => {});
     }
 
     res.status(existing ? 200 : 201).json({
@@ -402,8 +405,12 @@ export async function listOrganizerEvents(req: Request, res: Response, next: Nex
 
       // Clean orders array and sensitive/owner-only fields before returning
       const { orders: _, passwordHash: __, ...rest } = event;
+      const accessRole: 'OWNER' | 'ADMIN' = isOwner ? 'OWNER' : 'ADMIN';
       enhanced.push({
         ...rest,
+        isOwner,
+        accessRole,
+        permissions: isOwner ? null : (adminPerms ?? null),
         payoutDetails: null,
         payoutDetailsId: isOwner ? event.payoutDetailsId : null,
         totalCapacity,

@@ -9,10 +9,13 @@ import {
   CheckCircle2,
   ShieldCheck,
   Building2,
+  KeyRound,
+  RotateCw,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
+import { api, setActiveCsrfToken } from '../../lib/api';
 
-export type AuthViewMode = 'login' | 'register' | 'forgot-password';
+export type AuthViewMode = 'login' | 'otp-login' | 'register' | 'forgot-password';
 
 interface AuthFormCardProps {
   initialMode?: AuthViewMode;
@@ -31,7 +34,7 @@ export const AuthFormCard: React.FC<AuthFormCardProps> = ({
   onSuccess,
   showReturnLink = true,
 }) => {
-  const { login, register } = useAuth();
+  const { login, register, requestLoginOtp, verifyLoginOtp } = useAuth();
   const [mode, setMode] = useState<AuthViewMode>(initialMode);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -41,16 +44,67 @@ export const AuthFormCard: React.FC<AuthFormCardProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [recoverySent, setRecoverySent] = useState(false);
 
+  // Unified passwordless OTP sign-in state (strictly for existing ACTIVE passwordless accounts)
+  const [otpRequested, setOtpRequested] = useState(false);
+  const [otpCode, setOtpCode] = useState('');
+  const [otpInfoMessage, setOtpInfoMessage] = useState<string | null>(null);
+  const [otpCooldownSeconds, setOtpCooldownSeconds] = useState(0);
+
   useEffect(() => {
     setMode(initialMode);
     setError(null);
     setRecoverySent(false);
+    setOtpRequested(false);
+    setOtpCode('');
+    setOtpInfoMessage(null);
   }, [initialMode]);
+
+  useEffect(() => {
+    if (otpCooldownSeconds <= 0) return;
+    const timer = setInterval(() => {
+      setOtpCooldownSeconds((prev) => Math.max(0, prev - 1));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [otpCooldownSeconds]);
 
   const switchMode = (nextMode: AuthViewMode) => {
     setMode(nextMode);
     setError(null);
     setRecoverySent(false);
+    setOtpRequested(false);
+    setOtpCode('');
+    setOtpInfoMessage(null);
+  };
+
+  const handleRequestOtp = async () => {
+    const cleanEmail = email.trim();
+    if (!cleanEmail) {
+      setError('Please enter your registered email address.');
+      return;
+    }
+    if (isSubmitting || otpCooldownSeconds > 0) return;
+
+    setIsSubmitting(true);
+    setError(null);
+    try {
+      const res = requestLoginOtp
+        ? await requestLoginOtp(cleanEmail)
+        : await api.auth.requestLoginOtp({ email: cleanEmail });
+      setOtpRequested(true);
+      setOtpCode('');
+      setOtpInfoMessage(
+        res.message ||
+          'If an eligible passwordless account exists for this email, a 6-digit sign-in code has been sent.'
+      );
+      setOtpCooldownSeconds(res.cooldownSeconds || 60);
+    } catch (err: any) {
+      if (typeof err?.retryAfter === 'number' && err.retryAfter > 0) {
+        setOtpCooldownSeconds(Math.ceil(err.retryAfter));
+      }
+      setError(err?.message || 'Unable to send sign-in code. Please try again.');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -63,6 +117,48 @@ export const AuthFormCard: React.FC<AuthFormCardProps> = ({
         return;
       }
       setRecoverySent(true);
+      return;
+    }
+
+    if (mode === 'otp-login') {
+      if (!otpRequested) {
+        await handleRequestOtp();
+        return;
+      }
+
+      const cleanEmail = email.trim();
+      const cleanCode = otpCode.trim().replace(/\D/g, '');
+      if (!cleanEmail) {
+        setError('Please enter your email address.');
+        return;
+      }
+      if (cleanCode.length !== 6) {
+        setError('Please enter the complete 6-digit sign-in code sent to your email.');
+        return;
+      }
+
+      setIsSubmitting(true);
+      try {
+        if (verifyLoginOtp) {
+          await verifyLoginOtp(cleanEmail, cleanCode);
+        } else {
+          const res = await api.auth.verifyLoginOtp({ email: cleanEmail, code: cleanCode });
+          if (res.csrfToken) {
+            setActiveCsrfToken(res.csrfToken);
+          }
+        }
+        if (onSuccess) onSuccess();
+      } catch (err: any) {
+        if (typeof err?.retryAfter === 'number' && err.retryAfter > 0) {
+          setOtpCooldownSeconds(Math.ceil(err.retryAfter));
+        }
+        setError(
+          err?.message ||
+            'Invalid or expired sign-in code. Password-based accounts must sign in with their password.'
+        );
+      } finally {
+        setIsSubmitting(false);
+      }
       return;
     }
 
@@ -107,16 +203,20 @@ export const AuthFormCard: React.FC<AuthFormCardProps> = ({
   const headingTitle =
     mode === 'login'
       ? loginTitle
-      : mode === 'register'
-        ? 'Create your account'
-        : 'Reset your password';
+      : mode === 'otp-login'
+        ? 'Sign in with email code'
+        : mode === 'register'
+          ? 'Create your account'
+          : 'Reset your password';
 
   const headingSubtitle =
     mode === 'login'
       ? loginSubtitle
-      : mode === 'register'
-        ? 'Every account includes attendee ticket access and unlocks organizer event tools once your email is verified.'
-        : 'Enter the email address associated with your account to receive password recovery instructions.';
+      : mode === 'otp-login'
+        ? 'For existing passwordless accounts (such as door scanner staff and returning hosts). Accounts with a password must sign in with their password.'
+        : mode === 'register'
+          ? 'Every account includes attendee ticket access and unlocks organizer event tools once your email is verified.'
+          : 'Enter the email address associated with your account to receive password recovery instructions.';
 
   return (
     <div className="max-w-md w-full rounded-2xl bg-white p-6 sm:p-8 border border-stone-200/90 shadow-[0_8px_30px_rgb(28,25,23,0.06)] text-left">
@@ -190,6 +290,12 @@ export const AuthFormCard: React.FC<AuthFormCardProps> = ({
             </div>
           )}
 
+          {mode === 'otp-login' && otpRequested && otpInfoMessage && (
+            <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs leading-relaxed">
+              {otpInfoMessage}
+            </div>
+          )}
+
           <div>
             <label
               htmlFor="auth-email"
@@ -205,15 +311,68 @@ export const AuthFormCard: React.FC<AuthFormCardProps> = ({
                 type="email"
                 autoComplete="email"
                 required
+                readOnly={mode === 'otp-login' && otpRequested}
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 placeholder="you@example.com"
-                className="w-full pl-10 pr-3.5 py-2.5 rounded-xl bg-[#FAF8F5] border border-stone-300 text-sm text-stone-900 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-stone-900 focus:border-stone-900 transition-all"
+                className="w-full pl-10 pr-3.5 py-2.5 rounded-xl bg-[#FAF8F5] border border-stone-300 text-sm text-stone-900 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-stone-900 focus:border-stone-900 transition-all read-only:opacity-75"
               />
             </div>
           </div>
 
-          {mode !== 'forgot-password' && (
+          {mode === 'otp-login' && otpRequested && (
+            <div>
+              <div className="flex items-center justify-between mb-1.5">
+                <label
+                  htmlFor="auth-otp-code"
+                  className="block text-[11px] font-mono uppercase tracking-wider text-stone-600"
+                >
+                  6-Digit Sign-In Code
+                </label>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setOtpRequested(false);
+                    setOtpCode('');
+                    setOtpInfoMessage(null);
+                    setError(null);
+                  }}
+                  className="text-[11px] font-medium text-stone-500 hover:text-stone-900 transition-colors"
+                >
+                  Use a different email
+                </button>
+              </div>
+              <div className="relative">
+                <KeyRound className="w-4 h-4 text-stone-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <input
+                  id="auth-otp-code"
+                  name="otpCode"
+                  type="text"
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                  maxLength={6}
+                  required
+                  value={otpCode}
+                  onChange={(e) => setOtpCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                  placeholder="123456"
+                  className="w-full pl-10 pr-3.5 py-2.5 rounded-xl bg-[#FAF8F5] border border-stone-300 text-sm font-mono tracking-[0.3em] text-stone-900 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-stone-900 focus:border-stone-900 transition-all"
+                />
+              </div>
+              <div className="mt-2 flex justify-end">
+                <button
+                  type="button"
+                  onClick={handleRequestOtp}
+                  disabled={isSubmitting || otpCooldownSeconds > 0}
+                  className="inline-flex items-center gap-1 text-[11px] font-mono text-stone-600 hover:text-stone-900 disabled:opacity-50"
+                >
+                  <RotateCw className="w-3 h-3" />
+                  {otpCooldownSeconds > 0 ? `Resend in ${otpCooldownSeconds}s` : 'Resend Code'}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {mode !== 'forgot-password' && mode !== 'otp-login' && (
             <div>
               <div className="flex items-center justify-between mb-1.5">
                 <label
@@ -275,19 +434,29 @@ export const AuthFormCard: React.FC<AuthFormCardProps> = ({
 
           <button
             type="submit"
-            disabled={isSubmitting}
+            disabled={isSubmitting || (mode === 'otp-login' && !otpRequested && otpCooldownSeconds > 0)}
             className="w-full py-3 px-4 rounded-xl bg-stone-900 hover:bg-black disabled:opacity-50 text-white font-semibold text-xs font-mono uppercase tracking-wider transition-all duration-200 shadow-xs flex items-center justify-center gap-2"
           >
             <span>
               {isSubmitting
                 ? mode === 'login'
                   ? 'Signing in...'
-                  : 'Creating account...'
+                  : mode === 'otp-login'
+                    ? otpRequested
+                      ? 'Verifying code...'
+                      : 'Sending code...'
+                    : 'Creating account...'
                 : mode === 'login'
                   ? 'Sign In'
-                  : mode === 'register'
-                    ? 'Create Account'
-                    : 'Send Recovery Instructions'}
+                  : mode === 'otp-login'
+                    ? otpRequested
+                      ? 'Verify & Sign In'
+                      : otpCooldownSeconds > 0
+                        ? `Wait ${otpCooldownSeconds}s`
+                        : 'Send 6-Digit Sign-In Code'
+                    : mode === 'register'
+                      ? 'Create Account'
+                      : 'Send Recovery Instructions'}
             </span>
             <ArrowRight className="w-3.5 h-3.5" />
           </button>
@@ -296,16 +465,53 @@ export const AuthFormCard: React.FC<AuthFormCardProps> = ({
 
       <div className="mt-6 pt-5 border-t border-stone-200/80 space-y-2.5 text-center text-xs text-stone-600">
         {mode === 'login' && (
-          <p>
-            Don&apos;t have an account?{' '}
-            <button
-              type="button"
-              onClick={() => switchMode('register')}
-              className="font-semibold text-stone-900 hover:underline"
-            >
-              Create an account
-            </button>
-          </p>
+          <>
+            <p>
+              Passwordless host or door staff?{' '}
+              <button
+                type="button"
+                onClick={() => switchMode('otp-login')}
+                className="font-semibold text-stone-900 hover:underline"
+              >
+                Sign in with email code
+              </button>
+            </p>
+            <p>
+              Don&apos;t have an account?{' '}
+              <button
+                type="button"
+                onClick={() => switchMode('register')}
+                className="font-semibold text-stone-900 hover:underline"
+              >
+                Create an account
+              </button>
+            </p>
+          </>
+        )}
+
+        {mode === 'otp-login' && (
+          <>
+            <p>
+              Have a password account?{' '}
+              <button
+                type="button"
+                onClick={() => switchMode('login')}
+                className="font-semibold text-stone-900 hover:underline"
+              >
+                Sign in with password
+              </button>
+            </p>
+            <p>
+              New to Outside.vip?{' '}
+              <button
+                type="button"
+                onClick={() => switchMode('register')}
+                className="font-semibold text-stone-900 hover:underline"
+              >
+                Create an account
+              </button>
+            </p>
+          </>
         )}
 
         {mode === 'register' && (

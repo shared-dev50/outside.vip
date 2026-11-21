@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useMemo } from 'react';
+import { QueryClientContext } from '@tanstack/react-query';
 import { User } from '../types';
 import { api, setActiveCsrfToken } from '../lib/api';
 
@@ -31,6 +32,7 @@ export const AuthContext = createContext<AuthContextType | undefined>(undefined)
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
+  const queryClient = useContext(QueryClientContext);
 
   const refreshUser = useCallback(async (): Promise<User | null> => {
     try {
@@ -77,11 +79,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const login = useCallback(async (email: string, password: string) => {
     const data = await api.auth.login({ email, password });
+    queryClient?.clear();
     if (data.csrfToken) {
       setActiveCsrfToken(data.csrfToken);
     }
     setUser(data.user);
-  }, []);
+  }, [queryClient]);
 
   const requestLoginOtp = useCallback(async (email: string) => {
     const data = await api.auth.requestLoginOtp({ email });
@@ -94,17 +97,19 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const verifyLoginOtp = useCallback(async (email: string, code: string): Promise<User> => {
     const data = await api.auth.verifyLoginOtp({ email, code });
+    queryClient?.clear();
     if (data.csrfToken) {
       setActiveCsrfToken(data.csrfToken);
     }
     setUser(data.user);
     return data.user;
-  }, []);
+  }, [queryClient]);
 
   const clearSessionState = useCallback(() => {
     setActiveCsrfToken(null);
     setUser(null);
-  }, []);
+    queryClient?.clear();
+  }, [queryClient]);
 
   const register = useCallback(async (input: {
     email: string;
@@ -114,11 +119,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     organizerDisplayName?: string;
   }) => {
     const data = await api.auth.register(input);
+    queryClient?.clear();
     if (data.csrfToken) {
       setActiveCsrfToken(data.csrfToken);
     }
     setUser(data.user);
-  }, []);
+  }, [queryClient]);
 
   const verifyEmail = useCallback(async (code: string): Promise<User> => {
     const data = await api.auth.verifyEmail({ code });
@@ -145,8 +151,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     } finally {
       setActiveCsrfToken(null);
       setUser(null);
+      queryClient?.clear();
     }
-  }, []);
+  }, [queryClient]);
 
   const contextValue = useMemo(
     () => ({

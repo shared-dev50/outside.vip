@@ -1196,7 +1196,7 @@ describe('Event Teams, Invitations & Host Promotional Tools (Stage 2)', () => {
           .set('Cookie', archivedHostAuth.cookie)
           .set('x-csrf-token', archivedHostAuth.csrf)
           .send({ slug: `try-custom-${testRunId}` })
-          .expect(401); // Active Host membership required
+          .expect(403); // Active Host membership required (S4-05: 403 Forbidden, not 401)
 
         // Attempting to customize slug via management route rejects archived link
         await request(app)
@@ -1337,7 +1337,7 @@ describe('Event Teams, Invitations & Host Promotional Tools (Stage 2)', () => {
           .set('Cookie', lifecycleHostAuth.cookie)
           .set('x-csrf-token', lifecycleHostAuth.csrf)
           .send({ slug: `inactive-slug-${testRunId}` })
-          .expect(401);
+          .expect(403);
       });
 
       it('2C.3: INACTIVE Host does not receive protected Host event/link information', async () => {
@@ -1371,7 +1371,7 @@ describe('Event Teams, Invitations & Host Promotional Tools (Stage 2)', () => {
           .set('Cookie', lifecycleHostAuth.cookie)
           .set('x-csrf-token', lifecycleHostAuth.csrf)
           .send({ slug: `revoked-slug-${testRunId}` })
-          .expect(401);
+          .expect(403);
       });
 
       it('2C.6: REVOKED Host receives empty assigned events list', async () => {
@@ -2323,7 +2323,7 @@ describe('Event Teams, Invitations & Host Promotional Tools (Stage 2)', () => {
         expect(afterEvent?.payoutDetailsId).toBe(beforeEvent?.payoutDetailsId);
       });
 
-      it('returns payoutDetails: null in ordinary event-update responses for Event Admins', async () => {
+      it('returns payoutDetails: null and payoutDetailsId: null in ordinary event-update and event-detail responses for Event Admins while preserving owner access', async () => {
         const res = await request(app)
           .patch(`/api/organizer/events/${event1.id}`)
           .set('Cookie', teamMgrAdminAuth.cookie)
@@ -2335,6 +2335,26 @@ describe('Event Teams, Invitations & Host Promotional Tools (Stage 2)', () => {
 
         expect(res.body.data.event.tagline).toBe('Admin Updated Tagline Safely');
         expect(res.body.data.event.payoutDetails).toBeNull();
+        expect(res.body.data.event.payoutDetailsId).toBeNull();
+
+        // Event detail endpoint must also mask payoutDetails, payoutDetailsId, and organizer.payoutDetails for Event Admins
+        const detailAdminRes = await request(app)
+          .get(`/api/organizer/events/${event1.id}`)
+          .set('Cookie', teamMgrAdminAuth.cookie)
+          .expect(200);
+
+        expect(detailAdminRes.body.data.event.payoutDetails).toBeNull();
+        expect(detailAdminRes.body.data.event.payoutDetailsId).toBeNull();
+        expect(detailAdminRes.body.data.event.organizer.payoutDetails).toBeNull();
+
+        // Event Owner continues to receive their own sanitized payoutDetails and payoutDetailsId
+        const detailOwnerRes = await request(app)
+          .get(`/api/organizer/events/${event1.id}`)
+          .set('Cookie', organizerAuth.cookie)
+          .expect(200);
+
+        expect(detailOwnerRes.body.data.event.payoutDetails).not.toBeNull();
+        expect(detailOwnerRes.body.data.event.payoutDetailsId).toBeTruthy();
       });
     });
 
@@ -4154,6 +4174,23 @@ describe('Event Teams, Invitations & Host Promotional Tools (Stage 2)', () => {
             'canManagePayouts'
           )
         ).rejects.toThrow(/lack the 'canManagePayouts' permission/i);
+
+        // Platform ADMIN fallback must reject both canManageRefunds and canManagePayouts
+        await expect(
+          resolveEventAuthorization(
+            sec12Event.id,
+            { userId: 'platform-admin-fallback-check', role: 'ADMIN' },
+            'canManageRefunds'
+          )
+        ).rejects.toThrow(/Refund management is not supported/i);
+
+        await expect(
+          resolveEventAuthorization(
+            sec12Event.id,
+            { userId: 'platform-admin-fallback-check', role: 'ADMIN' },
+            'canManagePayouts'
+          )
+        ).rejects.toThrow(/financial credentials/i);
 
         // Team list endpoint normalizes stored records on load
         const teamRes = await request(app)
