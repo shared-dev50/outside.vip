@@ -8,7 +8,7 @@ import {
 } from './waitlist.service.js';
 import { runWaitlistMaintenancePass } from './waitlistWorker.js';
 import { joinWaitlistSchema } from './waitlist.schema.js';
-import { NotFoundError, ForbiddenError, UnauthorizedError } from '../../utils/errors.js';
+import { NotFoundError, ForbiddenError } from '../../utils/errors.js';
 import { verifyEventAccessToken } from '../events/passwordAccess.service.js';
 
 export async function handleJoinWaitlist(
@@ -108,22 +108,11 @@ export async function handleDeclineWaitlistOffer(
 }
 
 export async function handleWaitlistMaintenance(
-  req: Request,
+  _req: Request,
   res: Response,
   next: NextFunction
 ): Promise<void> {
   try {
-    const maintenanceSecret = process.env.CRON_SECRET || process.env.MAINTENANCE_KEY;
-    if (maintenanceSecret) {
-      const authHeader = req.headers.authorization;
-      const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null;
-      const customHeader = (req.headers['x-cron-secret'] || req.headers['x-maintenance-key']) as string | undefined;
-
-      if (bearerToken !== maintenanceSecret && customHeader !== maintenanceSecret) {
-        throw new UnauthorizedError('Unauthorized: Invalid or missing maintenance secret');
-      }
-    }
-
     const result = await runWaitlistMaintenancePass();
     res.json({
       success: true,

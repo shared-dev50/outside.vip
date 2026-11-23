@@ -26,7 +26,7 @@ async function startServer() {
       if (isShuttingDown) return;
       isShuttingDown = true;
       console.log(`\n🛑 Received ${signal}. Gracefully terminating Outside.vip server...`);
-      stopWaitlistBackgroundWorker();
+      await stopWaitlistBackgroundWorker();
       await stopEmailOutboxWorker();
       server.close(async () => {
         await prisma.$disconnect();

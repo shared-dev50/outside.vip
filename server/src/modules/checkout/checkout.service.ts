@@ -25,94 +25,245 @@ export interface CheckoutResult {
   breakdown?: CheckoutFeeBreakdown;
 }
 
-/**
- * Sweeps and releases expired reservations where expiresAt < now and status === ACTIVE.
- * Atomically restores reserved quantities to the tiers and marks orders EXPIRED.
- */
-export async function releaseExpiredReservations(
-  prismaClient: Prisma.TransactionClient = prisma
-): Promise<number> {
+export const DEFAULT_RESERVATION_EXPIRY_BATCH_SIZE = 50;
+
+interface ExpiredReservationBatchResult {
+  claimedOrderCount: number;
+  releasedReservationCount: number;
+  releasedTierIds: string[];
+}
+
+async function releaseExpiredReservationBatch(
+  tx: Prisma.TransactionClient,
+  batchSize: number
+): Promise<ExpiredReservationBatchResult> {
+  // Pass UTC Date parameter matching Prisma's TIMESTAMP(3) UTC column storage
   const now = new Date();
 
-  const expiredReservations = await prismaClient.ticketReservation.findMany({
-    where: {
-      status: ReservationStatus.ACTIVE,
-      expiresAt: { lt: now },
-    },
-    include: {
-      order: true,
-    },
-  });
+  // Canonical Lock Hierarchy:
+  // Order (FOR UPDATE SKIP LOCKED) -> TicketReservation (FOR UPDATE) ->
+  // TicketWaitlistOffer (FOR UPDATE) -> TicketTier (sorted id ASC FOR UPDATE)
+  const lockedOrders = await tx.$queryRaw<Array<{ id: string }>>`
+    SELECT o.id
+    FROM "Order" o
+    WHERE o.status = 'PENDING'::"OrderStatus"
+      AND EXISTS (
+        SELECT 1
+        FROM "TicketReservation" r
+        WHERE r."orderId" = o.id
+          AND r.status = 'ACTIVE'::"ReservationStatus"
+          AND r."expiresAt" < (${now}::timestamptz AT TIME ZONE 'UTC')
+      )
+    ORDER BY o."expiresAt" ASC, o.id ASC
+    LIMIT ${batchSize}
+    FOR UPDATE OF o SKIP LOCKED
+  `;
 
-  if (expiredReservations.length === 0) {
-    return 0;
+  if (lockedOrders.length === 0) {
+    return {
+      claimedOrderCount: 0,
+      releasedReservationCount: 0,
+      releasedTierIds: [],
+    };
   }
 
+  const lockedOrderIds = lockedOrders.map((o) => o.id);
+
+  const lockedReservations = await tx.$queryRaw<
+    Array<{
+      id: string;
+      orderId: string;
+      ticketTierId: string;
+      quantity: number;
+    }>
+  >`
+    SELECT r.id, r."orderId", r."ticketTierId", r.quantity
+    FROM "TicketReservation" r
+    WHERE r."orderId" = ANY(${lockedOrderIds})
+      AND r.status = 'ACTIVE'::"ReservationStatus"
+      AND r."expiresAt" < (${now}::timestamptz AT TIME ZONE 'UTC')
+    ORDER BY r.id ASC
+    FOR UPDATE
+  `;
+
+  if (lockedReservations.length === 0) {
+    return {
+      claimedOrderCount: lockedOrders.length,
+      releasedReservationCount: 0,
+      releasedTierIds: [],
+    };
+  }
+
+  const reservationIds = lockedReservations.map((r) => r.id);
+  const affectedOrderIds = Array.from(new Set(lockedReservations.map((r) => r.orderId)));
   const tierQuantityMap = new Map<string, number>();
-  const reservationIds: string[] = [];
-  const orderIds: string[] = [];
 
-  for (const reservation of expiredReservations) {
-    reservationIds.push(reservation.id);
-    orderIds.push(reservation.orderId);
-    const current = tierQuantityMap.get(reservation.ticketTierId) || 0;
-    tierQuantityMap.set(reservation.ticketTierId, current + reservation.quantity);
+  for (const reservation of lockedReservations) {
+    tierQuantityMap.set(
+      reservation.ticketTierId,
+      (tierQuantityMap.get(reservation.ticketTierId) || 0) + reservation.quantity
+    );
   }
 
-  for (const [tierId, qty] of tierQuantityMap.entries()) {
-    await prismaClient.ticketTier.update({
-      where: { id: tierId },
-      data: {
-        reservedQuantity: {
-          decrement: qty,
-        },
-      },
-    });
+  const linkedPendingOffers = await tx.$queryRaw<
+    Array<{ id: string; entryId: string }>
+  >`
+    SELECT id, "entryId"
+    FROM "TicketWaitlistOffer"
+    WHERE "orderId" = ANY(${affectedOrderIds})
+      AND status = 'PENDING'::"WaitlistOfferStatus"
+    ORDER BY id ASC
+    FOR UPDATE
+  `;
+
+  const sortedTierIds = Array.from(tierQuantityMap.keys()).sort();
+  if (sortedTierIds.length > 0) {
+    const lockedTiers = await tx.$queryRaw<
+      Array<{ id: string; reservedQuantity: number }>
+    >`
+      SELECT id, "reservedQuantity"
+      FROM "TicketTier"
+      WHERE id = ANY(${sortedTierIds})
+      ORDER BY id ASC
+      FOR UPDATE
+    `;
+
+    const lockedTierMap = new Map(lockedTiers.map((t) => [t.id, t]));
+    for (const tierId of sortedTierIds) {
+      const releaseQty = tierQuantityMap.get(tierId) || 0;
+      const lockedTier = lockedTierMap.get(tierId);
+      if (!lockedTier || releaseQty <= 0) continue;
+
+      const nextReserved = Math.max(0, lockedTier.reservedQuantity - releaseQty);
+      if (lockedTier.reservedQuantity < releaseQty) {
+        console.warn(
+          `[ReservationExpiry] Clamping reservedQuantity for tier ${tierId}: had ${lockedTier.reservedQuantity}, releasing ${releaseQty}`
+        );
+      }
+
+      await tx.ticketTier.update({
+        where: { id: tierId },
+        data: { reservedQuantity: nextReserved },
+      });
+    }
   }
 
-  await prismaClient.ticketReservation.updateMany({
-    where: { id: { in: reservationIds } },
+  const releasedResult = await tx.ticketReservation.updateMany({
+    where: {
+      id: { in: reservationIds },
+      status: ReservationStatus.ACTIVE,
+    },
     data: { status: ReservationStatus.RELEASED },
   });
 
-  await prismaClient.order.updateMany({
+  // Only mark orders EXPIRED if they remain PENDING and have no active reservations left
+  const remainingActiveOrders = await tx.ticketReservation.findMany({
     where: {
-      id: { in: orderIds },
-      status: OrderStatus.PENDING,
+      orderId: { in: affectedOrderIds },
+      status: ReservationStatus.ACTIVE,
     },
-    data: { status: OrderStatus.EXPIRED },
+    select: { orderId: true },
   });
+  const stillActiveOrderIds = new Set(remainingActiveOrders.map((r) => r.orderId));
+  const ordersToExpire = affectedOrderIds.filter((id) => !stillActiveOrderIds.has(id));
 
-  // Also expire linked waitlist offers
-  const linkedExpiredOffers = await prismaClient.ticketWaitlistOffer.findMany({
-    where: {
-      orderId: { in: orderIds },
-      status: WaitlistOfferStatus.PENDING,
-    },
-  });
+  if (ordersToExpire.length > 0) {
+    await tx.order.updateMany({
+      where: {
+        id: { in: ordersToExpire },
+        status: OrderStatus.PENDING,
+      },
+      data: { status: OrderStatus.EXPIRED },
+    });
+  }
 
-  if (linkedExpiredOffers.length > 0) {
-    const offerIds = linkedExpiredOffers.map((o) => o.id);
-    const entryIds = linkedExpiredOffers.map((o) => o.entryId);
+  if (linkedPendingOffers.length > 0) {
+    const offerIds = linkedPendingOffers.map((o) => o.id);
+    const entryIds = Array.from(new Set(linkedPendingOffers.map((o) => o.entryId)));
 
-    await prismaClient.ticketWaitlistOffer.updateMany({
-      where: { id: { in: offerIds } },
+    await tx.ticketWaitlistOffer.updateMany({
+      where: {
+        id: { in: offerIds },
+        status: WaitlistOfferStatus.PENDING,
+      },
       data: { status: WaitlistOfferStatus.EXPIRED },
     });
 
-    await prismaClient.ticketWaitlistEntry.updateMany({
-      where: { id: { in: entryIds } },
+    await tx.ticketWaitlistEntry.updateMany({
+      where: {
+        id: { in: entryIds },
+        status: WaitlistEntryStatus.OFFERED,
+      },
       data: { status: WaitlistEntryStatus.EXPIRED },
     });
   }
 
-  for (const tierId of tierQuantityMap.keys()) {
-    processWaitlistForTier(tierId).catch((err) => {
+  return {
+    claimedOrderCount: lockedOrders.length,
+    releasedReservationCount: releasedResult.count,
+    releasedTierIds: sortedTierIds,
+  };
+}
+
+/**
+ * Atomically sweeps and releases expired ACTIVE reservations belonging to PENDING orders
+ * in bounded PostgreSQL transactions using FOR UPDATE SKIP LOCKED.
+ * Loops until all claimable batches are drained and advances waitlists strictly post-commit.
+ */
+export async function releaseExpiredReservations(
+  txClientOrOptions?: Prisma.TransactionClient | { batchSize?: number },
+  options?: { batchSize?: number }
+): Promise<number> {
+  const isExternalTx = Boolean(
+    txClientOrOptions &&
+      typeof txClientOrOptions === 'object' &&
+      '$queryRaw' in txClientOrOptions
+  );
+  const resolvedOptions = isExternalTx ? options : (txClientOrOptions as { batchSize?: number } | undefined);
+  const batchSize = Math.max(
+    1,
+    Math.min(resolvedOptions?.batchSize ?? DEFAULT_RESERVATION_EXPIRY_BATCH_SIZE, 200)
+  );
+
+  let totalReleased = 0;
+  const affectedTierIds = new Set<string>();
+
+  if (isExternalTx) {
+    const externalTx = txClientOrOptions as Prisma.TransactionClient;
+    let batchResult: ExpiredReservationBatchResult;
+    do {
+      batchResult = await releaseExpiredReservationBatch(externalTx, batchSize);
+      totalReleased += batchResult.releasedReservationCount;
+      for (const tierId of batchResult.releasedTierIds) {
+        affectedTierIds.add(tierId);
+      }
+    } while (batchResult.claimedOrderCount === batchSize);
+
+    return totalReleased;
+  }
+
+  let batchResult: ExpiredReservationBatchResult;
+  do {
+    batchResult = await prisma.$transaction(
+      async (tx) => releaseExpiredReservationBatch(tx, batchSize),
+      {
+        isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
+        timeout: 10000,
+      }
+    );
+    totalReleased += batchResult.releasedReservationCount;
+    for (const tierId of batchResult.releasedTierIds) {
+      affectedTierIds.add(tierId);
+    }
+  } while (batchResult.claimedOrderCount === batchSize);
+
+  for (const tierId of Array.from(affectedTierIds).sort()) {
+    await processWaitlistForTier(tierId).catch((err) => {
       console.error(`Error advancing waitlist after releasing reservations for tier ${tierId}:`, err);
     });
   }
 
-  return expiredReservations.length;
+  return totalReleased;
 }
 
 /**
@@ -306,7 +457,51 @@ export async function createCheckoutSession(
   try {
     reservationResult = await prisma.$transaction(
       async (tx) => {
-        // Lock tier rows to prevent overselling on concurrent checkouts
+        // Lock waitlist offer BEFORE TicketTier to maintain canonical lock order:
+        // TicketWaitlistOffer -> TicketTier (sorted id ASC)
+        if (verifiedOffer) {
+          const lockedOffers = await tx.$queryRaw<
+            Array<{
+              id: string;
+              status: WaitlistOfferStatus;
+              expiresAt: Date;
+              orderId: string | null;
+            }>
+          >`
+            SELECT id, status, "expiresAt", "orderId"
+            FROM "TicketWaitlistOffer"
+            WHERE id = ${verifiedOffer.id}
+            FOR UPDATE
+          `;
+          const lockedOffer = lockedOffers[0];
+          const lockNow = new Date();
+          if (
+            !lockedOffer ||
+            lockedOffer.status !== WaitlistOfferStatus.PENDING ||
+            lockedOffer.expiresAt < lockNow
+          ) {
+            throw new BadRequestError('This waitlist offer has expired or is no longer valid');
+          }
+          if (lockedOffer.orderId) {
+            const linkedOrder = await tx.order.findUnique({
+              where: { id: lockedOffer.orderId },
+              select: { status: true, expiresAt: true, idempotencyKey: true },
+            });
+            if (linkedOrder && linkedOrder.status === OrderStatus.COMPLETED) {
+              throw new BadRequestError('This waitlist offer has already been completed and purchased');
+            }
+            if (
+              linkedOrder &&
+              linkedOrder.status === OrderStatus.PENDING &&
+              linkedOrder.expiresAt > lockNow &&
+              linkedOrder.idempotencyKey !== (clientIdempotency || '')
+            ) {
+              throw new ConflictError('A checkout session is already in progress for this waitlist offer');
+            }
+          }
+        }
+
+        // Lock tier rows in deterministic ID order to prevent overselling and deadlocks
         const lockedTiers = await tx.$queryRaw<
           Array<{
             id: string;
@@ -324,6 +519,7 @@ export async function createCheckoutSession(
           SELECT id, "totalCapacity", "soldQuantity", "reservedQuantity", "priceInCents", currency, name, status, "isHidden", "salesDisabled"
           FROM "TicketTier"
           WHERE id = ANY(${tierIds})
+          ORDER BY id ASC
           FOR UPDATE
         `;
 
