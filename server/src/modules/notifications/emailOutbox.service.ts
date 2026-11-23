@@ -4,6 +4,7 @@ import {
   EmailOutbox,
   EmailOutboxStatus,
   EmailOutboxType,
+  OrderRefundStatus,
   OrderStatus,
   Prisma,
 } from '@prisma/client';
@@ -12,6 +13,9 @@ import { normalizeEmail } from '../../config/env.js';
 import {
   buildOrderTicketAccessUrl,
   EmailDeliveryError,
+  LATE_PAYMENT_REFUND_TEMPLATE_VERSION,
+  LatePaymentRefundContentSnapshot,
+  LatePaymentRefundNotificationKind,
   maskEmailForLog,
   normalizeClientOrigin,
   ORDER_CONFIRMATION_TEMPLATE_VERSION,
@@ -19,6 +23,7 @@ import {
   OrderConfirmationSnapshotItem,
   resolveEmailFrom,
   sanitizeEmailLogMessage,
+  sendLatePaymentRefundEmail,
   sendOrderConfirmationEmail,
 } from '../../lib/email.service.js';
 
@@ -108,6 +113,87 @@ export function buildOrderConfirmationDedupeKey(orderId: string): string {
 
 export function buildOrderConfirmationIdempotencyKey(orderId: string): string {
   return `order-confirmation:${orderId}`;
+}
+
+export function buildLatePaymentRefundConfirmedDedupeKey(orderRefundId: string): string {
+  return `late_payment_refund_confirmed:${orderRefundId}`;
+}
+
+export function buildLatePaymentRefundConfirmedIdempotencyKey(orderRefundId: string): string {
+  return `late-payment-refund-confirmed:${orderRefundId}`;
+}
+
+export function buildLatePaymentRefundManualReviewDedupeKey(orderRefundId: string): string {
+  return `late_payment_refund_manual_review:${orderRefundId}`;
+}
+
+export function buildLatePaymentRefundManualReviewIdempotencyKey(orderRefundId: string): string {
+  return `late-payment-refund-manual-review:${orderRefundId}`;
+}
+
+export async function enqueueLatePaymentRefundEmail(
+  tx: Prisma.TransactionClient,
+  params: {
+    kind: LatePaymentRefundNotificationKind;
+    orderRefundId: string;
+    orderId: string | null;
+    recipientEmail: string;
+    snapshot: Omit<LatePaymentRefundContentSnapshot, 'templateVersion' | 'fromEmail'> & {
+      fromEmail?: string;
+    };
+  }
+): Promise<{ enqueued: boolean; dedupeKey: string; idempotencyKey: string }> {
+  const dedupeKey =
+    params.kind === 'CONFIRMED'
+      ? buildLatePaymentRefundConfirmedDedupeKey(params.orderRefundId)
+      : buildLatePaymentRefundManualReviewDedupeKey(params.orderRefundId);
+  const idempotencyKey =
+    params.kind === 'CONFIRMED'
+      ? buildLatePaymentRefundConfirmedIdempotencyKey(params.orderRefundId)
+      : buildLatePaymentRefundManualReviewIdempotencyKey(params.orderRefundId);
+  const type =
+    params.kind === 'CONFIRMED'
+      ? EmailOutboxType.LATE_PAYMENT_REFUND_CONFIRMED
+      : EmailOutboxType.LATE_PAYMENT_REFUND_MANUAL_REVIEW;
+
+  const fullSnapshot: LatePaymentRefundContentSnapshot = {
+    templateVersion: LATE_PAYMENT_REFUND_TEMPLATE_VERSION,
+    orderRefundId: params.snapshot.orderRefundId,
+    fromEmail: params.snapshot.fromEmail || resolveEmailFrom(),
+    orderNumber: params.snapshot.orderNumber,
+    refundAmountInCents: params.snapshot.refundAmountInCents,
+    currency: params.snapshot.currency.toUpperCase(),
+    buyerName: params.snapshot.buyerName,
+    eventTitle: params.snapshot.eventTitle,
+    stripeRefundId: params.snapshot.stripeRefundId ?? null,
+    confirmedAtIso: params.snapshot.confirmedAtIso ?? null,
+    reasonSummary: params.snapshot.reasonSummary,
+  };
+
+  const result = await tx.emailOutbox.createMany({
+    data: [
+      {
+        dedupeKey,
+        type,
+        status: EmailOutboxStatus.PENDING,
+        orderId: params.orderId,
+        recipientEmail: normalizeEmail(params.recipientEmail),
+        idempotencyKey,
+        templateVersion: fullSnapshot.templateVersion,
+        contentSnapshot: fullSnapshot as unknown as Prisma.InputJsonValue,
+        attempts: 0,
+        maxAttempts: EMAIL_OUTBOX_MAX_ATTEMPTS,
+        nextAttemptAt: new Date(),
+      },
+    ],
+    skipDuplicates: true,
+  });
+
+  return {
+    enqueued: result.count > 0,
+    dedupeKey,
+    idempotencyKey,
+  };
 }
 
 /**
@@ -349,6 +435,27 @@ function isValidOrderConfirmationSnapshot(
   }
 }
 
+function isValidLatePaymentRefundSnapshot(
+  raw: unknown
+): raw is LatePaymentRefundContentSnapshot {
+  if (!raw || typeof raw !== 'object') return false;
+  const candidate = raw as Record<string, unknown>;
+  return (
+    candidate.templateVersion === LATE_PAYMENT_REFUND_TEMPLATE_VERSION &&
+    typeof candidate.orderRefundId === 'string' &&
+    candidate.orderRefundId.length > 0 &&
+    typeof candidate.fromEmail === 'string' &&
+    candidate.fromEmail.trim().length > 0 &&
+    typeof candidate.orderNumber === 'string' &&
+    candidate.orderNumber.length > 0 &&
+    typeof candidate.refundAmountInCents === 'number' &&
+    typeof candidate.currency === 'string' &&
+    typeof candidate.buyerName === 'string' &&
+    typeof candidate.eventTitle === 'string' &&
+    typeof candidate.reasonSummary === 'string'
+  );
+}
+
 function emitOperationalAlert(
   severity: 'CRITICAL' | 'ERROR',
   category: string,
@@ -522,6 +629,161 @@ export async function processClaimedEmailOutboxItem(
     });
     return 'failedPermanent';
   };
+
+  if (
+    item.type === EmailOutboxType.LATE_PAYMENT_REFUND_CONFIRMED ||
+    item.type === EmailOutboxType.LATE_PAYMENT_REFUND_MANUAL_REVIEW
+  ) {
+    const kind: LatePaymentRefundNotificationKind =
+      item.type === EmailOutboxType.LATE_PAYMENT_REFUND_CONFIRMED ? 'CONFIRMED' : 'MANUAL_REVIEW';
+
+    if (!isValidLatePaymentRefundSnapshot(item.contentSnapshot)) {
+      return markPermanentGuarded(
+        'INVALID_CONTENT_SNAPSHOT',
+        'Stored refund email content snapshot is invalid.',
+        'CRITICAL',
+        'SNAPSHOT_CORRUPT'
+      );
+    }
+
+    const snapshot = item.contentSnapshot;
+    const refundRecord = await prisma.orderRefund.findUnique({
+      where: { id: snapshot.orderRefundId },
+      select: {
+        id: true,
+        status: true,
+        requiresManualResolution: true,
+        stripeRefundId: true,
+        order: {
+          select: { status: true },
+        },
+      },
+    });
+
+    if (!refundRecord) {
+      return markPermanentGuarded(
+        'ORDER_REFUND_MISSING',
+        'Associated OrderRefund record could not be found during notification dispatch.',
+        'ERROR',
+        'REFUND_STATE_MISMATCH'
+      );
+    }
+
+    if (kind === 'CONFIRMED' && refundRecord.status !== OrderRefundStatus.SUCCEEDED) {
+      return markPermanentGuarded(
+        'REFUND_NOT_CONFIRMED',
+        `Refund confirmation email blocked because OrderRefund status is ${refundRecord.status}, not SUCCEEDED.`,
+        'CRITICAL',
+        'REFUND_STATE_MISMATCH'
+      );
+    }
+
+    if (
+      kind === 'MANUAL_REVIEW' &&
+      refundRecord.status !== OrderRefundStatus.MANUAL_REVIEW_REQUIRED &&
+      !refundRecord.requiresManualResolution
+    ) {
+      return markPermanentGuarded(
+        'REFUND_NOT_MANUAL_REVIEW',
+        `Manual-review refund email blocked because OrderRefund status is ${refundRecord.status}.`,
+        'ERROR',
+        'REFUND_STATE_MISMATCH'
+      );
+    }
+
+    try {
+      const result = await sendLatePaymentRefundEmail({
+        kind,
+        to: item.recipientEmail,
+        snapshot,
+        idempotencyKey: item.idempotencyKey,
+      });
+
+      const updated = await prisma.emailOutbox.updateMany({
+        where: {
+          id: item.id,
+          status: EmailOutboxStatus.PROCESSING,
+          lockedBy: workerId,
+        },
+        data: {
+          status: EmailOutboxStatus.SENT,
+          provider: result.provider,
+          providerMessageId: result.messageId,
+          sentAt: result.sentAt,
+          lockedBy: null,
+          lockedUntil: null,
+          lastErrorCode: null,
+          lastErrorMessage: null,
+        },
+      });
+
+      if (updated.count === 0) {
+        console.warn(
+          `[EmailOutbox] Lease lost before marking SENT for refund outbox=${item.id} (worker=${workerId})`
+        );
+        return 'leaseLost';
+      }
+
+      return 'accepted';
+    } catch (err) {
+      const classification = classifyOutboxFailure(err);
+
+      if (classification.disposition === 'CONFIG_FAILURE') {
+        return markPermanentGuarded(
+          classification.code,
+          classification.message,
+          'CRITICAL',
+          'EMAIL_CONFIG_FAILURE'
+        );
+      }
+
+      if (classification.disposition === 'PAYLOAD_CONFLICT') {
+        return markPermanentGuarded(
+          classification.code,
+          classification.message,
+          'CRITICAL',
+          'RESEND_IDEMPOTENCY_PAYLOAD_CONFLICT'
+        );
+      }
+
+      if (classification.disposition === 'PERMANENT' || item.attempts >= item.maxAttempts) {
+        return markPermanentGuarded(
+          classification.code,
+          classification.message,
+          'ERROR',
+          item.attempts >= item.maxAttempts ? 'RETRIES_EXHAUSTED' : 'PERMANENT_DELIVERY_FAILURE'
+        );
+      }
+
+      const delayMs = computeNextRetryDelayMs(item.attempts, options?.randomFn);
+      const nextAttemptAt = new Date(Date.now() + delayMs);
+
+      const updated = await prisma.emailOutbox.updateMany({
+        where: {
+          id: item.id,
+          status: EmailOutboxStatus.PROCESSING,
+          lockedBy: workerId,
+        },
+        data: {
+          status: EmailOutboxStatus.PENDING,
+          nextAttemptAt,
+          lockedBy: null,
+          lockedUntil: null,
+          lastErrorCode: classification.code,
+          lastErrorMessage: classification.message,
+        },
+      });
+
+      if (updated.count === 0) {
+        console.warn(
+          `[EmailOutbox] Lease lost before scheduling retry for refund outbox=${item.id} (worker=${workerId})`
+        );
+        return 'leaseLost';
+      }
+
+      return 'retried';
+    }
+  }
 
   if (item.type !== EmailOutboxType.ORDER_CONFIRMATION) {
     return markPermanentGuarded(

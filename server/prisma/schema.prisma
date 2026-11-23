@@ -479,6 +479,8 @@ model Order {
   idempotencyKey   String          @unique
   paymentProvider  PaymentProvider @default(STRIPE)
   paymentReference String? // e.g. Stripe Checkout Session ID or M-Pesa CheckoutRequestID
+  stripeFundsAvailableAt DateTime?
+  stripeSettledChargeId  String?
   expiresAt        DateTime // 15-minute checkout reservation hold
 
   createdAt DateTime @default(now())
@@ -491,12 +493,14 @@ model Order {
   waitlistOffers TicketWaitlistOffer[]
   ledgerEntries  FinancialLedgerEntry[]
   emailOutbox    EmailOutbox[]
+  refunds        OrderRefund[]
 
   @@index([orderNumber])
   @@index([customerEmail])
   @@index([eventId, status])
   @@index([expiresAt, status])
   @@index([orderAccessToken])
+  @@index([paymentReference])
 }
 
 model OrderItem {
@@ -1032,6 +1036,17 @@ model PromotionDailyAggregate {
 
 enum EmailOutboxType {
   ORDER_CONFIRMATION
+  LATE_PAYMENT_REFUND_CONFIRMED
+  LATE_PAYMENT_REFUND_MANUAL_REVIEW
+}
+
+enum OrderRefundStatus {
+  PENDING
+  PROCESSING
+  STRIPE_PENDING
+  SUCCEEDED
+  MANUAL_REVIEW_REQUIRED
+  MANUALLY_RESOLVED
 }
 
 enum EmailOutboxStatus {
@@ -1078,5 +1093,54 @@ model EmailOutbox {
 
   @@index([status, nextAttemptAt])
   @@index([status, lockedUntil])
+  @@index([orderId])
+}
+
+// ==========================================
+// LATE-PAYMENT AUTOMATIC REFUNDS & DEAD-LETTER QUEUE
+// ==========================================
+
+model OrderRefund {
+  id                       String            @id @default(uuid())
+  // Preservation strategy (matches FinancialLedgerEntry / EmailOutbox):
+  // Nullable so unlinked or anomalous PaymentIntents are never silently discarded.
+  orderId                  String?
+  order                    Order?            @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  stripePaymentIntentId    String            @unique
+  stripeChargeId           String?
+  stripeRefundId           String?           @unique
+  idempotencyKey           String            @unique
+  amountInCents            Int
+  currency                 String            @default("USD")
+  reason                   String
+  status                   OrderRefundStatus @default(PENDING)
+
+  attempts                 Int               @default(0)
+  maxAttempts              Int               @default(8)
+  nextAttemptAt            DateTime          @default(now())
+  lockedBy                 String?
+  lockedUntil              DateTime?
+
+  lastErrorCategory        String?
+  lastErrorCode            String?
+  lastErrorMessage         String?           @db.Text
+  lastAttemptAt            DateTime?
+  succeededAt              DateTime?
+  failedAt                 DateTime?
+
+  requiresManualResolution Boolean           @default(false)
+  resolvedAt               DateTime?
+  resolvedByUserId         String?
+  resolvedByEmail          String?
+  resolutionAction         String?
+  resolutionNotes          String?           @db.Text
+  metadata                 Json?
+
+  createdAt                DateTime          @default(now())
+  updatedAt                DateTime          @updatedAt
+
+  @@index([status, nextAttemptAt])
+  @@index([status, lockedUntil])
+  @@index([requiresManualResolution, resolvedAt])
   @@index([orderId])
 }

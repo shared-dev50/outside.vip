@@ -7,6 +7,11 @@ import {
   startEmailOutboxWorker,
   stopEmailOutboxWorker,
 } from './modules/notifications/emailOutboxWorker.js';
+import {
+  ORDER_REFUND_POLL_INTERVAL_MS,
+  startOrderRefundWorker,
+  stopOrderRefundWorker,
+} from './modules/refunds/orderRefundWorker.js';
 
 async function startServer() {
   try {
@@ -15,6 +20,7 @@ async function startServer() {
 
     startWaitlistBackgroundWorker(60_000);
     startEmailOutboxWorker(EMAIL_OUTBOX_POLL_INTERVAL_MS);
+    startOrderRefundWorker(ORDER_REFUND_POLL_INTERVAL_MS);
 
     const server = app.listen(env.PORT, () => {
       console.log(`🚀 Outside.vip API server listening on http://localhost:${env.PORT}`);
@@ -28,6 +34,7 @@ async function startServer() {
       console.log(`\n🛑 Received ${signal}. Gracefully terminating Outside.vip server...`);
       await stopWaitlistBackgroundWorker();
       await stopEmailOutboxWorker();
+      await stopOrderRefundWorker();
       server.close(async () => {
         await prisma.$disconnect();
         console.log('✅ PostgreSQL disconnected. Process exited.');

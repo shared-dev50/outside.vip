@@ -621,10 +621,16 @@ describe('Outside.vip Checkout, Atomic Reservations & Payments API', () => {
         .set('stripe-signature', 'valid_test_signature')
         .send(mockEvent);
 
-      expect(res.status).toBe(500);
+      expect(res.status).toBe(200);
 
       const checkOrder = await prisma.order.findUnique({ where: { id: order.id } });
       expect(checkOrder?.status).toBe(OrderStatus.PENDING);
+
+      const manualRefund = await prisma.orderRefund.findUnique({
+        where: { stripePaymentIntentId: mockEvent.data.object.id },
+      });
+      expect(manualRefund?.status).toBe('MANUAL_REVIEW_REQUIRED');
+      expect(manualRefund?.requiresManualResolution).toBe(true);
 
       constructSpy.mockRestore();
     });

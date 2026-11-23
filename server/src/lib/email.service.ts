@@ -87,8 +87,40 @@ export const sentStaffInvitationEmails: StaffInvitationEmailMessage[] = [];
 export const sentStaffOtpEmails: StaffOtpEmailMessage[] = [];
 export const sentTeamInvitationEmails: TeamInvitationEmailMessage[] = [];
 export const sentOrderConfirmationEmails: OrderConfirmationEmailMessage[] = [];
+export const sentLatePaymentRefundEmails: LatePaymentRefundEmailMessage[] = [];
 
 export const ORDER_CONFIRMATION_TEMPLATE_VERSION = 1;
+export const LATE_PAYMENT_REFUND_TEMPLATE_VERSION = 1;
+
+export type LatePaymentRefundNotificationKind = 'CONFIRMED' | 'MANUAL_REVIEW';
+
+export interface LatePaymentRefundContentSnapshot {
+  templateVersion: 1;
+  orderRefundId: string;
+  fromEmail: string;
+  orderNumber: string;
+  refundAmountInCents: number;
+  currency: string;
+  buyerName: string;
+  eventTitle: string;
+  stripeRefundId?: string | null;
+  confirmedAtIso?: string | null;
+  reasonSummary: string;
+}
+
+export interface LatePaymentRefundEmailMessage {
+  kind: LatePaymentRefundNotificationKind;
+  to: string;
+  from: string;
+  subject: string;
+  text: string;
+  html: string;
+  orderNumber: string;
+  orderRefundId: string;
+  idempotencyKey: string;
+  templateVersion: number;
+  sentAt: Date;
+}
 
 export interface OrderConfirmationSnapshotItem {
   tierName: string;
@@ -1830,6 +1862,252 @@ export async function sendOrderConfirmationEmail(params: {
 
     console.error(
       `[EmailService] Order confirmation dispatch failed for ${maskEmailForLog(rendered.to)} (order=${params.snapshot.orderNumber}, code=${deliveryError.code}, status=${deliveryError.providerStatusCode ?? 'network'}): ${safeDetail}`
+    );
+
+    throw new EmailDeliveryError(deliveryError.message, {
+      code: deliveryError.code,
+      providerStatusCode: deliveryError.providerStatusCode,
+      providerErrorName: deliveryError.providerErrorName,
+      retryable: deliveryError.retryable,
+      timedOut: deliveryError.timedOut,
+      providerDetail: safeDetail,
+    });
+  }
+}
+
+/**
+ * Pure deterministic renderer for late-payment refund notifications.
+ * Produces identical subject/text/HTML across retries for Resend idempotency compliance.
+ */
+export function renderLatePaymentRefundEmail(params: {
+  kind: LatePaymentRefundNotificationKind;
+  to: string;
+  from?: string;
+  snapshot: LatePaymentRefundContentSnapshot;
+}): {
+  to: string;
+  from: string;
+  subject: string;
+  text: string;
+  html: string;
+} {
+  const { kind, snapshot } = params;
+  const from = sanitizeHeaderField(
+    params.from || snapshot.fromEmail || resolveEmailFrom()
+  );
+  const to = sanitizeHeaderField(normalizeEmail(params.to));
+  const cleanTitle = sanitizeHeaderField(snapshot.eventTitle || 'Outside.vip Event');
+  const cleanOrderNumber = sanitizeHeaderField(snapshot.orderNumber || 'N/A');
+  const cleanBuyerName = sanitizeHeaderField(snapshot.buyerName || 'Customer') || 'Customer';
+  const cleanReasonSummary = sanitizeHeaderField(
+    snapshot.reasonSummary ||
+      'Your ticket reservation expired before payment settled and the capacity was no longer available.'
+  );
+  const amountFormatted = formatDeterministicMoney(
+    snapshot.refundAmountInCents,
+    snapshot.currency
+  );
+  const refundRef = snapshot.stripeRefundId
+    ? sanitizeHeaderField(snapshot.stripeRefundId)
+    : null;
+  const confirmedAtFormatted = snapshot.confirmedAtIso
+    ? formatDeterministicDateTime(snapshot.confirmedAtIso, 'UTC')
+    : null;
+
+  if (kind === 'CONFIRMED') {
+    const subject = sanitizeHeaderField(
+      `Refund confirmed for ${cleanTitle} — Order #${cleanOrderNumber}`
+    );
+
+    const text = [
+      `Hi ${cleanBuyerName},`,
+      '',
+      `We were unable to issue tickets for your order #${cleanOrderNumber} (${cleanTitle}) because ${cleanReasonSummary}`,
+      '',
+      `Your full refund has been confirmed:`,
+      `Order Reference: #${cleanOrderNumber}`,
+      `Refund Amount: ${amountFormatted}`,
+      ...(refundRef ? [`Refund Reference: ${refundRef}`] : []),
+      ...(confirmedAtFormatted ? [`Confirmed At: ${confirmedAtFormatted}`] : []),
+      '',
+      `Depending on your bank or card issuer, funds typically appear on your statement within 5–10 business days.`,
+      '',
+      `Outside.vip`,
+    ].join('\n');
+
+    const html = `<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+    <title>${escapeHtml(subject)}</title>
+  </head>
+  <body style="margin: 0; padding: 24px; background-color: #0A0A0C; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #F5F5F7;">
+    <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="max-width: 580px; margin: 0 auto; background: #121216; border: 1px solid #22222A; border-radius: 16px; overflow: hidden;">
+      <tr>
+        <td style="padding: 32px;">
+          <p style="font-size: 11px; text-transform: uppercase; letter-spacing: 0.14em; color: #FF5500; font-weight: 700; margin: 0 0 10px 0;">Outside.vip Refund Confirmation</p>
+          <h1 style="font-size: 24px; font-weight: 700; margin: 0 0 12px 0; color: #FFFFFF; line-height: 1.3;">Your full refund is confirmed</h1>
+          <p style="font-size: 15px; line-height: 1.6; color: #B8B8C2; margin: 0 0 20px 0;">
+            Hi <strong style="color: #FFFFFF;">${escapeHtml(cleanBuyerName)}</strong>, we could not issue tickets for <strong style="color: #FFFFFF;">${escapeHtml(cleanTitle)}</strong> (Order <strong style="color: #FFFFFF;">#${escapeHtml(cleanOrderNumber)}</strong>) because ${escapeHtml(cleanReasonSummary)}
+          </p>
+          <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="background: #18181F; border: 1px solid #262630; border-radius: 12px; margin-bottom: 20px;">
+            <tr>
+              <td style="padding: 18px 20px;">
+                <p style="font-size: 13px; color: #B8B8C2; margin: 0 0 6px 0;"><strong style="color: #FFFFFF;">Refund Amount:</strong> ${escapeHtml(amountFormatted)}</p>
+                <p style="font-size: 13px; color: #B8B8C2; margin: 0 0 6px 0;"><strong style="color: #FFFFFF;">Order Reference:</strong> #${escapeHtml(cleanOrderNumber)}</p>
+                ${refundRef ? `<p style="font-size: 13px; color: #B8B8C2; margin: 0 0 6px 0;"><strong style="color: #FFFFFF;">Refund Reference:</strong> ${escapeHtml(refundRef)}</p>` : ''}
+                ${confirmedAtFormatted ? `<p style="font-size: 13px; color: #B8B8C2; margin: 0;"><strong style="color: #FFFFFF;">Confirmed At:</strong> ${escapeHtml(confirmedAtFormatted)}</p>` : ''}
+              </td>
+            </tr>
+          </table>
+          <p style="font-size: 13px; line-height: 1.6; color: #8E8E99; margin: 0;">
+            Depending on your bank or card issuer, funds typically appear on your statement within 5–10 business days.
+          </p>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>`.trim();
+
+    return { to, from, subject, text, html };
+  }
+
+  const subject = sanitizeHeaderField(
+    `Action in progress on your refund for ${cleanTitle} — Order #${cleanOrderNumber}`
+  );
+
+  const text = [
+    `Hi ${cleanBuyerName},`,
+    '',
+    `We were unable to issue tickets for your order #${cleanOrderNumber} (${cleanTitle}) because ${cleanReasonSummary}`,
+    '',
+    `Our support team has been alerted and is handling your full refund of ${amountFormatted} manually.`,
+    `Order Reference: #${cleanOrderNumber}`,
+    `Expected Refund Amount: ${amountFormatted}`,
+    '',
+    `You do not need to take any action — we will update you once the refund is completed.`,
+    '',
+    `Outside.vip`,
+  ].join('\n');
+
+  const html = `<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+    <title>${escapeHtml(subject)}</title>
+  </head>
+  <body style="margin: 0; padding: 24px; background-color: #0A0A0C; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #F5F5F7;">
+    <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="max-width: 580px; margin: 0 auto; background: #121216; border: 1px solid #22222A; border-radius: 16px; overflow: hidden;">
+      <tr>
+        <td style="padding: 32px;">
+          <p style="font-size: 11px; text-transform: uppercase; letter-spacing: 0.14em; color: #FF5500; font-weight: 700; margin: 0 0 10px 0;">Outside.vip Order &amp; Refund Update</p>
+          <h1 style="font-size: 24px; font-weight: 700; margin: 0 0 12px 0; color: #FFFFFF; line-height: 1.3;">Your refund is being handled by our team</h1>
+          <p style="font-size: 15px; line-height: 1.6; color: #B8B8C2; margin: 0 0 20px 0;">
+            Hi <strong style="color: #FFFFFF;">${escapeHtml(cleanBuyerName)}</strong>, we could not issue tickets for <strong style="color: #FFFFFF;">${escapeHtml(cleanTitle)}</strong> (Order <strong style="color: #FFFFFF;">#${escapeHtml(cleanOrderNumber)}</strong>) because ${escapeHtml(cleanReasonSummary)}
+          </p>
+          <p style="font-size: 14px; line-height: 1.6; color: #B8B8C2; margin: 0 0 16px 0;">
+            Our team has been alerted and is manually processing your full refund of <strong style="color: #FFFFFF;">${escapeHtml(amountFormatted)}</strong>. No action is needed from you.
+          </p>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>`.trim();
+
+  return { to, from, subject, text, html };
+}
+
+export async function sendLatePaymentRefundEmail(params: {
+  kind: LatePaymentRefundNotificationKind;
+  to: string;
+  snapshot: LatePaymentRefundContentSnapshot;
+  idempotencyKey: string;
+}): Promise<EmailDeliveryResult> {
+  const rendered = renderLatePaymentRefundEmail({
+    kind: params.kind,
+    to: params.to,
+    from: params.snapshot.fromEmail,
+    snapshot: params.snapshot,
+  });
+
+  const sentAt = new Date();
+  const activeNodeEnv = getActiveNodeEnv();
+  const shouldUseResendInTest = env.NODE_ENV === 'test' && Boolean(testOptions.useResendInTest);
+
+  if (activeNodeEnv === 'test' && !shouldUseResendInTest) {
+    sentLatePaymentRefundEmails.push({
+      kind: params.kind,
+      to: rendered.to,
+      from: rendered.from,
+      subject: rendered.subject,
+      text: rendered.text,
+      html: rendered.html,
+      orderNumber: params.snapshot.orderNumber,
+      orderRefundId: params.snapshot.orderRefundId,
+      idempotencyKey: params.idempotencyKey,
+      templateVersion: params.snapshot.templateVersion,
+      sentAt,
+    });
+
+    return {
+      sent: true,
+      status: 'recorded',
+      provider: 'test-recorder',
+      messageId: `test_rec_${crypto.randomUUID()}`,
+      from: rendered.from,
+      to: rendered.to,
+      expiresInMinutes: 0,
+      sentAt,
+    };
+  }
+
+  const resendApiKey = resolveResendApiKey();
+  if (!resendApiKey) {
+    throw new EmailDeliveryError(
+      'Email delivery service is not configured. RESEND_API_KEY is missing.',
+      {
+        code: 'EMAIL_SERVICE_UNCONFIGURED',
+        providerStatusCode: null,
+        retryable: false,
+      }
+    );
+  }
+
+  const resend = new Resend(resendApiKey);
+  const timeoutMs = getEffectiveTimeoutMs();
+  const sensitiveValues = [resendApiKey];
+
+  try {
+    const { messageId } = await sendSingleResendAttempt({
+      resend,
+      from: rendered.from,
+      to: rendered.to,
+      subject: rendered.subject,
+      text: rendered.text,
+      html: rendered.html,
+      idempotencyKey: params.idempotencyKey,
+      timeoutMs,
+    });
+
+    return {
+      sent: true,
+      status: 'sent',
+      provider: 'resend',
+      messageId,
+      from: rendered.from,
+      to: rendered.to,
+      expiresInMinutes: 0,
+      sentAt,
+    };
+  } catch (err) {
+    const deliveryError =
+      err instanceof EmailDeliveryError
+        ? err
+        : classifyProviderError({ message: err instanceof Error ? err.message : undefined });
+
+    const safeDetail = sanitizeEmailLogMessage(
+      deliveryError.providerDetail || deliveryError.message,
+      sensitiveValues
     );
 
     throw new EmailDeliveryError(deliveryError.message, {
