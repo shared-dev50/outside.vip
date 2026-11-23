@@ -1066,6 +1066,8 @@ export async function updateTeamMember(
         ) as any;
       } else if (member.permissions) {
         data.permissions = parseAdminPermissions(member.permissions) as any;
+      } else {
+        data.permissions = { ...DEFAULT_ADMIN_PERMISSIONS } as any;
       }
     } else if (targetRole === EventTeamRole.HOST) {
       data.permissions = Prisma.DbNull;

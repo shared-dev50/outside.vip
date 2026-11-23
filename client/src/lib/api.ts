@@ -457,7 +457,14 @@ export const api = {
       const query = searchParams.toString() ? `?${searchParams.toString()}` : '';
       return request<OrganizerOrdersResponse>(`/organizer/orders${query}`);
     },
-    getEvent: (id: string) => request<{ event: Event }>(`/organizer/events/${id}`),
+    getEvent: (id: string) =>
+      request<{
+        event: Event & {
+          isOwner?: boolean;
+          accessRole?: 'OWNER' | 'ADMIN';
+          permissions?: EventAdminPermissions | null;
+        };
+      }>(`/organizer/events/${id}`),
     getPayoutDetails: () =>
       request<{ payoutDetails: OrganizerPayoutDetails | null }>('/organizer/payout-details'),
     updatePayoutDetails: (payload: PayoutDetailsInput) =>

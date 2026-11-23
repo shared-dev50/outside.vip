@@ -2,7 +2,15 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import request from 'supertest';
 import { app } from '../app.js';
 import { prisma } from '../db/prisma.js';
-import { EventTeamRole, TeamMemberStatus, TeamInvitationStatus } from '@prisma/client';
+import {
+  EventTeamRole,
+  TeamMemberStatus,
+  TeamInvitationStatus,
+  Role,
+  EventCategory,
+  EventStatus,
+  Prisma,
+} from '@prisma/client';
 import {
   VISITOR_COOKIE_NAME,
   TEAM_INVITE_CREATE_ACTOR_MAX_PER_HOUR,
@@ -15,6 +23,7 @@ import {
 } from '../modules/promotions/promotions.constants.js';
 import { deriveCanonicalVisitorId } from '../modules/promotions/promotions.service.js';
 import {
+  DEFAULT_ADMIN_PERMISSIONS,
   parseAdminPermissions,
   hasEventPermission,
   resolveEventAuthorization,
@@ -4622,6 +4631,496 @@ describe('Event Teams, Invitations & Host Promotional Tools (Stage 2)', () => {
           .set('x-csrf-token', unverifiedMemberAuth.csrf)
           .expect(403);
       });
+    });
+  });
+
+  // =========================================================================
+  // 13. P2-01 Dormant Permission Toggles & Event Admin Authorization Remediation
+  // =========================================================================
+  describe('13. P2-01 Dormant Permission Toggles & Event Admin Authorization Remediation', () => {
+    let p2Owner: any;
+    let p2OwnerAuth: { cookie: string; csrf: string };
+    let p2TicketOnlyAdmin: any;
+    let p2TicketOnlyAuth: { cookie: string; csrf: string };
+    let p2DetailsOnlyAdmin: any;
+    let p2DetailsOnlyAuth: { cookie: string; csrf: string };
+    let p2BothAdmin: any;
+    let p2BothAuth: { cookie: string; csrf: string };
+    let p2CancelOnlyAdmin: any;
+    let p2CancelOnlyAuth: { cookie: string; csrf: string };
+    let p2ZeroPermAdmin: any;
+    let p2ZeroPermAuth: { cookie: string; csrf: string };
+    let p2TeamOnlyAdmin: any;
+    let p2TeamOnlyAuth: { cookie: string; csrf: string };
+    let p2HostUser: any;
+    let p2HostAuth: { cookie: string; csrf: string };
+    let p2Event: any;
+    let p2CancelEvent: any;
+    let p2Series: any;
+    let p2SeriesOcc1: any;
+    let p2Tier: any;
+
+    beforeAll(async () => {
+      const makeUser = async (prefix: string, role: Role = Role.ATTENDEE) => {
+        const user = await prisma.user.create({
+          data: {
+            email: `p201_${prefix}_${testRunId}@outside.vip`,
+            passwordHash: '$2b$10$p201TestPasswordHashPlaceholder000000000000000000000',
+            name: `P201 ${prefix}`,
+            role,
+            emailVerified: true,
+            emailVerifiedAt: new Date(),
+          },
+        });
+        const auth = await createAuth(user.id);
+        return { user, auth };
+      };
+
+      ({ user: p2Owner, auth: p2OwnerAuth } = await makeUser('owner', Role.ORGANIZER));
+      ({ user: p2TicketOnlyAdmin, auth: p2TicketOnlyAuth } = await makeUser('ticket_only'));
+      ({ user: p2DetailsOnlyAdmin, auth: p2DetailsOnlyAuth } = await makeUser('details_only'));
+      ({ user: p2BothAdmin, auth: p2BothAuth } = await makeUser('both_perms'));
+      ({ user: p2CancelOnlyAdmin, auth: p2CancelOnlyAuth } = await makeUser('cancel_only'));
+      ({ user: p2ZeroPermAdmin, auth: p2ZeroPermAuth } = await makeUser('zero_perm'));
+      ({ user: p2TeamOnlyAdmin, auth: p2TeamOnlyAuth } = await makeUser('team_only'));
+      ({ user: p2HostUser, auth: p2HostAuth } = await makeUser('host_promote'));
+
+      p2Event = await prisma.event.create({
+        data: {
+          slug: `p201-main-${testRunId}`,
+          organizerId: p2Owner.id,
+          title: `P201 Main Event ${testRunId}`,
+          description: 'P2-01 authorization test event',
+          category: EventCategory.MUSIC,
+          status: EventStatus.DRAFT,
+          coverImageUrl: 'https://example.com/p201.jpg',
+          venueName: 'P201 Venue',
+          venueAddress: '100 Main St',
+          city: 'Miami',
+          country: 'United States',
+          startAt: new Date(Date.now() + 86400000 * 14),
+          endAt: new Date(Date.now() + 86400000 * 14 + 14400000),
+          timezone: 'America/New_York',
+          ticketTiers: {
+            create: {
+              name: 'General Admission',
+              priceInCents: 0,
+              currency: 'USD',
+              totalCapacity: 100,
+              minPerOrder: 1,
+              maxPerOrder: 5,
+            },
+          },
+        },
+        include: { ticketTiers: true },
+      });
+      p2Tier = p2Event.ticketTiers[0];
+
+      p2CancelEvent = await prisma.event.create({
+        data: {
+          slug: `p201-cancel-${testRunId}`,
+          organizerId: p2Owner.id,
+          title: `P201 Cancel Event ${testRunId}`,
+          description: 'Event for standalone cancel test',
+          category: EventCategory.MUSIC,
+          status: EventStatus.PUBLISHED,
+          coverImageUrl: 'https://example.com/p201-cancel.jpg',
+          venueName: 'Cancel Venue',
+          venueAddress: '101 Main St',
+          city: 'Miami',
+          country: 'United States',
+          startAt: new Date(Date.now() + 86400000 * 16),
+          endAt: new Date(Date.now() + 86400000 * 16 + 14400000),
+          timezone: 'America/New_York',
+        },
+      });
+
+      p2Series = await prisma.eventSeries.create({
+        data: {
+          organizerId: p2Owner.id,
+          title: `P201 Series ${testRunId}`,
+          frequency: 'WEEKLY',
+          interval: 1,
+          startDate: new Date(Date.now() + 86400000 * 18),
+          timezone: 'America/New_York',
+        },
+      });
+
+      p2SeriesOcc1 = await prisma.event.create({
+        data: {
+          slug: `p201-series-occ1-${testRunId}`,
+          organizerId: p2Owner.id,
+          seriesId: p2Series.id,
+          occurrenceIndex: 0,
+          title: `P201 Series Occ 1 ${testRunId}`,
+          description: 'Series occurrence 1',
+          category: EventCategory.MUSIC,
+          status: EventStatus.PUBLISHED,
+          coverImageUrl: 'https://example.com/p201-series.jpg',
+          venueName: 'Series Venue',
+          venueAddress: '102 Main St',
+          city: 'Miami',
+          country: 'United States',
+          startAt: new Date(Date.now() + 86400000 * 18),
+          endAt: new Date(Date.now() + 86400000 * 18 + 14400000),
+          timezone: 'America/New_York',
+        },
+      });
+
+      await prisma.eventTeamMember.createMany({
+        data: [
+          {
+            eventId: p2Event.id,
+            userId: p2TicketOnlyAdmin.id,
+            role: EventTeamRole.ADMIN,
+            status: TeamMemberStatus.ACTIVE,
+            permissions: { ...DEFAULT_ADMIN_PERMISSIONS, canManageTickets: true },
+            invitedById: p2Owner.id,
+          },
+          {
+            eventId: p2Event.id,
+            userId: p2DetailsOnlyAdmin.id,
+            role: EventTeamRole.ADMIN,
+            status: TeamMemberStatus.ACTIVE,
+            permissions: { ...DEFAULT_ADMIN_PERMISSIONS, canEditDetails: true },
+            invitedById: p2Owner.id,
+          },
+          {
+            eventId: p2Event.id,
+            userId: p2BothAdmin.id,
+            role: EventTeamRole.ADMIN,
+            status: TeamMemberStatus.ACTIVE,
+            permissions: {
+              ...DEFAULT_ADMIN_PERMISSIONS,
+              canEditDetails: true,
+              canManageTickets: true,
+            },
+            invitedById: p2Owner.id,
+          },
+          {
+            eventId: p2Event.id,
+            userId: p2ZeroPermAdmin.id,
+            role: EventTeamRole.ADMIN,
+            status: TeamMemberStatus.ACTIVE,
+            permissions: { ...DEFAULT_ADMIN_PERMISSIONS },
+            invitedById: p2Owner.id,
+          },
+          {
+            eventId: p2Event.id,
+            userId: p2TeamOnlyAdmin.id,
+            role: EventTeamRole.ADMIN,
+            status: TeamMemberStatus.ACTIVE,
+            permissions: { ...DEFAULT_ADMIN_PERMISSIONS, canManageTeam: true },
+            invitedById: p2Owner.id,
+          },
+          {
+            eventId: p2Event.id,
+            userId: p2HostUser.id,
+            role: EventTeamRole.HOST,
+            status: TeamMemberStatus.ACTIVE,
+            permissions: Prisma.DbNull,
+            invitedById: p2Owner.id,
+          },
+          {
+            eventId: p2CancelEvent.id,
+            userId: p2CancelOnlyAdmin.id,
+            role: EventTeamRole.ADMIN,
+            status: TeamMemberStatus.ACTIVE,
+            permissions: { ...DEFAULT_ADMIN_PERMISSIONS, canCancelEvent: true },
+            invitedById: p2Owner.id,
+          },
+          {
+            eventId: p2SeriesOcc1.id,
+            userId: p2CancelOnlyAdmin.id,
+            role: EventTeamRole.ADMIN,
+            status: TeamMemberStatus.ACTIVE,
+            permissions: { ...DEFAULT_ADMIN_PERMISSIONS, canCancelEvent: true },
+            invitedById: p2Owner.id,
+          },
+        ],
+      });
+    });
+
+    it('F1: allows standalone canManageTickets ticket-tier update and blocks event-detail edits', async () => {
+      // 1. Ticket-only admin updates ticketTiers without event detail fields -> 200 OK
+      const ticketRes = await request(app)
+        .put(`/api/organizer/events/${p2Event.id}`)
+        .set('Cookie', p2TicketOnlyAuth.cookie)
+        .set('x-csrf-token', p2TicketOnlyAuth.csrf)
+        .send({
+          ticketTiers: [
+            {
+              id: p2Tier.id,
+              name: 'GA Updated Standalone',
+              priceInCents: 0,
+              currency: 'USD',
+              totalCapacity: 150,
+              minPerOrder: 1,
+              maxPerOrder: 5,
+            },
+          ],
+        })
+        .expect(200);
+
+      expect(ticketRes.body.data.event.ticketTiers[0].name).toBe('GA Updated Standalone');
+      expect(ticketRes.body.data.event.ticketTiers[0].totalCapacity).toBe(150);
+
+      // 2. Ticket-only admin cannot modify event details
+      const detailBlockedRes = await request(app)
+        .put(`/api/organizer/events/${p2Event.id}`)
+        .set('Cookie', p2TicketOnlyAuth.cookie)
+        .set('x-csrf-token', p2TicketOnlyAuth.csrf)
+        .send({
+          title: 'Unauthorized Title Change',
+        })
+        .expect(403);
+      expect(detailBlockedRes.body.error.message).toMatch(/canEditDetails/i);
+
+      // 3. Combined detail + ticket update fails for ticket-only admin
+      await request(app)
+        .put(`/api/organizer/events/${p2Event.id}`)
+        .set('Cookie', p2TicketOnlyAuth.cookie)
+        .set('x-csrf-token', p2TicketOnlyAuth.csrf)
+        .send({
+          title: 'Combined Unauthorized Title',
+          ticketTiers: [
+            {
+              id: p2Tier.id,
+              name: 'Should Not Persist',
+              priceInCents: 0,
+              currency: 'USD',
+              totalCapacity: 200,
+              minPerOrder: 1,
+              maxPerOrder: 5,
+            },
+          ],
+        })
+        .expect(403);
+
+      const unchangedEvent = await prisma.event.findUnique({
+        where: { id: p2Event.id },
+        include: { ticketTiers: true },
+      });
+      expect(unchangedEvent?.title).toBe(`P201 Main Event ${testRunId}`);
+      expect(unchangedEvent?.ticketTiers[0].name).toBe('GA Updated Standalone');
+    });
+
+    it('F1: prevents details-only admin from updating ticketTiers, allows combined updates only with both permissions, and keeps publish/unpublish owner-only', async () => {
+      // 1. Details-only admin cannot update ticketTiers
+      const blockedTicketRes = await request(app)
+        .put(`/api/organizer/events/${p2Event.id}`)
+        .set('Cookie', p2DetailsOnlyAuth.cookie)
+        .set('x-csrf-token', p2DetailsOnlyAuth.csrf)
+        .send({
+          title: 'Details Only With Tickets',
+          ticketTiers: [
+            {
+              id: p2Tier.id,
+              name: 'Blocked Tier Rename',
+              priceInCents: 0,
+              currency: 'USD',
+              totalCapacity: 175,
+              minPerOrder: 1,
+              maxPerOrder: 5,
+            },
+          ],
+        })
+        .expect(403);
+      expect(blockedTicketRes.body.error.message).toMatch(/canManageTickets/i);
+
+      // 2. Details-only admin CAN update event details when ticketTiers are omitted
+      const detailsOkRes = await request(app)
+        .put(`/api/organizer/events/${p2Event.id}`)
+        .set('Cookie', p2DetailsOnlyAuth.cookie)
+        .set('x-csrf-token', p2DetailsOnlyAuth.csrf)
+        .send({
+          title: `P201 Main Event Edited ${testRunId}`,
+        })
+        .expect(200);
+      expect(detailsOkRes.body.data.event.title).toBe(`P201 Main Event Edited ${testRunId}`);
+
+      // 3. Admin with BOTH canEditDetails & canManageTickets succeeds on combined update
+      const combinedRes = await request(app)
+        .put(`/api/organizer/events/${p2Event.id}`)
+        .set('Cookie', p2BothAuth.cookie)
+        .set('x-csrf-token', p2BothAuth.csrf)
+        .send({
+          title: `P201 Main Event Combined ${testRunId}`,
+          ticketTiers: [
+            {
+              id: p2Tier.id,
+              name: 'GA Combined Update',
+              priceInCents: 0,
+              currency: 'USD',
+              totalCapacity: 180,
+              minPerOrder: 1,
+              maxPerOrder: 5,
+            },
+          ],
+        })
+        .expect(200);
+      expect(combinedRes.body.data.event.title).toBe(`P201 Main Event Combined ${testRunId}`);
+      expect(combinedRes.body.data.event.ticketTiers[0].name).toBe('GA Combined Update');
+
+      // 4. Publishing/unpublishing remains owner/Platform Admin only even with both permissions
+      await request(app)
+        .put(`/api/organizer/events/${p2Event.id}`)
+        .set('Cookie', p2BothAuth.cookie)
+        .set('x-csrf-token', p2BothAuth.csrf)
+        .send({ status: 'PUBLISHED' })
+        .expect(403);
+
+      await request(app)
+        .post(`/api/organizer/events/${p2Event.id}/publish`)
+        .set('Cookie', p2BothAuth.cookie)
+        .set('x-csrf-token', p2BothAuth.csrf)
+        .expect(403);
+
+      // Owner can publish and unpublish
+      await request(app)
+        .post(`/api/organizer/events/${p2Event.id}/publish`)
+        .set('Cookie', p2OwnerAuth.cookie)
+        .set('x-csrf-token', p2OwnerAuth.csrf)
+        .expect(200);
+
+      await request(app)
+        .put(`/api/organizer/events/${p2Event.id}`)
+        .set('Cookie', p2BothAuth.cookie)
+        .set('x-csrf-token', p2BothAuth.csrf)
+        .send({ status: 'DRAFT' })
+        .expect(403);
+    });
+
+    it('F3: standalone canCancelEvent works for cancellation only and blocks edits and series cancellation', async () => {
+      // Cannot edit details
+      await request(app)
+        .put(`/api/organizer/events/${p2CancelEvent.id}`)
+        .set('Cookie', p2CancelOnlyAuth.cookie)
+        .set('x-csrf-token', p2CancelOnlyAuth.csrf)
+        .send({ title: 'Should Fail' })
+        .expect(403);
+
+      // Cannot cancel entire series (owner/Platform Admin only)
+      await request(app)
+        .post(`/api/organizer/series/${p2Series.id}/cancel`)
+        .set('Cookie', p2CancelOnlyAuth.cookie)
+        .set('x-csrf-token', p2CancelOnlyAuth.csrf)
+        .send({ reason: 'Not allowed' })
+        .expect(403);
+
+      // CAN cancel the event occurrence via dedicated endpoint
+      const cancelRes = await request(app)
+        .post(`/api/organizer/events/${p2CancelEvent.id}/cancel`)
+        .set('Cookie', p2CancelOnlyAuth.cookie)
+        .set('x-csrf-token', p2CancelOnlyAuth.csrf)
+        .send({ reason: 'Weather cancellation' })
+        .expect(200);
+      expect(cancelRes.body.data.event.status).toBe('CANCELLED');
+    });
+
+    it('F4: enforces minimum read permission on getOrganizerEventById while preserving owner, permitted admin, and HOST isolation', async () => {
+      // 1. Zero-permission Event Admin cannot read full organizer event details
+      await request(app)
+        .get(`/api/organizer/events/${p2Event.id}`)
+        .set('Cookie', p2ZeroPermAuth.cookie)
+        .expect(403);
+
+      // 2. Team-only Event Admin (lacking event detail/ticket/cancel/delete/order perms) cannot read full organizer event details
+      await request(app)
+        .get(`/api/organizer/events/${p2Event.id}`)
+        .set('Cookie', p2TeamOnlyAuth.cookie)
+        .expect(403);
+
+      // 3. HOST remains isolated
+      await request(app)
+        .get(`/api/organizer/events/${p2Event.id}`)
+        .set('Cookie', p2HostAuth.cookie)
+        .expect(403);
+
+      // 4. Permitted Event Admin (canManageTickets only) CAN read event and gets permissions without payout/passwordHash
+      const permittedAdminRes = await request(app)
+        .get(`/api/organizer/events/${p2Event.id}`)
+        .set('Cookie', p2TicketOnlyAuth.cookie)
+        .expect(200);
+      expect(permittedAdminRes.body.data.event.isOwner).toBe(false);
+      expect(permittedAdminRes.body.data.event.permissions.canManageTickets).toBe(true);
+      expect(permittedAdminRes.body.data.event.permissions.canEditDetails).toBe(false);
+      expect(permittedAdminRes.body.data.event.payoutDetails).toBeNull();
+      expect(permittedAdminRes.body.data.event.passwordHash).toBeUndefined();
+
+      // 5. Cancel-only Event Admin CAN read their assigned event
+      const cancelAdminRes = await request(app)
+        .get(`/api/organizer/events/${p2SeriesOcc1.id}`)
+        .set('Cookie', p2CancelOnlyAuth.cookie)
+        .expect(200);
+      expect(cancelAdminRes.body.data.event.isOwner).toBe(false);
+      expect(cancelAdminRes.body.data.event.permissions.canCancelEvent).toBe(true);
+
+      // 6. Owner retains full access
+      const ownerRes = await request(app)
+        .get(`/api/organizer/events/${p2Event.id}`)
+        .set('Cookie', p2OwnerAuth.cookie)
+        .expect(200);
+      expect(ownerRes.body.data.event.isOwner).toBe(true);
+      expect(ownerRes.body.data.event.permissions).toBeNull();
+    });
+
+    it('F7: normalizes HOST-to-ADMIN promotion with omitted permissions to DEFAULT_ADMIN_PERMISSIONS in DB (non-null, all false)', async () => {
+      const hostMembership = await prisma.eventTeamMember.findUnique({
+        where: {
+          eventId_userId: {
+            eventId: p2Event.id,
+            userId: p2HostUser.id,
+          },
+        },
+      });
+      expect(hostMembership).not.toBeNull();
+      expect(hostMembership!.role).toBe(EventTeamRole.HOST);
+      expect(hostMembership!.permissions).toBeNull();
+
+      // Promote HOST to ADMIN without passing `permissions`
+      const promoteRes = await request(app)
+        .patch(`/api/events/${p2Event.id}/team/members/${hostMembership!.id}`)
+        .set('Cookie', p2OwnerAuth.cookie)
+        .set('x-csrf-token', p2OwnerAuth.csrf)
+        .send({ role: EventTeamRole.ADMIN })
+        .expect(200);
+
+      expect(promoteRes.body.member.role).toBe(EventTeamRole.ADMIN);
+      expect(promoteRes.body.member.permissions).toEqual(DEFAULT_ADMIN_PERMISSIONS);
+
+      // Verify raw DB column is a normalized JSON object (NOT NULL) with all permissions false
+      const promotedInDb = await prisma.eventTeamMember.findUnique({
+        where: { id: hostMembership!.id },
+      });
+      expect(promotedInDb?.permissions).not.toBeNull();
+      expect(promotedInDb?.permissions).toEqual(DEFAULT_ADMIN_PERMISSIONS);
+    });
+
+    afterAll(async () => {
+      const p2EventIds = [p2Event?.id, p2CancelEvent?.id, p2SeriesOcc1?.id].filter(Boolean);
+      const p2UserIds = [
+        p2Owner?.id,
+        p2TicketOnlyAdmin?.id,
+        p2DetailsOnlyAdmin?.id,
+        p2BothAdmin?.id,
+        p2CancelOnlyAdmin?.id,
+        p2ZeroPermAdmin?.id,
+        p2TeamOnlyAdmin?.id,
+        p2HostUser?.id,
+      ].filter(Boolean);
+
+      if (p2EventIds.length > 0) {
+        await prisma.eventTeamMember.deleteMany({ where: { eventId: { in: p2EventIds } } });
+        await prisma.ticketTier.deleteMany({ where: { eventId: { in: p2EventIds } } });
+        await prisma.event.deleteMany({ where: { id: { in: p2EventIds } } });
+      }
+      if (p2Series?.id) {
+        await prisma.eventSeries.deleteMany({ where: { id: p2Series.id } });
+      }
+      if (p2UserIds.length > 0) {
+        await prisma.user.deleteMany({ where: { id: { in: p2UserIds } } });
+      }
     });
   });
 });

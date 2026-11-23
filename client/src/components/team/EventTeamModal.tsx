@@ -38,6 +38,8 @@ import {
 import {
   AdminPermissionsModal,
   DEFAULT_ADMIN_PERMISSIONS,
+  DELEGABLE_PERMISSION_COUNT,
+  countActiveDelegablePermissions,
 } from './AdminPermissionsModal';
 
 export type UnifiedTeamRole = 'STAFF' | 'HOST' | 'ADMIN';
@@ -61,6 +63,27 @@ export const EventTeamModal: React.FC<EventTeamModalProps> = ({
   const queryClient = useQueryClient();
   const auth = useOptionalAuth();
   const clearSessionState = auth?.clearSessionState;
+  const currentUser = auth?.user;
+  const isPlatformAdmin = currentUser?.role === 'ADMIN';
+  const callerIsOwner =
+    event.isOwner !== undefined
+      ? event.isOwner
+      : currentUser
+      ? event.organizerId === currentUser.id
+      : event.permissions === undefined;
+  const callerPermissions: Partial<EventAdminPermissions> | null = callerIsOwner
+    ? null
+    : event.permissions
+    ? event.permissions
+    : isPlatformAdmin
+    ? {
+        ...DEFAULT_ADMIN_PERMISSIONS,
+        canEditDetails: true,
+        canViewOrders: true,
+        canManagePromotions: true,
+        canViewAnalytics: true,
+      }
+    : DEFAULT_ADMIN_PERMISSIONS;
 
   const handleAuthError = (err: any): boolean => {
     const status = err?.statusCode || err?.status;
@@ -644,7 +667,7 @@ export const EventTeamModal: React.FC<EventTeamModalProps> = ({
                       Admin Permissions
                     </span>
                     <span className="text-[11px] font-mono text-stone-500 mt-0.5 block">
-                      {Object.values(invitePermissions).filter(Boolean).length} of 10 granted (deny-by-default)
+                      {`${countActiveDelegablePermissions(invitePermissions)} of ${DELEGABLE_PERMISSION_COUNT} granted (deny-by-default)`}
                     </span>
                   </div>
                   <button
@@ -1165,8 +1188,8 @@ export const EventTeamModal: React.FC<EventTeamModalProps> = ({
                             <div className="flex items-center gap-1.5">
                               <span className="text-stone-600">
                                 {member.permissions
-                                  ? `${Object.values(member.permissions).filter(Boolean).length}/10 perms`
-                                  : 'Default (0)'}
+                                  ? `${countActiveDelegablePermissions(member.permissions)}/${DELEGABLE_PERMISSION_COUNT} perms`
+                                  : `Default (0/${DELEGABLE_PERMISSION_COUNT})`}
                               </span>
                               <button
                                 type="button"
@@ -1287,6 +1310,8 @@ export const EventTeamModal: React.FC<EventTeamModalProps> = ({
         title="Configure Initial Admin Permissions"
         subtitle={`Select permissions for ${inviteEmail || 'new administrator'}`}
         initialPermissions={invitePermissions}
+        callerIsOwner={callerIsOwner}
+        callerPermissions={callerPermissions}
         onSave={(perms) => {
           setInvitePermissions(perms);
           setIsInvitePermsModalOpen(false);
@@ -1302,6 +1327,8 @@ export const EventTeamModal: React.FC<EventTeamModalProps> = ({
           title={`Edit Permissions: ${editingMember.name || editingMember.email}`}
           subtitle="Updates take effect immediately on this administrator's session."
           initialPermissions={editingMember.permissions}
+          callerIsOwner={callerIsOwner}
+          callerPermissions={callerPermissions}
           isSaving={updateMemberMutation.isPending}
           onSave={(perms) => {
             updateMemberMutation.mutate({

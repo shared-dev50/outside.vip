@@ -591,4 +591,114 @@ describe('Stage 3 Implementation 2: Organizer Promotions & Campaign Analytics Fr
       expect(dashboardCode).toContain('<TrendingUp className="w-3.5 h-3.5 text-stone-700" />');
     });
   });
+
+  // =========================================================================
+  // 8. P2-01 F5: Caller-Scoped Permission Gating in EventPromotionsModal
+  // =========================================================================
+  describe('8. P2-01 F5: Caller-Scoped Permission Gating in EventPromotionsModal', () => {
+    it('hides mutation actions for analytics-only Event Admin while keeping Traffic Analytics visible', () => {
+      queryClient.setQueryData(['event-promotion-links', mockEvent.id], mockLinks);
+
+      const html = renderToString(
+        <QueryClientProvider client={queryClient}>
+          <MemoryRouter>
+            <EventPromotionsModal
+              isOpen={true}
+              onClose={() => {}}
+              event={mockEvent}
+              isOwner={false}
+              permissions={{
+                canManagePromotions: false,
+                canViewAnalytics: true,
+              }}
+            />
+          </MemoryRouter>
+        </QueryClientProvider>
+      );
+
+      expect(html).toContain('Traffic Analytics');
+      expect(html).toContain('View Link Traffic Analytics');
+      expect(html).not.toContain('Create Campaign Link');
+      expect(html).not.toContain('Customize Slug');
+      expect(html).not.toContain('Pause Link');
+      expect(html).not.toContain('Activate Link');
+      expect(html).not.toContain('Archive Link');
+    });
+
+    it('hides Traffic Analytics tab and link analytics icon for promotions-management-only Event Admin while keeping mutation controls visible', () => {
+      queryClient.setQueryData(['event-promotion-links', mockEvent.id], mockLinks);
+
+      const html = renderToString(
+        <QueryClientProvider client={queryClient}>
+          <MemoryRouter>
+            <EventPromotionsModal
+              isOpen={true}
+              onClose={() => {}}
+              event={mockEvent}
+              isOwner={false}
+              permissions={{
+                canManagePromotions: true,
+                canViewAnalytics: false,
+              }}
+            />
+          </MemoryRouter>
+        </QueryClientProvider>
+      );
+
+      expect(html).toContain('Create Campaign Link');
+      expect(html).toContain('Customize Slug');
+      expect(html).toContain('Pause Link');
+      expect(html).toContain('Archive Link');
+      expect(html).not.toContain('Traffic Analytics</button>');
+      expect(html).not.toContain('View Link Traffic Analytics');
+    });
+
+    it('shows both capabilities when caller has both permissions and restricts all actions when caller has neither', () => {
+      queryClient.setQueryData(['event-promotion-links', mockEvent.id], mockLinks);
+
+      const bothHtml = renderToString(
+        <QueryClientProvider client={queryClient}>
+          <MemoryRouter>
+            <EventPromotionsModal
+              isOpen={true}
+              onClose={() => {}}
+              event={mockEvent}
+              isOwner={false}
+              permissions={{
+                canManagePromotions: true,
+                canViewAnalytics: true,
+              }}
+            />
+          </MemoryRouter>
+        </QueryClientProvider>
+      );
+
+      expect(bothHtml).toContain('Traffic Analytics');
+      expect(bothHtml).toContain('Create Campaign Link');
+      expect(bothHtml).toContain('Customize Slug');
+      expect(bothHtml).toContain('Archive Link');
+
+      const neitherHtml = renderToString(
+        <QueryClientProvider client={queryClient}>
+          <MemoryRouter>
+            <EventPromotionsModal
+              isOpen={true}
+              onClose={() => {}}
+              event={mockEvent}
+              isOwner={false}
+              permissions={{
+                canManagePromotions: false,
+                canViewAnalytics: false,
+              }}
+            />
+          </MemoryRouter>
+        </QueryClientProvider>
+      );
+
+      expect(neitherHtml).toContain('Promotions Access Restricted');
+      expect(neitherHtml).not.toContain('Create Campaign Link');
+      expect(neitherHtml).not.toContain('Customize Slug');
+      expect(neitherHtml).not.toContain('Archive Link');
+    });
+  });
 });

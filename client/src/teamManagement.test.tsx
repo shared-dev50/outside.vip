@@ -2,17 +2,24 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 import { renderToString } from 'react-dom/server';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import {
   AdminPermissionsModal,
   DEFAULT_ADMIN_PERMISSIONS,
   SAFE_ADMIN_PERMISSIONS,
+  DELEGABLE_PERMISSION_COUNT,
+  countActiveDelegablePermissions,
+  sanitizeAdminPermissions,
+  computeSafeDefaultsForCaller,
 } from './components/team/AdminPermissionsModal';
 import { EventTeamModal } from './components/team/EventTeamModal';
 import { TeamInvitationPage } from './pages/TeamInvitationPage';
+import { OrganizerDashboardPage } from './pages/OrganizerDashboardPage';
+import { CreateEventPage } from './pages/CreateEventPage';
+import { EventPreviewPage } from './pages/EventPreviewPage';
 import { api, setActiveCsrfToken } from './lib/api';
-import { OrganizerEventItem } from './types';
+import { OrganizerEventItem, User } from './types';
 
 const mockEvent: OrganizerEventItem = {
   id: 'evt-team-test-101',
@@ -128,10 +135,12 @@ describe('Stage 3: Event Team Management & Admin Permissions Frontend', () => {
       // Section 3: High-Risk Sensitive Operations
       expect(html).toContain('3. High-Risk Operations');
       expect(html).toContain('Caution Required');
-      expect(html).toContain('Issue Buyer Refunds');
-      expect(html).toContain('Manage Banking &amp; Payouts');
-      expect(html).toContain('Cancel Entire Event');
-      expect(html).toContain('Delete Event Draft');
+      expect(html).toContain('Cancel Event Occurrence');
+      expect(html).toContain('Delete Draft &amp; Archive Event');
+      expect(html).toContain('Payouts and payout settings are managed by the event owner.');
+      expect(html).toContain('Refund delegation is not currently available.');
+      expect(html).not.toContain('Issue Buyer Refunds');
+      expect(html).not.toContain('Manage Banking &amp; Payouts');
 
       // Presets
       expect(html).toContain('Safe Defaults');
@@ -902,96 +911,482 @@ describe('Stage 3: Event Team Management & Admin Permissions Frontend', () => {
   });
 
   // =========================================================================
-  // 7. Stage 5 Implementation 1: Admin Permission UI Accuracy Correction
+  // 7. P2-01 Dormant Toggle Removal, Accurate Copy, /8 Counts & Caller-Scoped Delegation
   // =========================================================================
-  describe('7. Stage 5 Implementation 1: Admin Permission UI Accuracy Correction', () => {
-    it('renders canManageRefunds as visibly unavailable (Coming Soon) with disabled input and accurate explanation', () => {
-      // Even if legacy data passes canManageRefunds: true, the modal must enforce false
+  describe('7. P2-01 Dormant Permission Toggles & Accurate UI Representation', () => {
+    it('removes dormant canManageRefunds and canManagePayouts checkboxes, shows owner/refund informational notes, and uses /8 counts', () => {
+      // Even if legacy data passes canManageRefunds: true and canManagePayouts: true, both are sanitized to false
       const html = renderToString(
         <AdminPermissionsModal
           isOpen={true}
           onClose={() => {}}
           onSave={() => {}}
-          initialPermissions={{ canManageRefunds: true as any }}
+          initialPermissions={{
+            canEditDetails: true,
+            canManageRefunds: true as any,
+            canManagePayouts: true as any,
+          }}
           title="Configure Admin Permissions"
         />
       );
 
-      // 1. Visibly marked Coming Soon
-      expect(html).toContain('Coming Soon');
-      expect(html).toContain('Issue Buyer Refunds');
+      // 1. Neither dormant toggle appears as a checkbox or label
+      expect(html).not.toContain('Issue Buyer Refunds');
+      expect(html).not.toContain('Manage Banking &amp; Payouts');
+      expect(html).not.toContain('Coming Soon');
 
-      // 2. Accurate explanation that refunds are not supported for Event Admins
-      expect(html).toContain('Refund management is not currently supported for Event Admins');
+      // 2. Concise informational notes are rendered
+      expect(html).toContain('Payouts and payout settings are managed by the event owner.');
+      expect(html).toContain('Refund delegation is not currently available.');
 
-      // 3. Inspect source to ensure canManageRefunds is locked to false and toggle is blocked
-      const modalSource = fs.readFileSync(
-        path.resolve(__dirname, './components/team/AdminPermissionsModal.tsx'),
-        'utf-8'
-      );
-      expect(modalSource).toContain("key: 'canManageRefunds'");
-      expect(modalSource).toContain("statusBadge: 'Coming Soon'");
-      expect(modalSource).toContain('isDisabled: true');
-      expect(modalSource).toContain("if (key === 'canManageRefunds' || key === 'canManagePayouts')");
+      // 3. Counts accurately use /8 (never /10) and ignore legacy dormant trues
+      expect(html).toContain('1/8 Active');
+      expect(html).toContain('1 of 8 permission granted');
+      expect(html).not.toContain('/10');
+      expect(html).not.toContain('of 10');
+
+      // 4. Helper sanitization forces dormant keys to false while keeping 10-key compatibility
+      const sanitized = sanitizeAdminPermissions({
+        canEditDetails: true,
+        canManageRefunds: true,
+        canManagePayouts: true,
+      });
+      expect(sanitized.canEditDetails).toBe(true);
+      expect(sanitized.canManageRefunds).toBe(false);
+      expect(sanitized.canManagePayouts).toBe(false);
+      expect(countActiveDelegablePermissions(sanitized)).toBe(1);
+      expect(DELEGABLE_PERMISSION_COUNT).toBe(8);
     });
 
-    it('renders canManagePayouts as visibly Owner Only with disabled input and accurate explanation', () => {
+    it('renders accurate descriptions for canViewOrders, canCancelEvent, and canDeleteEvent (F3 & F8)', () => {
       const html = renderToString(
         <AdminPermissionsModal
           isOpen={true}
           onClose={() => {}}
           onSave={() => {}}
-          initialPermissions={{ canManagePayouts: true as any }}
           title="Configure Admin Permissions"
         />
       );
 
-      // 1. Visibly marked Owner Only
-      expect(html).toContain('Owner Only');
-      expect(html).toContain('Manage Banking &amp; Payouts');
+      // canViewOrders must not claim ticket check-in log access
+      expect(html).not.toContain('ticket check-in logs');
+      expect(html).toContain('Access event order history, buyer contact details, and revenue summaries.');
 
-      // 2. Accurate explanation that payout settings remain exclusively under organizer control
-      expect(html).toContain('Payout settings remain exclusively under the event organizer');
+      // canCancelEvent must not claim automatic attendee email notifications
+      expect(html).not.toContain('automatic attendee notifications');
+      expect(html).toContain('Cancel live or scheduled event occurrences and cancel their active waitlist entries.');
 
-      // 3. Inspect source to ensure canManagePayouts is locked to false
-      const modalSource = fs.readFileSync(
-        path.resolve(__dirname, './components/team/AdminPermissionsModal.tsx'),
-        'utf-8'
-      );
-      expect(modalSource).toContain("key: 'canManagePayouts'");
-      expect(modalSource).toContain("statusBadge: 'Owner Only'");
+      // canDeleteEvent describes draft deletion and archived transition
+      expect(html).toContain('Permanently delete draft events with no ticket sales and transition events to archived status.');
     });
 
-    it('preserves configurability for the other eight permissions while keeping all 10 schema keys compatible', () => {
-      const modalSource = fs.readFileSync(
-        path.resolve(__dirname, './components/team/AdminPermissionsModal.tsx'),
-        'utf-8'
+    it('enforces caller-scoped delegation and restricts Safe Defaults to caller ceiling (F5)', () => {
+      const delegatorPerms = {
+        ...DEFAULT_ADMIN_PERMISSIONS,
+        canEditDetails: true,
+        canViewOrders: true,
+        canManageTeam: true,
+      };
+
+      const html = renderToString(
+        <AdminPermissionsModal
+          isOpen={true}
+          onClose={() => {}}
+          onSave={() => {}}
+          callerIsOwner={false}
+          callerPermissions={delegatorPerms}
+          title="Configure Admin Permissions"
+        />
       );
 
-      // The other 8 permissions are not disabled
-      const nonDisabledKeys = [
-        'canEditDetails',
-        'canManageTickets',
-        'canViewOrders',
-        'canManageTeam',
-        'canManagePromotions',
-        'canViewAnalytics',
-        'canCancelEvent',
-        'canDeleteEvent',
-      ];
+      // Delegation notice banner rendered for non-owner Event Admin delegator
+      expect(html).toContain('You can only grant permissions that you currently hold for this event.');
+      expect(html).toContain('Outside Your Access');
 
-      nonDisabledKeys.forEach((key) => {
-        // Must be in definition arrays without isDisabled: true
-        expect(modalSource).toMatch(new RegExp(`key:\\s*'${key}'`));
+      // Safe Defaults for this delegator intersects SAFE_ADMIN_PERMISSIONS with caller ceiling
+      const safeForDelegator = computeSafeDefaultsForCaller(false, delegatorPerms);
+      expect(safeForDelegator.canEditDetails).toBe(true);
+      expect(safeForDelegator.canViewOrders).toBe(true);
+      expect(safeForDelegator.canManageTickets).toBe(false);
+      expect(safeForDelegator.canManagePromotions).toBe(false);
+      expect(safeForDelegator.canViewAnalytics).toBe(false);
+      expect(safeForDelegator.canManageTeam).toBe(false);
+      expect(safeForDelegator.canCancelEvent).toBe(false);
+      expect(safeForDelegator.canDeleteEvent).toBe(false);
+
+      // Owner retains full SAFE_ADMIN_PERMISSIONS preset
+      const safeForOwner = computeSafeDefaultsForCaller(true, null);
+      expect(safeForOwner).toEqual(SAFE_ADMIN_PERMISSIONS);
+    });
+
+    it('displays /8 permission counts in EventTeamModal for admin members and preserves all 10 schema keys', () => {
+      queryClient.setQueryData(['event-team', mockEvent.id], {
+        members: [
+          {
+            id: 'mem-admin-count',
+            userId: 'user-admin-count',
+            name: 'Count Admin',
+            email: 'count-admin@outside.vip',
+            role: 'ADMIN' as const,
+            status: 'ACTIVE' as const,
+            permissions: {
+              ...DEFAULT_ADMIN_PERMISSIONS,
+              canEditDetails: true,
+              canManageTickets: true,
+              canManageRefunds: true as any,
+            },
+            createdAt: '2026-11-20T08:00:00Z',
+          },
+        ],
+        invitations: [],
+      });
+      queryClient.setQueryData(['event-staff', mockEvent.id], {
+        staff: [],
+        invitations: [],
       });
 
-      // All 10 permissions exist in DEFAULT_ADMIN_PERMISSIONS and default to false
+      const html = renderToString(
+        <QueryClientProvider client={queryClient}>
+          <MemoryRouter>
+            <EventTeamModal isOpen={true} onClose={() => {}} event={mockEvent} />
+          </MemoryRouter>
+        </QueryClientProvider>
+      );
+
+      expect(html).toContain('2/8 perms');
+      expect(html).not.toContain('/10 perms');
+
+      // All 10 permissions remain in DEFAULT_ADMIN_PERMISSIONS & SAFE_ADMIN_PERMISSIONS for schema compatibility
       expect(Object.keys(DEFAULT_ADMIN_PERMISSIONS).length).toBe(10);
       expect(Object.values(DEFAULT_ADMIN_PERMISSIONS).every((val) => val === false)).toBe(true);
-
-      // Safe defaults keep both refunds and payouts false
       expect(SAFE_ADMIN_PERMISSIONS.canManageRefunds).toBe(false);
       expect(SAFE_ADMIN_PERMISSIONS.canManagePayouts).toBe(false);
+    });
+  });
+
+  // =========================================================================
+  // 8. P2-01 Dashboard & Event Editor Permission Gating (F1 & F3)
+  // =========================================================================
+  describe('8. P2-01 OrganizerDashboardPage & CreateEventPage Permission Gating', () => {
+    const adminUser: User = {
+      id: 'event-admin-user-99',
+      name: 'Event Admin',
+      email: 'event-admin@outside.vip',
+      role: 'ATTENDEE',
+      emailVerified: true,
+    };
+
+    const mockStats = {
+      totalEvents: 1,
+      publishedEvents: 1,
+      draftEvents: 0,
+      ticketsSold: 10,
+      grossRevenueInCents: 0,
+      grossRevenueFormatted: '$0.00',
+      currency: 'USD',
+    };
+
+    it('F1: ticket-only Event Admin sees ticket management link on dashboard and ticket-only mode in CreateEventPage without detail editing or publishing', () => {
+      const ticketOnlyEvent: OrganizerEventItem = {
+        ...mockEvent,
+        isOwner: false,
+        accessRole: 'ADMIN',
+        permissions: {
+          ...DEFAULT_ADMIN_PERMISSIONS,
+          canManageTickets: true,
+        },
+      };
+
+      const dashboardHtml = renderToString(
+        <QueryClientProvider client={queryClient}>
+          <MemoryRouter>
+            <OrganizerDashboardPage
+              initialUser={adminUser}
+              initialIsLoading={false}
+              initialEvents={[ticketOnlyEvent]}
+              initialStats={mockStats}
+            />
+          </MemoryRouter>
+        </QueryClientProvider>
+      );
+
+      expect(dashboardHtml).toContain('Manage Ticket Tiers');
+      expect(dashboardHtml).toContain(`/organizer/events/${ticketOnlyEvent.id}/edit?step=tickets`);
+      expect(dashboardHtml).not.toContain('Cancel Event Occurrence');
+      expect(dashboardHtml).not.toContain('title="Unpublish event (hide from discovery)"');
+      expect(dashboardHtml).not.toContain('title="Publish event to Outside.vip"');
+
+      // CreateEventPage in ticket-only mode
+      queryClient.setQueryData(['organizer-event', ticketOnlyEvent.id], {
+        event: {
+          ...ticketOnlyEvent,
+          seriesId: 'series-123',
+        },
+      });
+
+      const editorHtml = renderToString(
+        <QueryClientProvider client={queryClient}>
+          <MemoryRouter initialEntries={[`/organizer/events/${ticketOnlyEvent.id}/edit`]}>
+            <Routes>
+              <Route
+                path="/organizer/events/:id/edit"
+                element={<CreateEventPage initialUser={adminUser} initialIsLoading={false} />}
+              />
+            </Routes>
+          </MemoryRouter>
+        </QueryClientProvider>
+      );
+
+      expect(editorHtml).toContain('Ticket Management Mode');
+      expect(editorHtml).toContain('Save Tickets');
+      expect(editorHtml).toContain('Save Ticket Changes');
+      expect(editorHtml).not.toContain('Event Details &amp; Artwork');
+      expect(editorHtml).not.toContain('Attendee Guidelines &amp; Door Policies');
+      expect(editorHtml).not.toContain('Publish Live');
+      expect(editorHtml).not.toContain('Finance &amp; Payout Settings');
+      expect(editorHtml).not.toContain('Cancel Event Occurrence');
+      expect(editorHtml).not.toContain('Cancel Entire Series');
+    });
+
+    it('F1: details-only Event Admin locks ticket tiers on Step 3 and hides finance/publish controls', () => {
+      const detailsOnlyEvent: OrganizerEventItem = {
+        ...mockEvent,
+        status: 'DRAFT',
+        isOwner: false,
+        accessRole: 'ADMIN',
+        permissions: {
+          ...DEFAULT_ADMIN_PERMISSIONS,
+          canEditDetails: true,
+        },
+      };
+
+      queryClient.setQueryData(['organizer-event', detailsOnlyEvent.id], {
+        event: detailsOnlyEvent,
+      });
+
+      const editorHtml = renderToString(
+        <QueryClientProvider client={queryClient}>
+          <MemoryRouter initialEntries={[`/organizer/events/${detailsOnlyEvent.id}/edit?step=tickets`]}>
+            <Routes>
+              <Route
+                path="/organizer/events/:id/edit"
+                element={<CreateEventPage initialUser={adminUser} initialIsLoading={false} />}
+              />
+            </Routes>
+          </MemoryRouter>
+        </QueryClientProvider>
+      );
+
+      expect(editorHtml).toContain('Ticket Tiers Locked');
+      expect(editorHtml).toContain('Attendee Guidelines &amp; Door Policies');
+      expect(editorHtml).not.toContain('Publish Live');
+      expect(editorHtml).not.toContain('Finance &amp; Payout Settings');
+    });
+
+    it('F3: cancel-only Event Admin can reach Cancel Event Occurrence on dashboard and editor, while Series Cancellation and Finance remain restricted', () => {
+      const cancelOnlyEvent: OrganizerEventItem = {
+        ...mockEvent,
+        status: 'PUBLISHED',
+        isOwner: false,
+        accessRole: 'ADMIN',
+        permissions: {
+          ...DEFAULT_ADMIN_PERMISSIONS,
+          canCancelEvent: true,
+        },
+      };
+
+      const dashboardHtml = renderToString(
+        <QueryClientProvider client={queryClient}>
+          <MemoryRouter>
+            <OrganizerDashboardPage
+              initialUser={adminUser}
+              initialIsLoading={false}
+              initialEvents={[cancelOnlyEvent]}
+              initialStats={mockStats}
+            />
+          </MemoryRouter>
+        </QueryClientProvider>
+      );
+
+      expect(dashboardHtml).toContain('Cancel Event Occurrence');
+      expect(dashboardHtml).not.toContain('Edit Event &amp; Ticket Tiers');
+      expect(dashboardHtml).not.toContain('Manage Ticket Tiers');
+      expect(dashboardHtml).not.toContain('title="Unpublish event (hide from discovery)"');
+      expect(dashboardHtml).not.toContain('title="Publish event to Outside.vip"');
+
+      // Direct navigation to /edit for a cancel-only admin on a recurring series event
+      queryClient.setQueryData(['organizer-event', cancelOnlyEvent.id], {
+        event: {
+          ...cancelOnlyEvent,
+          seriesId: 'series-999',
+        },
+      });
+
+      const editorHtml = renderToString(
+        <QueryClientProvider client={queryClient}>
+          <MemoryRouter initialEntries={[`/organizer/events/${cancelOnlyEvent.id}/edit`]}>
+            <Routes>
+              <Route
+                path="/organizer/events/:id/edit"
+                element={<CreateEventPage initialUser={adminUser} initialIsLoading={false} />}
+              />
+            </Routes>
+          </MemoryRouter>
+        </QueryClientProvider>
+      );
+
+      expect(editorHtml).toContain('Cancel Event Occurrence');
+      expect(editorHtml).not.toContain('Cancel Entire Series');
+      expect(editorHtml).not.toContain('Finance &amp; Payout Settings');
+      expect(editorHtml).not.toContain('Save Draft');
+      expect(editorHtml).not.toContain('Publish Live');
+    });
+  });
+
+  // =========================================================================
+  // 9. P2-01 EventPreviewPage Action Controls Gating
+  // =========================================================================
+  describe('9. P2-01 EventPreviewPage Action Controls Gating', () => {
+    const ownerUser: User = {
+      id: mockEvent.organizerId,
+      name: 'Owner User',
+      email: 'owner@outside.vip',
+      role: 'ORGANIZER',
+      emailVerified: true,
+    };
+
+    const platformAdminUser: User = {
+      id: 'platform-admin-user-1',
+      name: 'Platform Admin',
+      email: 'platform-admin@outside.vip',
+      role: 'ADMIN',
+      emailVerified: true,
+    };
+
+    const eventAdminUser: User = {
+      id: 'event-admin-preview-1',
+      name: 'Preview Event Admin',
+      email: 'preview-admin@outside.vip',
+      role: 'ATTENDEE',
+      emailVerified: true,
+    };
+
+    const renderPreview = (eventPayload: OrganizerEventItem, currentUser: User) => {
+      queryClient.setQueryData(['organizer-event', eventPayload.id], {
+        event: eventPayload,
+      });
+
+      return renderToString(
+        <QueryClientProvider client={queryClient}>
+          <MemoryRouter initialEntries={[`/organizer/events/${eventPayload.id}/preview`]}>
+            <Routes>
+              <Route
+                path="/organizer/events/:id/preview"
+                element={<EventPreviewPage initialUser={currentUser} />}
+              />
+            </Routes>
+          </MemoryRouter>
+        </QueryClientProvider>
+      );
+    };
+
+    it('renders Edit Event and Publish/Unpublish controls for Event Owner and Platform ADMIN', () => {
+      const draftOwnerEvent: OrganizerEventItem = {
+        ...mockEvent,
+        id: 'evt-preview-owner-draft',
+        status: 'DRAFT',
+        isOwner: true,
+        permissions: null,
+      };
+      const ownerDraftHtml = renderPreview(draftOwnerEvent, ownerUser);
+      expect(ownerDraftHtml).toContain('Edit Event');
+      expect(ownerDraftHtml).toContain(`/organizer/events/${draftOwnerEvent.id}/edit`);
+      expect(ownerDraftHtml).toContain('Publish Live Now');
+
+      const publishedPlatformEvent: OrganizerEventItem = {
+        ...mockEvent,
+        id: 'evt-preview-platform-live',
+        status: 'PUBLISHED',
+        isOwner: false,
+        permissions: null,
+      };
+      const platformHtml = renderPreview(publishedPlatformEvent, platformAdminUser);
+      expect(platformHtml).toContain('Edit Event');
+      expect(platformHtml).toContain('Unpublish');
+      expect(platformHtml).toContain('Public Page');
+    });
+
+    it('shows Edit Event Details and hides Publish/Unpublish for details-only Event Admin', () => {
+      const detailsOnlyDraft: OrganizerEventItem = {
+        ...mockEvent,
+        id: 'evt-preview-details-only',
+        status: 'DRAFT',
+        isOwner: false,
+        accessRole: 'ADMIN',
+        permissions: {
+          ...DEFAULT_ADMIN_PERMISSIONS,
+          canEditDetails: true,
+        },
+      };
+
+      const html = renderPreview(detailsOnlyDraft, eventAdminUser);
+      expect(html).toContain('Sol Fest Africa 2026');
+      expect(html).toContain('Dashboard');
+      expect(html).toContain('Edit Event Details');
+      expect(html).toContain(`/organizer/events/${detailsOnlyDraft.id}/edit`);
+      expect(html).not.toContain('Add Ticket Tiers in Editor');
+      expect(html).not.toContain('?step=tickets');
+      expect(html).not.toContain('Publish Live Now');
+      expect(html).not.toContain('Unpublish');
+    });
+
+    it('shows Manage Ticket Tiers (?step=tickets) and hides Publish/Unpublish for ticket-only Event Admin', () => {
+      const ticketOnlyLive: OrganizerEventItem = {
+        ...mockEvent,
+        id: 'evt-preview-ticket-only',
+        status: 'PUBLISHED',
+        isOwner: false,
+        accessRole: 'ADMIN',
+        permissions: {
+          ...DEFAULT_ADMIN_PERMISSIONS,
+          canManageTickets: true,
+        },
+      };
+
+      const html = renderPreview(ticketOnlyLive, eventAdminUser);
+      expect(html).toContain('Sol Fest Africa 2026');
+      expect(html).toContain('Manage Ticket Tiers');
+      expect(html).toContain('Add Ticket Tiers in Editor');
+      expect(html).toContain(`/organizer/events/${ticketOnlyLive.id}/edit?step=tickets`);
+      expect(html).toContain('Public Page');
+      expect(html).not.toContain('Publish Live Now');
+      expect(html).not.toContain('Unpublish');
+    });
+
+    it('hides Edit and Publish/Unpublish controls while preserving preview access for read-only Event Admin', () => {
+      const readOnlyLive: OrganizerEventItem = {
+        ...mockEvent,
+        id: 'evt-preview-readonly',
+        status: 'PUBLISHED',
+        isOwner: false,
+        accessRole: 'ADMIN',
+        permissions: {
+          ...DEFAULT_ADMIN_PERMISSIONS,
+          canViewOrders: true,
+        },
+      };
+
+      const html = renderPreview(readOnlyLive, eventAdminUser);
+      expect(html).toContain('Sol Fest Africa 2026');
+      expect(html).toContain('Live Published Event');
+      expect(html).toContain('Dashboard');
+      expect(html).toContain('Public Page');
+      expect(html).not.toContain(`/organizer/events/${readOnlyLive.id}/edit`);
+      expect(html).not.toContain('Add Ticket Tiers in Editor');
+      expect(html).not.toContain('Edit Event');
+      expect(html).not.toContain('Manage Ticket Tiers');
+      expect(html).not.toContain('Publish Live Now');
+      expect(html).not.toContain('Unpublish');
     });
   });
 });

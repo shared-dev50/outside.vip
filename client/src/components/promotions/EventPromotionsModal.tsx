@@ -31,12 +31,15 @@ import {
   PromotionLinkItem,
   PromotionLinkStatus,
   DailyTrafficItem,
+  EventAdminPermissions,
 } from '../../types';
 
 export interface EventPromotionsModalProps {
   isOpen: boolean;
   onClose: () => void;
   event: OrganizerEventItem | null;
+  isOwner?: boolean;
+  permissions?: Partial<EventAdminPermissions> | null;
 }
 
 type DateRangePreset = '7D' | '14D' | '30D' | 'ALL';
@@ -45,12 +48,32 @@ export const EventPromotionsModal: React.FC<EventPromotionsModalProps> = ({
   isOpen,
   onClose,
   event,
+  isOwner,
+  permissions,
 }) => {
   if (!isOpen || !event) return null;
 
   const queryClient = useQueryClient();
   const auth = useOptionalAuth();
   const clearSessionState = auth?.clearSessionState;
+  const currentUser = auth?.user;
+  const isPlatformAdmin = currentUser?.role === 'ADMIN';
+  const resolvedIsOwner =
+    isOwner !== undefined
+      ? isOwner
+      : event.isOwner !== undefined
+      ? event.isOwner
+      : currentUser
+      ? event.organizerId === currentUser.id
+      : permissions === undefined && event.permissions === undefined;
+  const effectivePermissions =
+    permissions !== undefined ? permissions : (event.permissions ?? null);
+
+  const canManagePromotions =
+    resolvedIsOwner || isPlatformAdmin || Boolean(effectivePermissions?.canManagePromotions);
+  const canViewAnalytics =
+    resolvedIsOwner || isPlatformAdmin || Boolean(effectivePermissions?.canViewAnalytics);
+  const canReadLinks = canManagePromotions || canViewAnalytics;
 
   const handleAuthError = (err: any): boolean => {
     const status = err?.statusCode || err?.status;
@@ -132,7 +155,7 @@ export const EventPromotionsModal: React.FC<EventPromotionsModalProps> = ({
   } = useQuery({
     queryKey: ['event-promotion-links', event.id],
     queryFn: () => api.promotions.getLinks(event.id),
-    enabled: Boolean(event.id),
+    enabled: Boolean(event.id) && canReadLinks,
   });
 
   const links = linksData || [];
@@ -159,8 +182,16 @@ export const EventPromotionsModal: React.FC<EventPromotionsModalProps> = ({
         startDate: dateParams.startDate,
         endDate: dateParams.endDate,
       }),
-    enabled: Boolean(event.id) && activeTab === 'ANALYTICS',
+    enabled: Boolean(event.id) && activeTab === 'ANALYTICS' && canViewAnalytics,
   });
+
+  useEffect(() => {
+    if (activeTab === 'ANALYTICS' && !canViewAnalytics) {
+      setActiveTab('LINKS');
+    } else if (activeTab === 'CREATE' && !canManagePromotions) {
+      setActiveTab('LINKS');
+    }
+  }, [activeTab, canViewAnalytics, canManagePromotions]);
 
   const traffic = analyticsData?.traffic;
 
@@ -316,11 +347,11 @@ export const EventPromotionsModal: React.FC<EventPromotionsModalProps> = ({
             <button
               type="button"
               onClick={() => {
-                refetchLinks();
-                if (activeTab === 'ANALYTICS') refetchAnalytics();
+                if (canReadLinks) refetchLinks();
+                if (activeTab === 'ANALYTICS' && canViewAnalytics) refetchAnalytics();
               }}
-              disabled={isFetchingLinks || isFetchingAnalytics}
-              className="p-2 rounded-lg text-stone-500 hover:text-stone-900 hover:bg-stone-100 transition-colors cursor-pointer"
+              disabled={isFetchingLinks || isFetchingAnalytics || !canReadLinks}
+              className="p-2 rounded-lg text-stone-500 hover:text-stone-900 hover:bg-stone-100 transition-colors cursor-pointer disabled:opacity-40"
               title="Refresh Data"
             >
               <RotateCw
@@ -368,53 +399,72 @@ export const EventPromotionsModal: React.FC<EventPromotionsModalProps> = ({
         )}
 
         {/* Navigation Tabs */}
-        <div className="px-6 pt-3 border-b border-stone-200 bg-white flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => setActiveTab('LINKS')}
-              className={`px-3 py-2 text-xs font-mono font-bold uppercase tracking-wider border-b-2 transition-colors cursor-pointer ${
-                activeTab === 'LINKS'
-                  ? 'border-stone-900 text-stone-900'
-                  : 'border-transparent text-stone-500 hover:text-stone-800'
-              }`}
-            >
-              Campaign Links ({links.length})
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveTab('ANALYTICS')}
-              className={`px-3 py-2 text-xs font-mono font-bold uppercase tracking-wider border-b-2 transition-colors cursor-pointer flex items-center gap-1.5 ${
-                activeTab === 'ANALYTICS'
-                  ? 'border-stone-900 text-stone-900'
-                  : 'border-transparent text-stone-500 hover:text-stone-800'
-              }`}
-            >
-              <BarChart3 className="w-3.5 h-3.5" />
-              Traffic Analytics
-            </button>
-          </div>
+        {canReadLinks && (
+          <div className="px-6 pt-3 border-b border-stone-200 bg-white flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setActiveTab('LINKS')}
+                className={`px-3 py-2 text-xs font-mono font-bold uppercase tracking-wider border-b-2 transition-colors cursor-pointer ${
+                  activeTab === 'LINKS'
+                    ? 'border-stone-900 text-stone-900'
+                    : 'border-transparent text-stone-500 hover:text-stone-800'
+                }`}
+              >
+                Campaign Links ({links.length})
+              </button>
+              {canViewAnalytics && (
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('ANALYTICS')}
+                  className={`px-3 py-2 text-xs font-mono font-bold uppercase tracking-wider border-b-2 transition-colors cursor-pointer flex items-center gap-1.5 ${
+                    activeTab === 'ANALYTICS'
+                      ? 'border-stone-900 text-stone-900'
+                      : 'border-transparent text-stone-500 hover:text-stone-800'
+                  }`}
+                >
+                  <BarChart3 className="w-3.5 h-3.5" />
+                  Traffic Analytics
+                </button>
+              )}
+            </div>
 
-          <button
-            type="button"
-            onClick={() => setActiveTab('CREATE')}
-            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-mono uppercase font-bold tracking-wider transition-colors shadow-2xs mb-2 cursor-pointer ${
-              activeTab === 'CREATE'
-                ? 'bg-stone-900 text-white'
-                : 'bg-stone-100 hover:bg-stone-200 text-stone-800 border border-stone-200'
-            }`}
-          >
-            <Plus className="w-3.5 h-3.5" />
-            Create Campaign Link
-          </button>
-        </div>
+            {canManagePromotions && (
+              <button
+                type="button"
+                onClick={() => setActiveTab('CREATE')}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-mono uppercase font-bold tracking-wider transition-colors shadow-2xs mb-2 cursor-pointer ${
+                  activeTab === 'CREATE'
+                    ? 'bg-stone-900 text-white'
+                    : 'bg-stone-100 hover:bg-stone-200 text-stone-800 border border-stone-200'
+                }`}
+              >
+                <Plus className="w-3.5 h-3.5" />
+                Create Campaign Link
+              </button>
+            )}
+          </div>
+        )}
 
         {/* Body Container */}
         <div className="flex-1 overflow-y-auto p-6">
+          {!canReadLinks ? (
+            <div className="py-16 text-center space-y-3">
+              <div className="w-12 h-12 rounded-2xl bg-stone-100 text-stone-400 flex items-center justify-center mx-auto">
+                <AlertCircle className="w-6 h-6" />
+              </div>
+              <h4 className="font-display font-bold text-stone-800 text-sm">
+                Promotions Access Restricted
+              </h4>
+              <p className="text-xs text-stone-500 max-w-sm mx-auto">
+                You do not have permission to manage promotional links or view traffic analytics for this event.
+              </p>
+            </div>
+          ) : null}
           {/* =========================================================================
               TAB 1: PROMOTIONAL LINKS ROSTER
              ========================================================================= */}
-          {activeTab === 'LINKS' && (
+          {canReadLinks && activeTab === 'LINKS' && (
             <div className="space-y-4">
               {/* Filter & Search Bar */}
               <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
@@ -485,16 +535,20 @@ export const EventPromotionsModal: React.FC<EventPromotionsModalProps> = ({
                     No Promotional Links Found
                   </h4>
                   <p className="text-xs text-stone-500 max-w-sm mx-auto">
-                    Create your first campaign link (e.g. for Instagram, WhatsApp, or Newsletter) to track discovery traffic.
+                    {canManagePromotions
+                      ? 'Create your first campaign link (e.g. for Instagram, WhatsApp, or Newsletter) to track discovery traffic.'
+                      : 'No promotional links have been created for this event yet.'}
                   </p>
-                  <button
-                    type="button"
-                    onClick={() => setActiveTab('CREATE')}
-                    className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-stone-900 hover:bg-black text-white text-xs font-mono uppercase font-bold tracking-wider transition-colors shadow-xs cursor-pointer mt-2"
-                  >
-                    <Plus className="w-3.5 h-3.5" />
-                    Create Campaign Link
-                  </button>
+                  {canManagePromotions && (
+                    <button
+                      type="button"
+                      onClick={() => setActiveTab('CREATE')}
+                      className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-stone-900 hover:bg-black text-white text-xs font-mono uppercase font-bold tracking-wider transition-colors shadow-xs cursor-pointer mt-2"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      Create Campaign Link
+                    </button>
+                  )}
                 </div>
               ) : (
                 <div className="overflow-x-auto border border-stone-200 rounded-xl">
@@ -620,20 +674,22 @@ export const EventPromotionsModal: React.FC<EventPromotionsModalProps> = ({
                               )}
 
                               {/* View Analytics for Link */}
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setAnalyticsLinkId(link.id);
-                                  setActiveTab('ANALYTICS');
-                                }}
-                                className="p-1.5 rounded-lg bg-stone-100 hover:bg-stone-200 text-stone-600 hover:text-stone-900 transition-colors cursor-pointer"
-                                title="View Link Traffic Analytics"
-                              >
-                                <BarChart3 className="w-3.5 h-3.5" />
-                              </button>
+                              {canViewAnalytics && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setAnalyticsLinkId(link.id);
+                                    setActiveTab('ANALYTICS');
+                                  }}
+                                  className="p-1.5 rounded-lg bg-stone-100 hover:bg-stone-200 text-stone-600 hover:text-stone-900 transition-colors cursor-pointer"
+                                  title="View Link Traffic Analytics"
+                                >
+                                  <BarChart3 className="w-3.5 h-3.5" />
+                                </button>
+                              )}
 
                               {/* Customize Slug */}
-                              {link.status !== 'ARCHIVED' && (
+                              {canManagePromotions && link.status !== 'ARCHIVED' && (
                                 <button
                                   type="button"
                                   onClick={() => {
@@ -649,7 +705,7 @@ export const EventPromotionsModal: React.FC<EventPromotionsModalProps> = ({
                               )}
 
                               {/* Pause / Resume Button */}
-                              {link.status !== 'ARCHIVED' && (
+                              {canManagePromotions && link.status !== 'ARCHIVED' && (
                                 <button
                                   type="button"
                                   onClick={() =>
@@ -673,7 +729,7 @@ export const EventPromotionsModal: React.FC<EventPromotionsModalProps> = ({
                               )}
 
                               {/* Archive Button */}
-                              {link.status !== 'ARCHIVED' && (
+                              {canManagePromotions && link.status !== 'ARCHIVED' && (
                                 <button
                                   type="button"
                                   onClick={() => setLinkToArchive(link)}
@@ -697,7 +753,7 @@ export const EventPromotionsModal: React.FC<EventPromotionsModalProps> = ({
           {/* =========================================================================
               TAB 2: CREATE CAMPAIGN LINK FORM
              ========================================================================= */}
-          {activeTab === 'CREATE' && (
+          {canManagePromotions && activeTab === 'CREATE' && (
             <form onSubmit={handleCreateSubmit} className="max-w-xl mx-auto space-y-6 py-2">
               <div className="space-y-1">
                 <h4 className="font-display font-bold text-lg text-stone-900">
@@ -787,7 +843,7 @@ export const EventPromotionsModal: React.FC<EventPromotionsModalProps> = ({
           {/* =========================================================================
               TAB 3: CAMPAIGN TRAFFIC ANALYTICS
              ========================================================================= */}
-          {activeTab === 'ANALYTICS' && (
+          {canViewAnalytics && activeTab === 'ANALYTICS' && (
             <div className="space-y-6">
               {/* Analytics Header Controls */}
               <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 p-4 rounded-xl bg-stone-50 border border-stone-200">
@@ -879,14 +935,16 @@ export const EventPromotionsModal: React.FC<EventPromotionsModalProps> = ({
                   <p className="text-xs text-stone-500 max-w-sm mx-auto leading-relaxed">
                     Share your campaign or host promotional links on social media, Instagram bio, or WhatsApp groups to start tracking visitor discovery.
                   </p>
-                  <button
-                    type="button"
-                    onClick={() => setActiveTab('CREATE')}
-                    className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-stone-900 hover:bg-black text-white text-xs font-mono uppercase font-bold tracking-wider transition-colors shadow-xs cursor-pointer mt-1"
-                  >
-                    <Plus className="w-3.5 h-3.5" />
-                    Create Campaign Link
-                  </button>
+                  {canManagePromotions && (
+                    <button
+                      type="button"
+                      onClick={() => setActiveTab('CREATE')}
+                      className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-stone-900 hover:bg-black text-white text-xs font-mono uppercase font-bold tracking-wider transition-colors shadow-xs cursor-pointer mt-1"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      Create Campaign Link
+                    </button>
+                  )}
                 </div>
               ) : (
                 /* Analytics Dashboard Content */

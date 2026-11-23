@@ -425,10 +425,10 @@ describe('Authentication Stage 4: Cross-Role Navigation, Unified OTP Login & Das
         </QueryClientProvider>
       );
 
-      // Event Admin badge & permitted Edit action visible
+      // Event Admin badge & permitted Edit action visible (details-only admin sees Edit Event Details)
       expect(html).toContain('Admin Assigned Gala');
       expect(html).toContain('Event Admin');
-      expect(html).toContain('title="Edit Event &amp; Ticket Tiers"');
+      expect(html).toContain('title="Edit Event Details"');
       expect(html).toContain('Assigned Events');
 
       // Unpermitted / owner-only controls MUST NOT appear

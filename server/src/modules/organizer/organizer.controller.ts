@@ -5,6 +5,7 @@ import { prisma } from '../../db/prisma.js';
 import {
   createEventSchema,
   updateEventSchema,
+  UpdateEventInput,
   payoutDetailsInputSchema,
   PayoutDetailsInput,
   earningsPreviewInputSchema,
@@ -498,16 +499,34 @@ export async function getOrganizerEventById(req: Request, res: Response, next: N
       throw new NotFoundError('Event not found');
     }
 
-    if (event.organizerId !== organizerId && req.user!.role !== 'ADMIN') {
+    const isOwner = event.organizerId === organizerId;
+    const isPlatformAdmin = req.user!.role === 'ADMIN';
+    let adminPermissions: EventAdminPermissions | null = null;
+
+    if (!isOwner && !isPlatformAdmin) {
       const authCtx = await resolveEventAuthorization(id, req.user!);
       if (authCtx.isHost || (!authCtx.isOwner && !authCtx.isAdmin)) {
         throw new ForbiddenError(
           'Event hosts are restricted to personal promotional links and traffic and cannot access organizer event details.'
         );
       }
+
+      adminPermissions = authCtx.permissions ?? null;
+      const hasEventReadPermission = Boolean(
+        adminPermissions?.canEditDetails ||
+        adminPermissions?.canManageTickets ||
+        adminPermissions?.canCancelEvent ||
+        adminPermissions?.canDeleteEvent ||
+        adminPermissions?.canViewOrders
+      );
+
+      if (!hasEventReadPermission) {
+        throw new ForbiddenError(
+          'You do not have sufficient event permissions to view organizer event details.'
+        );
+      }
     }
 
-    const isOwner = event.organizerId === organizerId;
     const effectivePayout = isOwner ? (event.payoutDetails || event.organizer?.payoutDetails || null) : null;
     const sanitizedPayout = isOwner ? sanitizePayoutDetails(effectivePayout) : null;
     const sanitizedOrganizer = {
@@ -552,6 +571,9 @@ export async function getOrganizerEventById(req: Request, res: Response, next: N
 
     const sanitizedEvent = {
       ...event,
+      isOwner,
+      accessRole: (isOwner ? 'OWNER' : 'ADMIN') as 'OWNER' | 'ADMIN',
+      permissions: isOwner ? null : adminPermissions,
       ticketTiers: enrichedTicketTiers,
       passwordHash: undefined,
       payoutDetails: sanitizedPayout,
@@ -1067,12 +1089,65 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
       }
     };
 
-    if (!isOwner && req.user!.role !== 'ADMIN') {
-      await resolveEventAuthorization(id, req.user!, 'canEditDetails');
-      if (input.ticketTiers !== undefined) {
-        await resolveEventAuthorization(id, req.user!, 'canManageTickets');
+    const EVENT_DETAIL_UPDATE_FIELDS: ReadonlyArray<keyof UpdateEventInput> = [
+      'title',
+      'tagline',
+      'description',
+      'category',
+      'coverImageUrl',
+      'coverImagePublicId',
+      'thumbnailUrl',
+      'venueName',
+      'venueAddress',
+      'city',
+      'country',
+      'latitude',
+      'longitude',
+      'placeId',
+      'startAt',
+      'endAt',
+      'timezone',
+      'ageRestriction',
+      'dressCode',
+      'recurrence',
+      'youtubeVideoUrl',
+      'showOnExplore',
+      'hideGuestCount',
+      'isPasswordProtected',
+      'password',
+      'galleryImages',
+      'features',
+    ];
+
+    const hasEventDetailUpdate = EVENT_DETAIL_UPDATE_FIELDS.some(
+      (field) => input[field] !== undefined
+    );
+    const hasTicketTierUpdate = input.ticketTiers !== undefined;
+
+    const enforceUpdatePermissionsForTarget = async (
+      targetEventId: string,
+      currentStatus: EventStatus
+    ) => {
+      const hasStatusTransition =
+        input.status !== undefined && input.status !== currentStatus;
+
+      if (hasEventDetailUpdate) {
+        await resolveEventAuthorization(targetEventId, req.user!, 'canEditDetails');
       }
-      await enforceStatusTransitionAuth(id, existingEvent.status, input.status);
+      if (hasTicketTierUpdate) {
+        await resolveEventAuthorization(targetEventId, req.user!, 'canManageTickets');
+      }
+      if (hasStatusTransition) {
+        await enforceStatusTransitionAuth(targetEventId, currentStatus, input.status);
+      }
+      // Fail closed for empty or unchanged-status-only payloads
+      if (!hasEventDetailUpdate && !hasTicketTierUpdate && !hasStatusTransition) {
+        await resolveEventAuthorization(targetEventId, req.user!, 'canEditDetails');
+      }
+    };
+
+    if (!isOwner && req.user!.role !== 'ADMIN') {
+      await enforceUpdatePermissionsForTarget(id, existingEvent.status);
     }
 
     // SEC-04: Validate that every supplied ticketTier.id belongs to existingEvent before any database writes
@@ -1105,11 +1180,7 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
       });
 
       for (const occ of futureOccurrencesForAuth) {
-        await resolveEventAuthorization(occ.id, req.user!, 'canEditDetails');
-        if (input.ticketTiers !== undefined) {
-          await resolveEventAuthorization(occ.id, req.user!, 'canManageTickets');
-        }
-        await enforceStatusTransitionAuth(occ.id, occ.status, input.status);
+        await enforceUpdatePermissionsForTarget(occ.id, occ.status);
       }
     }
 
