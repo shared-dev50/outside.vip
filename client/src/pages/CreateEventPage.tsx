@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../lib/api';
 import { useOptionalAuth } from '../context/AuthContext';
@@ -12,6 +12,8 @@ import {
   EventGalleryImage,
   EventFeature,
   User,
+  StripeConnectedAccountStatus,
+  StripeConnectCountry,
 } from '../types';
 import {
   ArrowLeft,
@@ -55,6 +57,13 @@ import { ImageCropModal } from '../components/events/ImageCropModal';
 import { UploadProgressCard, UploadProgressInfo } from '../components/events/UploadProgressCard';
 import { LocationAutocompleteInput } from '../components/events/LocationAutocompleteInput';
 import { TicketTierEditorSection } from '../components/events/TicketTierEditorSection';
+import { StripeOnboardingGateModal } from '../components/events/StripeOnboardingGateModal';
+import {
+  isStripeReadyForPaidPublishing,
+  hasVisiblePaidTicketTier,
+  isStripeOnboardingIncompleteError,
+  buildEventEditStripeUrls,
+} from '../lib/stripeOnboardingGate';
 import {
   TIMEZONE_GROUPS,
   formatTimezoneDisplay,
@@ -137,6 +146,7 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
   const { id } = useParams<{ id: string }>();
   const isEditing = Boolean(id);
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const queryClient = useQueryClient();
   const auth = useOptionalAuth();
   const user = initialUser !== undefined ? initialUser : auth?.user;
@@ -181,6 +191,28 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
   });
   const galleryAbortControllerRef = useRef<AbortController | null>(null);
   const isSubmittingRef = useRef<boolean>(false);
+  const createdDraftIdRef = useRef<string | null>(null);
+  const handledStripeReturnRef = useRef<boolean>(false);
+  const isMountedRef = useRef<boolean>(true);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
+  const [isCheckingStripeReadiness, setIsCheckingStripeReadiness] = useState(false);
+  const [showStripeGateModal, setShowStripeGateModal] = useState(false);
+  const [stripeAccountStatus, setStripeAccountStatus] =
+    useState<StripeConnectedAccountStatus | null>(null);
+  const [stripeSupportedCountries, setStripeSupportedCountries] = useState<
+    StripeConnectCountry[]
+  >([]);
+  const [stripeSelectedCountry, setStripeSelectedCountry] = useState<string>('US');
+  const [isStartingStripeSetup, setIsStartingStripeSetup] = useState(false);
+  const [stripeGateError, setStripeGateError] = useState<string | null>(null);
+  const [stripeGateNotice, setStripeGateNotice] = useState<string | null>(null);
 
   const isAnyImageUploading = isUploadingImage || isUploadingGallery;
 
@@ -999,6 +1031,134 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
     };
   };
 
+  const loadSupportedCountriesIfNeeded = async () => {
+    if (stripeSupportedCountries.length > 0) return;
+    try {
+      const res = await api.finance.getSupportedCountries();
+      if (res?.countries && res.countries.length > 0) {
+        setStripeSupportedCountries(res.countries);
+      }
+      if (res?.defaultCountry && !stripeAccountStatus?.country) {
+        setStripeSelectedCountry(res.defaultCountry);
+      }
+    } catch {
+      // Modal falls back cleanly to default supported countries list
+    }
+  };
+
+  useEffect(() => {
+    const isStripeReturn = searchParams.get('stripe_return') === 'true';
+    const isStripeRefresh = searchParams.get('stripe_refresh') === 'true';
+    if (!isStripeReturn && !isStripeRefresh) {
+      handledStripeReturnRef.current = false;
+      return;
+    }
+    if (!user || handledStripeReturnRef.current) {
+      return;
+    }
+
+    handledStripeReturnRef.current = true;
+    const nextParams = new URLSearchParams(searchParams);
+    nextParams.delete('stripe_return');
+    nextParams.delete('stripe_refresh');
+    setSearchParams(nextParams, { replace: true });
+    setCurrentStep(4);
+
+    const recheckStripeReadiness = async () => {
+      setIsCheckingStripeReadiness(true);
+      try {
+        const freshStatus = await api.finance.getStatus();
+        if (!isMountedRef.current) return;
+        setStripeAccountStatus(freshStatus);
+        if (freshStatus.country) {
+          setStripeSelectedCountry(freshStatus.country);
+        }
+        queryClient.invalidateQueries({ queryKey: ['finance-account-status'] });
+
+        if (isStripeReadyForPaidPublishing(freshStatus)) {
+          setShowStripeGateModal(false);
+          setStripeGateNotice(null);
+          setStripeGateError(null);
+          showNotification(
+            'success',
+            'Stripe setup complete! Your account is ready — click Publish Live whenever you are ready to publish your event.'
+          );
+        } else {
+          void loadSupportedCountriesIfNeeded();
+          const notice = isStripeRefresh
+            ? 'Your previous Stripe setup session expired before completion. Click Complete Stripe Setup to resume.'
+            : freshStatus.requirements?.pendingVerification &&
+              freshStatus.requirements.pendingVerification.length > 0
+            ? 'Stripe is still reviewing your submitted details. Check back shortly or keep your event saved as a draft.'
+            : 'Your Stripe setup is not complete yet. Finish the remaining Stripe verification steps to publish paid events, or keep your event saved as a draft.';
+          setStripeGateError(null);
+          setStripeGateNotice(notice);
+          setShowStripeGateModal(true);
+        }
+      } catch (err: any) {
+        if (!isMountedRef.current) return;
+        if ((err?.statusCode || err?.status) === 401) {
+          auth?.clearSessionState?.();
+          return;
+        }
+        showNotification(
+          'error',
+          'Returned from Stripe, but we could not verify your account readiness right now. Please click Publish Live again in a moment.'
+        );
+      } finally {
+        if (isMountedRef.current) {
+          setIsCheckingStripeReadiness(false);
+        }
+      }
+    };
+
+    void recheckStripeReadiness();
+  }, [user, searchParams, setSearchParams, queryClient, auth]);
+
+  const validateBeforeSaveOrPublish = (publish: boolean): string | null => {
+    if (isUploadingImage || isUploadingGallery) {
+      return 'Please wait for the image uploads to complete before saving.';
+    }
+
+    if (!coverImageUrl || !coverImageUrl.trim()) {
+      return 'A cover artwork image is required for the event.';
+    }
+
+    if (coverImageUrl.startsWith('data:image/') && coverImageUrl !== existingData?.event?.coverImageUrl) {
+      return 'Base64 image data cannot be newly uploaded. Please use the image upload option.';
+    }
+
+    const startMs = new Date(startAt).getTime();
+    const endMs = new Date(endAt).getTime();
+    if (endMs <= startMs) {
+      return 'Event end time must be after the start time.';
+    }
+
+    if (publish) {
+      if (!title.trim() || title.trim().length < 2) {
+        return 'Event title must be at least 2 characters long to publish.';
+      }
+      if (!venueName.trim()) {
+        return 'Venue name is required before publishing.';
+      }
+      if (!city.trim()) {
+        return 'City is required before publishing.';
+      }
+    }
+
+    const willBePublished = publish || currentStatus === 'PUBLISHED';
+    const ticketValidation = validateTicketTiers(ticketTiers, {
+      requireAtLeastOne: willBePublished,
+      requireVisibleForPublish: willBePublished,
+    });
+    setTierValidationErrors(ticketValidation.tierErrors);
+    if (!ticketValidation.isValid) {
+      return ticketValidation.summaryError || 'Please complete all required ticket fields.';
+    }
+
+    return null;
+  };
+
   const saveMutation = useMutation({
     mutationFn: async ({ publish }: { publish: boolean }) => {
       if (isSubmittingRef.current) {
@@ -1007,58 +1167,25 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
       isSubmittingRef.current = true;
 
       try {
-        if (isUploadingImage || isUploadingGallery) {
-          throw new Error('Please wait for the image uploads to complete before saving.');
-        }
-
-        if (!coverImageUrl || !coverImageUrl.trim()) {
-          throw new Error('A cover artwork image is required for the event.');
-        }
-
-        if (coverImageUrl.startsWith('data:image/') && coverImageUrl !== existingData?.event?.coverImageUrl) {
-          throw new Error('Base64 image data cannot be newly uploaded. Please use the image upload option.');
-        }
-
-        const startMs = new Date(startAt).getTime();
-        const endMs = new Date(endAt).getTime();
-        if (endMs <= startMs) {
-          throw new Error('Event end time must be after the start time.');
-        }
-
-        if (publish) {
-          if (!title.trim() || title.trim().length < 2) {
-            throw new Error('Event title must be at least 2 characters long to publish.');
-          }
-          if (!venueName.trim()) {
-            throw new Error('Venue name is required before publishing.');
-          }
-          if (!city.trim()) {
-            throw new Error('City is required before publishing.');
-          }
-        }
-
-        const willBePublished = publish || currentStatus === 'PUBLISHED';
-        const ticketValidation = validateTicketTiers(ticketTiers, {
-          requireAtLeastOne: willBePublished,
-          requireVisibleForPublish: willBePublished,
-        });
-        setTierValidationErrors(ticketValidation.tierErrors);
-        if (!ticketValidation.isValid) {
-          throw new Error(ticketValidation.summaryError || 'Please complete all required ticket fields.');
+        const validationError = validateBeforeSaveOrPublish(publish);
+        if (validationError) {
+          throw new Error(validationError);
         }
 
         const payload = buildPayload(publish ? 'PUBLISHED' : undefined);
+        const targetEventId = id || createdDraftIdRef.current;
 
-        let savedEventId = id;
-        if (isEditing && id) {
-          const res = await api.organizer.updateEvent(id, payload);
+        let savedEventId = targetEventId || undefined;
+        if (targetEventId) {
+          const res = await api.organizer.updateEvent(targetEventId, payload);
           savedEventId = res.event.id;
           if (publish && res.event.status !== 'PUBLISHED') {
-            await api.organizer.publishEvent(savedEventId, applyToFuture);
+            await api.organizer.publishEvent(savedEventId, isEditing ? applyToFuture : isRecurring);
           }
         } else {
           const res = await api.organizer.createEvent(payload);
           savedEventId = res.event.id;
+          createdDraftIdRef.current = savedEventId;
           if (publish && res.event.status !== 'PUBLISHED') {
             await api.organizer.publishEvent(savedEventId, isRecurring);
           }
@@ -1072,6 +1199,9 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
     },
     onSuccess: ({ eventId, published }) => {
       setHasUnsavedChanges(false);
+      setShowStripeGateModal(false);
+      setStripeGateError(null);
+      setStripeGateNotice(null);
       queryClient.invalidateQueries({ queryKey: ['organizer-dashboard'] });
       queryClient.invalidateQueries({ queryKey: ['organizer-events'] });
       queryClient.invalidateQueries({ queryKey: ['organizer-event', eventId] });
@@ -1100,9 +1230,166 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
     },
     onError: (err: any) => {
       isSubmittingRef.current = false;
+      if ((err?.statusCode || err?.status) === 401) {
+        auth?.clearSessionState?.();
+        return;
+      }
+      if (isStripeOnboardingIncompleteError(err)) {
+        setStripeGateError(null);
+        setStripeGateNotice(null);
+        setShowStripeGateModal(true);
+        void loadSupportedCountriesIfNeeded();
+        void api.finance
+          .getStatus()
+          .then((status) => {
+            setStripeAccountStatus(status);
+            if (status.country) {
+              setStripeSelectedCountry(status.country);
+            }
+          })
+          .catch(() => {});
+        return;
+      }
       showNotification('error', err?.message || 'Failed to save event. Check fields and try again.');
     },
   });
+
+  const handlePublishClick = async () => {
+    if (
+      isSubmittingRef.current ||
+      saveMutation.isPending ||
+      isCheckingStripeReadiness ||
+      isAnyImageUploading
+    ) {
+      return;
+    }
+
+    const validationError = validateBeforeSaveOrPublish(true);
+    if (validationError) {
+      showNotification('error', validationError);
+      return;
+    }
+
+    // Free events (all visible tiers priced at $0) can publish without Stripe onboarding
+    if (!hasVisiblePaidTicketTier(ticketTiers)) {
+      saveMutation.mutate({ publish: true });
+      return;
+    }
+
+    setIsCheckingStripeReadiness(true);
+    try {
+      const status = await api.finance.getStatus();
+      setStripeAccountStatus(status);
+      if (status.country) {
+        setStripeSelectedCountry(status.country);
+      }
+
+      if (isStripeReadyForPaidPublishing(status)) {
+        setIsCheckingStripeReadiness(false);
+        saveMutation.mutate({ publish: true });
+        return;
+      }
+
+      setStripeGateError(null);
+      setStripeGateNotice(
+        status.connectionStatus === 'invalid_or_inaccessible'
+          ? 'Your connected Stripe account is no longer accessible and must be reconnected before publishing.'
+          : null
+      );
+      setShowStripeGateModal(true);
+      void loadSupportedCountriesIfNeeded();
+    } catch (err: any) {
+      if ((err?.statusCode || err?.status) === 401) {
+        auth?.clearSessionState?.();
+        return;
+      }
+      // Fall back to authoritative backend check on publish if preflight status read fails
+      setIsCheckingStripeReadiness(false);
+      saveMutation.mutate({ publish: true });
+      return;
+    } finally {
+      setIsCheckingStripeReadiness(false);
+    }
+  };
+
+  const handleCompleteStripeSetup = async () => {
+    if (isStartingStripeSetup || saveMutation.isPending || isSubmittingRef.current) {
+      return;
+    }
+
+    setIsStartingStripeSetup(true);
+    setStripeGateError(null);
+
+    let savedDraftId = id || createdDraftIdRef.current;
+
+    try {
+      // Preserve current event & ticket information as a draft before redirecting to Stripe
+      const draftPayload = buildPayload('DRAFT');
+      if (savedDraftId) {
+        const res = await api.organizer.updateEvent(savedDraftId, draftPayload);
+        savedDraftId = res.event.id;
+      } else {
+        const res = await api.organizer.createEvent(draftPayload);
+        savedDraftId = res.event.id;
+        createdDraftIdRef.current = savedDraftId;
+      }
+
+      setHasUnsavedChanges(false);
+      queryClient.invalidateQueries({ queryKey: ['organizer-dashboard'] });
+      queryClient.invalidateQueries({ queryKey: ['organizer-events'] });
+      queryClient.invalidateQueries({ queryKey: ['organizer-event', savedDraftId] });
+
+      const origin =
+        typeof window !== 'undefined' && window.location?.origin
+          ? window.location.origin
+          : 'https://outside.vip';
+      const { returnUrl, refreshUrl } = buildEventEditStripeUrls(origin, savedDraftId);
+
+      const isReconnect = stripeAccountStatus?.connectionStatus === 'invalid_or_inaccessible';
+      const needsCountry = !stripeAccountStatus?.connected || isReconnect;
+
+      const linkRes = await api.finance.createOnboardingLink({
+        returnUrl,
+        refreshUrl,
+        ...(isReconnect ? { reconnect: true } : {}),
+        ...(needsCountry ? { country: stripeSelectedCountry } : {}),
+      });
+
+      if (!linkRes?.url) {
+        throw new Error(
+          'Your event was saved as a draft, but we did not receive a Stripe setup link. Please try again.'
+        );
+      }
+
+      window.location.href = linkRes.url;
+    } catch (err: any) {
+      if ((err?.statusCode || err?.status) === 401) {
+        auth?.clearSessionState?.();
+        setIsStartingStripeSetup(false);
+        return;
+      }
+
+      let message = 'Could not start Stripe setup right now. Please try again.';
+      if (err?.code === 'STRIPE_CONFIGURATION_UNAVAILABLE') {
+        message =
+          'Stripe Connect is currently being configured for this platform. Your event has been saved as a draft so you can return later.';
+      } else if (err?.code === 'STRIPE_SERVICE_UNAVAILABLE') {
+        message =
+          'Stripe is temporarily unreachable. Your event has been saved as a draft — please try again in a moment.';
+      } else if (err?.message) {
+        message = err.message;
+      }
+      setStripeGateError(message);
+      setIsStartingStripeSetup(false);
+    }
+  };
+
+  const handleModalSaveAsDraft = () => {
+    if (isStartingStripeSetup || saveMutation.isPending || isSubmittingRef.current) {
+      return;
+    }
+    saveMutation.mutate({ publish: false });
+  };
 
   const unpublishMutation = useMutation({
     mutationFn: async ({ unpublishSeries }: { unpublishSeries?: boolean }) => {
@@ -1324,13 +1611,21 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
             ) : (
               <button
                 type="button"
-                onClick={() => saveMutation.mutate({ publish: true })}
-                disabled={saveMutation.isPending || isAnyImageUploading || isSubmittingRef.current}
+                data-testid="header-publish-btn"
+                onClick={handlePublishClick}
+                disabled={
+                  saveMutation.isPending ||
+                  isCheckingStripeReadiness ||
+                  isAnyImageUploading ||
+                  isSubmittingRef.current
+                }
                 className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-stone-900 hover:bg-black text-white font-semibold text-xs font-mono uppercase tracking-wider transition-all duration-200 shadow-2xs disabled:opacity-50"
               >
                 <Globe className="w-3.5 h-3.5" />
                 <span>
-                  {saveMutation.isPending
+                  {isCheckingStripeReadiness
+                    ? 'Checking...'
+                    : saveMutation.isPending
                     ? 'Publishing...'
                     : isRecurring && !isEditing
                     ? 'Publish Series'
@@ -3029,13 +3324,27 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
 
                     <button
                       type="button"
-                      onClick={() => saveMutation.mutate({ publish: true })}
-                      disabled={saveMutation.isPending || isAnyImageUploading || isSubmittingRef.current}
+                      data-testid="step4-publish-btn"
+                      onClick={() => {
+                        if (currentStatus === 'PUBLISHED') {
+                          saveMutation.mutate({ publish: false });
+                        } else {
+                          void handlePublishClick();
+                        }
+                      }}
+                      disabled={
+                        saveMutation.isPending ||
+                        isCheckingStripeReadiness ||
+                        isAnyImageUploading ||
+                        isSubmittingRef.current
+                      }
                       className="inline-flex items-center gap-2 px-6 py-2.5 rounded-lg bg-stone-900 hover:bg-black text-white font-mono text-xs font-semibold uppercase tracking-wider transition-colors shadow-2xs disabled:opacity-50"
                     >
                       <Globe className="w-4 h-4" />
                       <span>
-                        {saveMutation.isPending
+                        {isCheckingStripeReadiness
+                          ? 'Checking...'
+                          : saveMutation.isPending
                           ? 'Publishing...'
                           : isRecurring && !isEditing
                           ? `Publish All ${occurrenceSchedulePreview.length} Occurrences`
@@ -3098,6 +3407,26 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
           </div>
         </div>
       )}
+
+      <StripeOnboardingGateModal
+        isOpen={showStripeGateModal}
+        onClose={() => {
+          if (!isStartingStripeSetup && !saveMutation.isPending) {
+            setShowStripeGateModal(false);
+            setStripeGateError(null);
+          }
+        }}
+        accountStatus={stripeAccountStatus}
+        supportedCountries={stripeSupportedCountries}
+        selectedCountry={stripeSelectedCountry}
+        onCountryChange={setStripeSelectedCountry}
+        onCompleteSetup={handleCompleteStripeSetup}
+        onSaveDraft={handleModalSaveAsDraft}
+        isStartingSetup={isStartingStripeSetup}
+        isSavingDraft={saveMutation.isPending}
+        errorMessage={stripeGateError}
+        statusNotice={stripeGateNotice}
+      />
 
       <ImageCropModal
         isOpen={coverCropModalOpen}
