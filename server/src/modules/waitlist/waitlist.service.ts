@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import { nanoid } from 'nanoid';
 import {
   Prisma,
+  ReservationStatus,
   TicketTierStatus,
   WaitlistEntryStatus,
   WaitlistOfferStatus,
@@ -20,6 +21,26 @@ import { sendWaitlistOfferEmail } from './waitlistEmail.service.js';
 import { isTicketTierHidden, isTicketTierSalesDisabled } from '../../utils/ticketTierState.js';
 
 export const OFFER_EXPIRY_MINUTES = 30;
+
+function computeSafeReservedRelease(params: {
+  context: string;
+  ticketTierId: string;
+  observedReserved: number;
+  releaseQty: number;
+}): number {
+  const { context, ticketTierId, observedReserved, releaseQty } = params;
+  if (observedReserved < releaseQty) {
+    console.warn('[InventoryUnderflow]', {
+      context,
+      ticketTierId,
+      expectedReleaseQty: releaseQty,
+      observedReservedQty: observedReserved,
+      clampedReservedQty: 0,
+    });
+    return 0;
+  }
+  return observedReserved - releaseQty;
+}
 
 export function generateOfferToken(): string {
   return `wlot_${nanoid(36)}`;
@@ -487,10 +508,16 @@ export async function lookupWaitlistOffer(rawToken: string) {
       `;
       const lockedTier = lockedTiers[0];
       if (lockedTier) {
+        const nextReserved = computeSafeReservedRelease({
+          context: 'lookupWaitlistOffer',
+          ticketTierId: lockedTier.id,
+          observedReserved: lockedTier.reservedQuantity,
+          releaseQty: lockedOffer.quantity,
+        });
         await tx.ticketTier.update({
           where: { id: lockedTier.id },
           data: {
-            reservedQuantity: Math.max(0, lockedTier.reservedQuantity - lockedOffer.quantity),
+            reservedQuantity: nextReserved,
           },
         });
       }
@@ -643,10 +670,16 @@ export async function declineWaitlistOffer(rawToken: string) {
     `;
     const lockedTier = lockedTiers[0];
     if (lockedTier) {
+      const nextReserved = computeSafeReservedRelease({
+        context: 'declineWaitlistOffer',
+        ticketTierId: lockedTier.id,
+        observedReserved: lockedTier.reservedQuantity,
+        releaseQty: lockedOffer.quantity,
+      });
       await tx.ticketTier.update({
         where: { id: lockedTier.id },
         data: {
-          reservedQuantity: Math.max(0, lockedTier.reservedQuantity - lockedOffer.quantity),
+          reservedQuantity: nextReserved,
         },
       });
     }
@@ -746,7 +779,12 @@ export async function sweepExpiredOffers(options?: {
             const lockedTier = lockedTierMap.get(tierId);
             if (!lockedTier || releaseQty <= 0) continue;
 
-            const nextReserved = Math.max(0, lockedTier.reservedQuantity - releaseQty);
+            const nextReserved = computeSafeReservedRelease({
+              context: 'sweepExpiredOffers',
+              ticketTierId: tierId,
+              observedReserved: lockedTier.reservedQuantity,
+              releaseQty,
+            });
             await tx.ticketTier.update({
               where: { id: tierId },
               data: { reservedQuantity: nextReserved },
@@ -898,49 +936,95 @@ export async function getOrganizerWaitlist(
 }
 
 // Cancels active waitlist entries and pending offers when an event/occurrence is cancelled.
-export async function cancelWaitlistForEventIds(eventIds: string[], tx?: Prisma.TransactionClient): Promise<void> {
+export async function cancelWaitlistForEventIds(
+  eventIds: string[],
+  tx?: Prisma.TransactionClient
+): Promise<void> {
   if (eventIds.length === 0) return;
-  const db = tx ?? prisma;
 
-  const tiers = await db.ticketTier.findMany({
-    where: { eventId: { in: eventIds } },
-    select: { id: true },
-  });
-  if (tiers.length === 0) return;
-  const tierIds = tiers.map((t) => t.id);
-
-  await db.ticketWaitlistOffer.updateMany({
-    where: {
-      ticketTierId: { in: tierIds },
-      status: WaitlistOfferStatus.PENDING,
-    },
-    data: {
-      status: WaitlistOfferStatus.CANCELLED,
-    },
-  });
-
-  await db.ticketWaitlistEntry.updateMany({
-    where: {
-      ticketTierId: { in: tierIds },
-      status: { in: [WaitlistEntryStatus.WAITING, WaitlistEntryStatus.OFFERED] },
-    },
-    data: {
-      status: WaitlistEntryStatus.CANCELLED,
-    },
-  });
-
-  for (const tierId of tierIds) {
-    const reservations = await db.ticketReservation.aggregate({
-      where: {
-        ticketTierId: tierId,
-        expiresAt: { gt: new Date() },
-      },
-      _sum: { quantity: true },
+  const runCancel = async (db: Prisma.TransactionClient) => {
+    const tiers = await db.ticketTier.findMany({
+      where: { eventId: { in: eventIds } },
+      select: { id: true },
+      orderBy: { id: 'asc' },
     });
-    const activeResQty = reservations._sum.quantity ?? 0;
-    await db.ticketTier.update({
-      where: { id: tierId },
-      data: { reservedQuantity: activeResQty },
+    if (tiers.length === 0) return;
+    const sortedTierIds = tiers.map((t) => t.id).sort();
+
+    // Canonical lock order: TicketWaitlistOffer -> TicketTier (sorted id ASC)
+    await db.$queryRaw`
+      SELECT id
+      FROM "TicketWaitlistOffer"
+      WHERE "ticketTierId" = ANY(${sortedTierIds})
+        AND status = 'PENDING'::"WaitlistOfferStatus"
+      ORDER BY id ASC
+      FOR UPDATE
+    `;
+
+    await db.$queryRaw`
+      SELECT id
+      FROM "TicketTier"
+      WHERE id = ANY(${sortedTierIds})
+      ORDER BY id ASC
+      FOR UPDATE
+    `;
+
+    await db.ticketWaitlistOffer.updateMany({
+      where: {
+        ticketTierId: { in: sortedTierIds },
+        status: WaitlistOfferStatus.PENDING,
+      },
+      data: {
+        status: WaitlistOfferStatus.CANCELLED,
+      },
+    });
+
+    await db.ticketWaitlistEntry.updateMany({
+      where: {
+        ticketTierId: { in: sortedTierIds },
+        status: { in: [WaitlistEntryStatus.WAITING, WaitlistEntryStatus.OFFERED] },
+      },
+      data: {
+        status: WaitlistEntryStatus.CANCELLED,
+      },
+    });
+
+    for (const tierId of sortedTierIds) {
+      const [activeReservations, remainingUnlinkedOffers] = await Promise.all([
+        db.ticketReservation.aggregate({
+          where: {
+            ticketTierId: tierId,
+            status: ReservationStatus.ACTIVE,
+          },
+          _sum: { quantity: true },
+        }),
+        db.ticketWaitlistOffer.aggregate({
+          where: {
+            ticketTierId: tierId,
+            status: WaitlistOfferStatus.PENDING,
+            orderId: null,
+          },
+          _sum: { quantity: true },
+        }),
+      ]);
+
+      const reconciledReserved =
+        (activeReservations._sum.quantity ?? 0) +
+        (remainingUnlinkedOffers._sum.quantity ?? 0);
+
+      await db.ticketTier.update({
+        where: { id: tierId },
+        data: { reservedQuantity: reconciledReserved },
+      });
+    }
+  };
+
+  if (tx) {
+    await runCancel(tx);
+  } else {
+    await prisma.$transaction(async (innerTx) => runCancel(innerTx), {
+      isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
+      timeout: 10000,
     });
   }
 }

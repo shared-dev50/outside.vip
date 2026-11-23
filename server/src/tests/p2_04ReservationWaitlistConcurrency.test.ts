@@ -14,9 +14,15 @@ import {
 import { app } from '../app.js';
 import { prisma } from '../db/prisma.js';
 import { stripe } from '../lib/stripe.js';
-import { releaseExpiredReservations } from '../modules/checkout/checkout.service.js';
 import {
+  createCheckoutSession,
+  releaseExpiredReservations,
+} from '../modules/checkout/checkout.service.js';
+import {
+  cancelWaitlistForEventIds,
+  declineWaitlistOffer,
   hashOfferToken,
+  lookupWaitlistOffer,
   processWaitlistForTier,
   sweepExpiredOffers,
 } from '../modules/waitlist/waitlist.service.js';
@@ -211,7 +217,7 @@ describe('P2-04 Coordinated Reservation Expiry, Waitlist Concurrency & Worker Ha
   // 1. Reservation Expiry Concurrency, Batching & Safety
   // ==========================================================
   describe('1. Atomic Reservation Expiry (PostgreSQL SKIP LOCKED & Transactions)', () => {
-    it('releases an expired reservation exactly once across concurrent calls without double-decrementing capacity', async () => {
+    it('releases an expired reservation exactly once across concurrent calls via PostgreSQL SKIP LOCKED contention barrier', async () => {
       const tier = await createTestTier({
         eventId: publishedEvent.id,
         name: `Concurrent Expiry Tier ${runId}`,
@@ -225,13 +231,37 @@ describe('P2-04 Coordinated Reservation Expiry, Waitlist Concurrency & Worker Ha
         items: [{ ticketTierId: tier.id, quantity: 4 }],
       });
 
-      const [r1, r2, r3] = await Promise.all([
-        releaseExpiredReservations(),
-        releaseExpiredReservations(),
-        releaseExpiredReservations(),
-      ]);
+      // Hold transaction A open AFTER acquiring Order FOR UPDATE SKIP LOCKED and releasing inside tx,
+      // BEFORE committing, while concurrent transaction B runs against live PostgreSQL.
+      let notifyLocked!: () => void;
+      const txALocked = new Promise<void>((resolve) => {
+        notifyLocked = resolve;
+      });
+      let releaseCommitGate!: () => void;
+      const commitGate = new Promise<void>((resolve) => {
+        releaseCommitGate = resolve;
+      });
 
-      expect(r1 + r2 + r3).toBeGreaterThanOrEqual(1);
+      const origTx = prisma.$transaction.bind(prisma);
+      vi.spyOn(prisma, '$transaction').mockImplementationOnce(async (fn: any, opts?: any) => {
+        return origTx(async (tx: any) => {
+          const result = await fn(tx);
+          notifyLocked();
+          await commitGate;
+          return result;
+        }, opts);
+      });
+
+      const workerAPromise = releaseExpiredReservations();
+      await txALocked;
+
+      // Worker B runs while Worker A holds FOR UPDATE lock on order/reservation/tier in Postgres
+      const workerBReleased = await releaseExpiredReservations();
+      expect(workerBReleased).toBe(0);
+
+      releaseCommitGate();
+      const workerAReleased = await workerAPromise;
+      expect(workerAReleased).toBe(1);
 
       const tierAfter = await prisma.ticketTier.findUniqueOrThrow({ where: { id: tier.id } });
       expect(tierAfter.reservedQuantity).toBe(0);
@@ -440,22 +470,121 @@ describe('P2-04 Coordinated Reservation Expiry, Waitlist Concurrency & Worker Ha
   });
 
   // ==========================================================
-  // 2. Payment Fulfillment vs Expiry Race Safety
+  // 2. Payment Fulfillment vs Expiry Race Safety (PostgreSQL Lock Barriers)
   // ==========================================================
   describe('2. Payment Concurrency vs Reservation Expiry', () => {
-    it('serializes concurrent fulfillPaidOrder and releaseExpiredReservations without corrupting reservation, order, or tier counts', async () => {
+    it('excludes Order from expiry sweep while webhook holds Order FOR UPDATE lock (SKIP LOCKED)', async () => {
       const tier = await createTestTier({
         eventId: publishedEvent.id,
-        name: `Pay Race Tier ${runId}`,
+        name: `Pay Race Hold Tier ${runId}`,
         totalCapacity: 10,
         reservedQuantity: 2,
         soldQuantity: 0,
       });
 
-      const piId = `pi_p204_race_${runId}`;
+      const entry = await prisma.ticketWaitlistEntry.create({
+        data: {
+          eventId: publishedEvent.id,
+          ticketTierId: tier.id,
+          customerName: 'Waitlist Buyer',
+          customerEmail: `pay_wl_${runId}@outside.vip`,
+          quantity: 2,
+          status: WaitlistEntryStatus.OFFERED,
+        },
+      });
+
+      const piId = `pi_p204_wh_first_${runId}`;
       const order = await createExpiredPendingOrder({
         eventId: publishedEvent.id,
-        suffix: 'pay_race',
+        suffix: 'wh_first',
+        items: [{ ticketTierId: tier.id, quantity: 2 }],
+        expiresAt: new Date(Date.now() - 2000),
+        paymentReference: piId,
+      });
+
+      const offer = await prisma.ticketWaitlistOffer.create({
+        data: {
+          entryId: entry.id,
+          eventId: publishedEvent.id,
+          ticketTierId: tier.id,
+          quantity: 2,
+          status: WaitlistOfferStatus.PENDING,
+          tokenHash: hashOfferToken(`wlot_wh_first_${runId}`),
+          expiresAt: new Date(Date.now() - 2000),
+          orderId: order.id,
+        },
+      });
+
+      const paymentIntent = {
+        id: piId,
+        status: 'succeeded',
+        amount: order.totalInCents,
+        currency: 'usd',
+        metadata: { orderId: order.id, orderNumber: order.orderNumber },
+      } as any;
+
+      let notifyWebhookLocked!: () => void;
+      const webhookLocked = new Promise<void>((resolve) => {
+        notifyWebhookLocked = resolve;
+      });
+      let releaseWebhookGate!: () => void;
+      const webhookGate = new Promise<void>((resolve) => {
+        releaseWebhookGate = resolve;
+      });
+
+      const origTx = prisma.$transaction.bind(prisma);
+      vi.spyOn(prisma, '$transaction').mockImplementationOnce(async (fn: any, opts?: any) => {
+        return origTx(async (tx: any) => {
+          const result = await fn(tx);
+          notifyWebhookLocked();
+          await webhookGate;
+          return result;
+        }, opts);
+      });
+
+      const webhookPromise = fulfillPaidOrder(paymentIntent);
+      await webhookLocked;
+
+      // While webhook holds uncommitted Order + Offer + Tier row locks, expiry skips locked order cleanly
+      const releasedWhileWebhookLocked = await releaseExpiredReservations();
+      expect(releasedWhileWebhookLocked).toBe(0);
+
+      releaseWebhookGate();
+      await webhookPromise;
+
+      // Subsequent expiry sweep must not touch the payment-completed order or confirmed reservation
+      await releaseExpiredReservations();
+
+      const [tierAfter, orderAfter, offerAfter] = await Promise.all([
+        prisma.ticketTier.findUniqueOrThrow({ where: { id: tier.id } }),
+        prisma.order.findUniqueOrThrow({
+          where: { id: order.id },
+          include: { reservations: true, tickets: true },
+        }),
+        prisma.ticketWaitlistOffer.findUniqueOrThrow({ where: { id: offer.id } }),
+      ]);
+
+      expect(orderAfter.status).toBe(OrderStatus.COMPLETED);
+      expect(orderAfter.reservations[0].status).toBe(ReservationStatus.CONFIRMED);
+      expect(orderAfter.tickets.length).toBe(2);
+      expect(offerAfter.status).toBe(WaitlistOfferStatus.ACCEPTED);
+      expect(tierAfter.soldQuantity).toBe(2);
+      expect(tierAfter.reservedQuantity).toBe(0);
+    });
+
+    it('blocks webhook on Order FOR UPDATE while expiry commits, preventing double-decrement of reservedQuantity', async () => {
+      const tier = await createTestTier({
+        eventId: publishedEvent.id,
+        name: `Exp First Race Tier ${runId}`,
+        totalCapacity: 10,
+        reservedQuantity: 2,
+        soldQuantity: 0,
+      });
+
+      const piId = `pi_p204_exp_first_${runId}`;
+      const order = await createExpiredPendingOrder({
+        eventId: publishedEvent.id,
+        suffix: 'exp_first',
         items: [{ ticketTierId: tier.id, quantity: 2 }],
         expiresAt: new Date(Date.now() - 2000),
         paymentReference: piId,
@@ -469,29 +598,63 @@ describe('P2-04 Coordinated Reservation Expiry, Waitlist Concurrency & Worker Ha
         metadata: { orderId: order.id, orderNumber: order.orderNumber },
       } as any;
 
-      await Promise.all([fulfillPaidOrder(paymentIntent), releaseExpiredReservations()]);
+      let notifyExpiryLocked!: () => void;
+      const expiryLocked = new Promise<void>((resolve) => {
+        notifyExpiryLocked = resolve;
+      });
+      let releaseExpiryGate!: () => void;
+      const expiryGate = new Promise<void>((resolve) => {
+        releaseExpiryGate = resolve;
+      });
 
+      let notifyWebhookEnteredTx!: () => void;
+      const webhookEnteredTx = new Promise<void>((resolve) => {
+        notifyWebhookEnteredTx = resolve;
+      });
+      let webhookSettled = false;
+
+      const origTx = prisma.$transaction.bind(prisma);
+      const txSpy = vi.spyOn(prisma, '$transaction');
+      txSpy
+        .mockImplementationOnce(async (fn: any, opts?: any) => {
+          return origTx(async (tx: any) => {
+            const result = await fn(tx);
+            notifyExpiryLocked();
+            await expiryGate;
+            return result;
+          }, opts);
+        })
+        .mockImplementationOnce(async (fn: any, opts?: any) => {
+          return origTx(async (tx: any) => {
+            notifyWebhookEnteredTx();
+            return await fn(tx);
+          }, opts);
+        });
+
+      const expiryPromise = releaseExpiredReservations();
+      await expiryLocked;
+
+      const webhookPromise = fulfillPaidOrder(paymentIntent).then((res) => {
+        webhookSettled = true;
+        return res;
+      });
+      await webhookEnteredTx;
+
+      // Allow event-loop turn for Postgres query dispatch; webhook must block on Order FOR UPDATE
+      await new Promise((r) => setTimeout(r, 40));
+      expect(webhookSettled).toBe(false);
+
+      releaseExpiryGate();
+      const [expReleased, fulfilled] = await Promise.all([expiryPromise, webhookPromise]);
+
+      expect(expReleased).toBe(1);
+      expect(fulfilled).toBe(true);
+      expect(webhookSettled).toBe(true);
+
+      // Expiry decremented reservedQuantity (2 -> 0); webhook saw RELEASED reservations and only incremented soldQuantity (0 -> 2)
       const tierAfter = await prisma.ticketTier.findUniqueOrThrow({ where: { id: tier.id } });
-      const orderAfter = await prisma.order.findUniqueOrThrow({
-        where: { id: order.id },
-        include: { reservations: true, tickets: true },
-      });
-
-      // Regardless of which lock acquired Order first, invariants hold strictly:
-      // Payment succeeded -> order COMPLETED, 2 tickets issued, soldQuantity=2, reservedQuantity=0 (never -2!)
-      expect(orderAfter.status).toBe(OrderStatus.COMPLETED);
-      expect(orderAfter.tickets.length).toBe(2);
-      expect(tierAfter.soldQuantity).toBe(2);
       expect(tierAfter.reservedQuantity).toBe(0);
-
-      // Subsequent expiry sweep must not touch the payment-completed order
-      await releaseExpiredReservations();
-      const tierSecond = await prisma.ticketTier.findUniqueOrThrow({ where: { id: tier.id } });
-      const resAfter = await prisma.ticketReservation.findUniqueOrThrow({
-        where: { id: order.reservations[0].id },
-      });
-      expect(tierSecond.reservedQuantity).toBe(0);
-      expect(resAfter.status).toBe(ReservationStatus.CONFIRMED);
+      expect(tierAfter.soldQuantity).toBe(2);
     });
   });
 
@@ -499,7 +662,7 @@ describe('P2-04 Coordinated Reservation Expiry, Waitlist Concurrency & Worker Ha
   // 3. Waitlist Capacity Allocation Concurrency & Eligibility
   // ==========================================================
   describe('3. Waitlist Allocation Locking & Eligibility Rules', () => {
-    it('prevents duplicate offers and oversubscription under 5 concurrent processWaitlistForTier calls while enforcing FIFO head-of-line fairness', async () => {
+    it('blocks competing processWaitlistForTier on TicketTier FOR UPDATE barrier, preventing duplicate offers and preserving FIFO fairness', async () => {
       const tier = await createTestTier({
         eventId: publishedEvent.id,
         name: `Concurrent WL Tier ${runId}`,
@@ -510,7 +673,6 @@ describe('P2-04 Coordinated Reservation Expiry, Waitlist Concurrency & Worker Ha
       });
 
       // Entry 1 requests 2 tickets, Entry 2 requests 2 tickets (only 1 remaining -> must hold FIFO line, NOT skip to Entry 3!)
-      // Wait: Entry 3 requests 1 ticket; FIFO head-of-line stops at Entry 2 so total allocated = 2, remaining = 1.
       const baseTime = Date.now() - 10_000;
       const e1 = await prisma.ticketWaitlistEntry.create({
         data: {
@@ -546,16 +708,57 @@ describe('P2-04 Coordinated Reservation Expiry, Waitlist Concurrency & Worker Ha
         },
       });
 
-      const results = await Promise.all([
-        processWaitlistForTier(tier.id),
-        processWaitlistForTier(tier.id),
-        processWaitlistForTier(tier.id),
-        processWaitlistForTier(tier.id),
-        processWaitlistForTier(tier.id),
-      ]);
+      let notifyAllocALocked!: () => void;
+      const allocALocked = new Promise<void>((resolve) => {
+        notifyAllocALocked = resolve;
+      });
+      let releaseAllocAGate!: () => void;
+      const allocAGate = new Promise<void>((resolve) => {
+        releaseAllocAGate = resolve;
+      });
 
-      const totalOffersCreated = results.reduce((sum, r) => sum + r.offersCreated, 0);
-      expect(totalOffersCreated).toBe(1);
+      let notifyAllocBEnteredTx!: () => void;
+      const allocBEnteredTx = new Promise<void>((resolve) => {
+        notifyAllocBEnteredTx = resolve;
+      });
+      let allocBSettled = false;
+
+      const origTx = prisma.$transaction.bind(prisma);
+      vi.spyOn(prisma, '$transaction')
+        .mockImplementationOnce(async (fn: any, opts?: any) => {
+          return origTx(async (tx: any) => {
+            const result = await fn(tx);
+            notifyAllocALocked();
+            await allocAGate;
+            return result;
+          }, opts);
+        })
+        .mockImplementationOnce(async (fn: any, opts?: any) => {
+          return origTx(async (tx: any) => {
+            notifyAllocBEnteredTx();
+            return await fn(tx);
+          }, opts);
+        });
+
+      const allocAPromise = processWaitlistForTier(tier.id);
+      await allocALocked;
+
+      const allocBPromise = processWaitlistForTier(tier.id).then((res) => {
+        allocBSettled = true;
+        return res;
+      });
+      await allocBEnteredTx;
+
+      // Verify allocB is genuinely blocked inside Postgres on TicketTier FOR UPDATE while allocA is uncommitted
+      await new Promise((r) => setTimeout(r, 40));
+      expect(allocBSettled).toBe(false);
+
+      releaseAllocAGate();
+      const [resA, resB] = await Promise.all([allocAPromise, allocBPromise]);
+
+      expect(resA.offersCreated).toBe(1);
+      expect(resB.offersCreated).toBe(0);
+      expect(allocBSettled).toBe(true);
 
       const offersInDb = await prisma.ticketWaitlistOffer.findMany({
         where: { ticketTierId: tier.id },
@@ -657,7 +860,7 @@ describe('P2-04 Coordinated Reservation Expiry, Waitlist Concurrency & Worker Ha
   // 4. Offer Expiry Sweeps & Checkout Linking Concurrency
   // ==========================================================
   describe('4. Expired Waitlist Offers & Active Checkout Race Protection', () => {
-    it('expires unlinked offers only once across concurrent sweeps and advances FIFO queue post-commit', async () => {
+    it('expires unlinked offers only once across concurrent sweeps via PostgreSQL SKIP LOCKED barrier and advances FIFO queue post-commit', async () => {
       const tier = await createTestTier({
         eventId: publishedEvent.id,
         name: `Offer Sweep Concurrency ${runId}`,
@@ -700,13 +903,38 @@ describe('P2-04 Coordinated Reservation Expiry, Waitlist Concurrency & Worker Ha
         },
       });
 
-      const [s1, s2, s3] = await Promise.all([
-        sweepExpiredOffers(),
-        sweepExpiredOffers(),
-        sweepExpiredOffers(),
-      ]);
+      // Hold Sweep A inside its transaction AFTER locking expiredOffer via SKIP LOCKED and before committing
+      let notifySweepALocked!: () => void;
+      const sweepALocked = new Promise<void>((resolve) => {
+        notifySweepALocked = resolve;
+      });
+      let releaseSweepAGate!: () => void;
+      const sweepAGate = new Promise<void>((resolve) => {
+        releaseSweepAGate = resolve;
+      });
 
-      expect(s1.expiredOffersCount + s2.expiredOffersCount + s3.expiredOffersCount).toBe(1);
+      const origTx = prisma.$transaction.bind(prisma);
+      vi.spyOn(prisma, '$transaction').mockImplementationOnce(async (fn: any, opts?: any) => {
+        return origTx(async (tx: any) => {
+          const result = await fn(tx);
+          notifySweepALocked();
+          await sweepAGate;
+          return result;
+        }, opts);
+      });
+
+      const sweepAPromise = sweepExpiredOffers();
+      await sweepALocked;
+
+      // Competing Sweep B runs while Sweep A holds uncommitted FOR UPDATE lock -> SKIP LOCKED skips immediately
+      const sweepBResult = await sweepExpiredOffers();
+      expect(sweepBResult.expiredOffersCount).toBe(0);
+      expect(sweepBResult.advancedTiersCount).toBe(0);
+
+      releaseSweepAGate();
+      const sweepAResult = await sweepAPromise;
+      expect(sweepAResult.expiredOffersCount).toBe(1);
+      expect(sweepAResult.advancedTiersCount).toBe(1);
 
       const expiredOfferAfter = await prisma.ticketWaitlistOffer.findUniqueOrThrow({
         where: { id: expiredOffer.id },
@@ -1030,6 +1258,251 @@ describe('P2-04 Coordinated Reservation Expiry, Waitlist Concurrency & Worker Ha
         if (prevMaint === undefined) delete process.env.MAINTENANCE_KEY;
         else process.env.MAINTENANCE_KEY = prevMaint;
       }
+    });
+  });
+
+  // ==========================================================
+  // 6. Stripe Rollback Locking, Inventory Underflow Warnings & Reconciliation
+  // ==========================================================
+  describe('6. Stripe-Setup Rollback Locking, Underflow Logging & Waitlist Cancellation Reconciliation', () => {
+    it('prevents Stripe-setup rollback from double-decrementing or overwriting an Order already expired/completed concurrently', async () => {
+      const tier = await createTestTier({
+        eventId: publishedEvent.id,
+        name: `Rollback Guard Tier ${runId}`,
+        totalCapacity: 10,
+        reservedQuantity: 0,
+        soldQuantity: 0,
+      });
+
+      // Simulate Stripe paymentIntents.create hanging long enough that order was expired before Stripe rejects
+      vi.spyOn(stripe.paymentIntents, 'create').mockImplementationOnce(async (params: any) => {
+        const orderId = params.metadata?.orderId as string;
+        await prisma.order.update({
+          where: { id: orderId },
+          data: { status: OrderStatus.EXPIRED },
+        });
+        await prisma.ticketReservation.updateMany({
+          where: { orderId },
+          data: { status: ReservationStatus.RELEASED },
+        });
+        await prisma.ticketTier.update({
+          where: { id: tier.id },
+          data: { reservedQuantity: 0 },
+        });
+        throw new Error('Simulated slow Stripe failure after concurrent expiry');
+      });
+
+      await expect(
+        createCheckoutSession({
+          eventId: publishedEvent.id,
+          items: [{ ticketTierId: tier.id, quantity: 3 }],
+          customerEmail: `rb_guard_${runId}@outside.vip`,
+          customerName: 'Rollback Guard Buyer',
+          customerPhone: '+15551234567',
+          marketingConsent: false,
+        })
+      ).rejects.toThrow(/reservation was safely released/i);
+
+      const tierAfter = await prisma.ticketTier.findUniqueOrThrow({ where: { id: tier.id } });
+      expect(tierAfter.reservedQuantity).toBe(0);
+
+      const orders = await prisma.order.findMany({
+        where: { customerEmail: `rb_guard_${runId}@outside.vip` },
+      });
+      expect(orders.length).toBe(1);
+      // Rollback must preserve EXPIRED rather than overwriting with CANCELLED
+      expect(orders[0].status).toBe(OrderStatus.EXPIRED);
+    });
+
+    it('cleanly rolls back partial-quantity waitlist checkout on Stripe failure and restores offer diff', async () => {
+      const tierOffer = await createTestTier({
+        eventId: publishedEvent.id,
+        name: `RB Partial Offer Tier ${runId}`,
+        totalCapacity: 4,
+        reservedQuantity: 3, // Holds 3-ticket PENDING waitlist offer
+        waitlistEnabled: true,
+      });
+
+      const entry = await prisma.ticketWaitlistEntry.create({
+        data: {
+          eventId: publishedEvent.id,
+          ticketTierId: tierOffer.id,
+          customerName: 'Partial Offer Buyer',
+          customerEmail: `rb_partial_${runId}@outside.vip`,
+          quantity: 3,
+          status: WaitlistEntryStatus.OFFERED,
+        },
+      });
+      const rawToken = `wlot_rb_partial_${runId}`;
+      const offer = await prisma.ticketWaitlistOffer.create({
+        data: {
+          entryId: entry.id,
+          eventId: publishedEvent.id,
+          ticketTierId: tierOffer.id,
+          quantity: 3,
+          status: WaitlistOfferStatus.PENDING,
+          tokenHash: hashOfferToken(rawToken),
+          expiresAt: new Date(Date.now() + 20 * 60_000),
+        },
+      });
+
+      vi.spyOn(stripe.paymentIntents, 'create').mockRejectedValueOnce(new Error('Stripe timeout'));
+
+      await expect(
+        createCheckoutSession({
+          eventId: publishedEvent.id,
+          items: [{ ticketTierId: tierOffer.id, quantity: 2 }], // Buyer took 2 of 3 offered -> diff=1
+          customerEmail: entry.customerEmail,
+          customerName: entry.customerName,
+          customerPhone: '+15551234567',
+          offerToken: rawToken,
+          marketingConsent: false,
+        })
+      ).rejects.toThrow(/reservation was safely released/i);
+
+      const [tierAfter, offerAfter] = await Promise.all([
+        prisma.ticketTier.findUniqueOrThrow({ where: { id: tierOffer.id } }),
+        prisma.ticketWaitlistOffer.findUniqueOrThrow({ where: { id: offer.id } }),
+      ]);
+      // Full 3-ticket offer hold is restored back to the unlinked PENDING offer
+      expect(tierAfter.reservedQuantity).toBe(3);
+      expect(offerAfter.status).toBe(WaitlistOfferStatus.PENDING);
+      expect(offerAfter.orderId).toBeNull();
+    });
+
+    it('emits structured [InventoryUnderflow] warnings without PII or tokens across lookup, decline, and sweep paths', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      const makeUnderflowCase = async (suffix: string, expiresInPast: boolean) => {
+        const t = await createTestTier({
+          eventId: publishedEvent.id,
+          name: `Underflow ${suffix} ${runId}`,
+          totalCapacity: 5,
+          reservedQuantity: 1, // Intentionally lower than offer qty=3
+          waitlistEnabled: false,
+        });
+        const e = await prisma.ticketWaitlistEntry.create({
+          data: {
+            eventId: publishedEvent.id,
+            ticketTierId: t.id,
+            customerName: `Sensitive Name ${suffix}`,
+            customerEmail: `pii_secret_${suffix}_${runId}@outside.vip`,
+            quantity: 3,
+            status: WaitlistEntryStatus.OFFERED,
+          },
+        });
+        const tok = `wlot_uf_${suffix}_${runId}`;
+        await prisma.ticketWaitlistOffer.create({
+          data: {
+            entryId: e.id,
+            eventId: publishedEvent.id,
+            ticketTierId: t.id,
+            quantity: 3,
+            status: WaitlistOfferStatus.PENDING,
+            tokenHash: hashOfferToken(tok),
+            expiresAt: new Date(Date.now() + (expiresInPast ? -60_000 : 600_000)),
+          },
+        });
+        return { t, tok };
+      };
+
+      const caseLookup = await makeUnderflowCase('lookup', true);
+      const caseDecline = await makeUnderflowCase('decline', false);
+      const caseSweep = await makeUnderflowCase('sweep', true);
+
+      // Run lookupWaitlistOffer on caseLookup ONLY before sweep takes it
+      await lookupWaitlistOffer(caseLookup.tok);
+      await declineWaitlistOffer(caseDecline.tok);
+      await sweepExpiredOffers();
+
+      for (const tid of [caseLookup.t.id, caseDecline.t.id, caseSweep.t.id]) {
+        const tierAfter = await prisma.ticketTier.findUniqueOrThrow({ where: { id: tid } });
+        expect(tierAfter.reservedQuantity).toBe(0);
+      }
+
+      const underflowCalls = warnSpy.mock.calls.filter((c) => c[0] === '[InventoryUnderflow]');
+      expect(underflowCalls.length).toBeGreaterThanOrEqual(3);
+      const serialized = JSON.stringify(underflowCalls);
+      expect(serialized).toContain('lookupWaitlistOffer');
+      expect(serialized).toContain('declineWaitlistOffer');
+      expect(serialized).toContain('sweepExpiredOffers');
+      expect(serialized).not.toContain('pii_secret_');
+      expect(serialized).not.toContain('wlot_uf_');
+    });
+
+    it('reconciles reservedQuantity in cancelWaitlistForEventIds using only ACTIVE reservations (excluding CONFIRMED and RELEASED)', async () => {
+      const cancelEvt = await createTestEvent({
+        suffix: 'cancel_reconcile',
+        status: EventStatus.CANCELLED,
+      });
+      const tier = await createTestTier({
+        eventId: cancelEvt.id,
+        name: `Cancel Reconcile Tier ${runId}`,
+        totalCapacity: 20,
+        reservedQuantity: 9, // Inflated before reconciliation
+        waitlistEnabled: true,
+      });
+
+      const futureExp = new Date(Date.now() + 20 * 60_000);
+      await createExpiredPendingOrder({
+        eventId: cancelEvt.id,
+        suffix: 'cr_active',
+        items: [{ ticketTierId: tier.id, quantity: 3 }],
+        orderStatus: OrderStatus.PENDING,
+        reservationStatus: ReservationStatus.ACTIVE,
+        expiresAt: futureExp,
+      });
+      await createExpiredPendingOrder({
+        eventId: cancelEvt.id,
+        suffix: 'cr_conf',
+        items: [{ ticketTierId: tier.id, quantity: 2 }],
+        orderStatus: OrderStatus.COMPLETED,
+        reservationStatus: ReservationStatus.CONFIRMED,
+        expiresAt: futureExp,
+      });
+      await createExpiredPendingOrder({
+        eventId: cancelEvt.id,
+        suffix: 'cr_rel',
+        items: [{ ticketTierId: tier.id, quantity: 1 }],
+        orderStatus: OrderStatus.EXPIRED,
+        reservationStatus: ReservationStatus.RELEASED,
+        expiresAt: futureExp,
+      });
+
+      const waitingEntry = await prisma.ticketWaitlistEntry.create({
+        data: {
+          eventId: cancelEvt.id,
+          ticketTierId: tier.id,
+          customerName: 'Cancelled Offer Waiter',
+          customerEmail: `cr_wl_${runId}@outside.vip`,
+          quantity: 4,
+          status: WaitlistEntryStatus.OFFERED,
+        },
+      });
+      const offer = await prisma.ticketWaitlistOffer.create({
+        data: {
+          entryId: waitingEntry.id,
+          eventId: cancelEvt.id,
+          ticketTierId: tier.id,
+          quantity: 4,
+          status: WaitlistOfferStatus.PENDING,
+          tokenHash: hashOfferToken(`wlot_cr_${runId}`),
+          expiresAt: futureExp,
+        },
+      });
+
+      await cancelWaitlistForEventIds([cancelEvt.id]);
+
+      const [tierAfter, offerAfter, entryAfter] = await Promise.all([
+        prisma.ticketTier.findUniqueOrThrow({ where: { id: tier.id } }),
+        prisma.ticketWaitlistOffer.findUniqueOrThrow({ where: { id: offer.id } }),
+        prisma.ticketWaitlistEntry.findUniqueOrThrow({ where: { id: waitingEntry.id } }),
+      ]);
+
+      expect(offerAfter.status).toBe(WaitlistOfferStatus.CANCELLED);
+      expect(entryAfter.status).toBe(WaitlistEntryStatus.CANCELLED);
+      // Only the 3 ACTIVE reservation tickets remain held; CONFIRMED (2), RELEASED (1), and CANCELLED offer (4) excluded
+      expect(tierAfter.reservedQuantity).toBe(3);
     });
   });
 });

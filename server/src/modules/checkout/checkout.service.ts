@@ -710,51 +710,141 @@ export async function createCheckoutSession(
   } catch (stripeError) {
     console.error('Stripe PaymentIntent creation failed; initiating reservation rollback:', stripeError);
 
-    // Roll back reservations on payment setup failure
-    await prisma.$transaction(async (tx) => {
-      for (const item of createdOrder.items) {
-        if (!verifiedOffer || verifiedOffer.ticketTierId !== item.ticketTierId) {
-          await tx.ticketTier.update({
-            where: { id: item.ticketTierId },
-            data: {
-              reservedQuantity: {
-                decrement: item.quantity,
-              },
+    // Roll back reservations on payment setup failure using canonical lock order:
+    // Order (FOR UPDATE) -> TicketReservation (ACTIVE FOR UPDATE) -> TicketWaitlistOffer (FOR UPDATE) -> TicketTier (sorted id ASC FOR UPDATE)
+    const rollbackResult = await prisma.$transaction(async (tx) => {
+      const lockedOrders = await tx.$queryRaw<
+        Array<{ id: string; status: OrderStatus }>
+      >`
+        SELECT id, status
+        FROM "Order"
+        WHERE id = ${createdOrder.id}
+        FOR UPDATE
+      `;
+      const lockedOrder = lockedOrders[0];
+      if (!lockedOrder || lockedOrder.status !== OrderStatus.PENDING) {
+        return { cancelled: false, releasedTierIds: [] as string[] };
+      }
+
+      const activeReservations = await tx.$queryRaw<
+        Array<{ id: string; ticketTierId: string; quantity: number }>
+      >`
+        SELECT id, "ticketTierId", quantity
+        FROM "TicketReservation"
+        WHERE "orderId" = ${createdOrder.id}
+          AND status = 'ACTIVE'::"ReservationStatus"
+        ORDER BY id ASC
+        FOR UPDATE
+      `;
+
+      let restoredOfferToUnlinked = false;
+      if (verifiedOffer) {
+        const lockedOffers = await tx.$queryRaw<
+          Array<{ id: string; status: WaitlistOfferStatus; orderId: string | null }>
+        >`
+          SELECT id, status, "orderId"
+          FROM "TicketWaitlistOffer"
+          WHERE id = ${verifiedOffer.id}
+          FOR UPDATE
+        `;
+        const lockedOffer = lockedOffers[0];
+        if (
+          lockedOffer &&
+          lockedOffer.status === WaitlistOfferStatus.PENDING &&
+          lockedOffer.orderId === createdOrder.id
+        ) {
+          await tx.ticketWaitlistOffer.updateMany({
+            where: {
+              id: verifiedOffer.id,
+              status: WaitlistOfferStatus.PENDING,
+              orderId: createdOrder.id,
             },
+            data: { orderId: null },
           });
-        } else if (item.quantity < verifiedOffer.quantity) {
-          const diff = verifiedOffer.quantity - item.quantity;
+          restoredOfferToUnlinked = true;
+        }
+      }
+
+      // Compute signed delta to apply to TicketTier.reservedQuantity per tier (negative = release, positive = restore waitlist hold difference)
+      const tierDeltaMap = new Map<string, number>();
+      const releasedTierSet = new Set<string>();
+
+      for (const res of activeReservations) {
+        if (!verifiedOffer || verifiedOffer.ticketTierId !== res.ticketTierId) {
+          tierDeltaMap.set(res.ticketTierId, (tierDeltaMap.get(res.ticketTierId) || 0) - res.quantity);
+          releasedTierSet.add(res.ticketTierId);
+        } else if (restoredOfferToUnlinked) {
+          if (res.quantity < verifiedOffer.quantity) {
+            const diff = verifiedOffer.quantity - res.quantity;
+            tierDeltaMap.set(res.ticketTierId, (tierDeltaMap.get(res.ticketTierId) || 0) + diff);
+          }
+        } else {
+          tierDeltaMap.set(res.ticketTierId, (tierDeltaMap.get(res.ticketTierId) || 0) - res.quantity);
+          releasedTierSet.add(res.ticketTierId);
+        }
+      }
+
+      const sortedTierIds = Array.from(tierDeltaMap.keys()).sort();
+      if (sortedTierIds.length > 0) {
+        const lockedTiers = await tx.$queryRaw<
+          Array<{ id: string; reservedQuantity: number }>
+        >`
+          SELECT id, "reservedQuantity"
+          FROM "TicketTier"
+          WHERE id = ANY(${sortedTierIds})
+          ORDER BY id ASC
+          FOR UPDATE
+        `;
+        const lockedTierMap = new Map(lockedTiers.map((t) => [t.id, t]));
+
+        for (const tierId of sortedTierIds) {
+          const delta = tierDeltaMap.get(tierId) || 0;
+          const lockedTier = lockedTierMap.get(tierId);
+          if (!lockedTier || delta === 0) continue;
+
+          if (delta < 0 && lockedTier.reservedQuantity < Math.abs(delta)) {
+            console.warn('[InventoryUnderflow]', {
+              context: 'createCheckoutSessionRollback',
+              ticketTierId: tierId,
+              expectedReleaseQty: Math.abs(delta),
+              observedReservedQty: lockedTier.reservedQuantity,
+              clampedReservedQty: 0,
+            });
+          }
+
+          const nextReserved = Math.max(0, lockedTier.reservedQuantity + delta);
           await tx.ticketTier.update({
-            where: { id: item.ticketTierId },
-            data: {
-              reservedQuantity: {
-                increment: diff,
-              },
-            },
+            where: { id: tierId },
+            data: { reservedQuantity: nextReserved },
           });
         }
       }
 
-      if (verifiedOffer) {
-        await tx.ticketWaitlistOffer.update({
-          where: { id: verifiedOffer.id },
-          data: { orderId: null },
+      if (activeReservations.length > 0) {
+        await tx.ticketReservation.updateMany({
+          where: {
+            id: { in: activeReservations.map((r) => r.id) },
+            status: ReservationStatus.ACTIVE,
+          },
+          data: { status: ReservationStatus.RELEASED },
         });
       }
 
-      await tx.ticketReservation.updateMany({
-        where: { orderId: createdOrder.id },
-        data: { status: ReservationStatus.RELEASED },
-      });
-
-      await tx.order.update({
-        where: { id: createdOrder.id },
+      await tx.order.updateMany({
+        where: {
+          id: createdOrder.id,
+          status: OrderStatus.PENDING,
+        },
         data: { status: OrderStatus.CANCELLED },
       });
+
+      return { cancelled: true, releasedTierIds: Array.from(releasedTierSet).sort() };
     });
 
-    for (const item of createdOrder.items) {
-      processWaitlistForTier(item.ticketTierId).catch(() => {});
+    if (rollbackResult.cancelled) {
+      for (const tierId of rollbackResult.releasedTierIds) {
+        processWaitlistForTier(tierId).catch(() => {});
+      }
     }
 
     throw new BadRequestError('Payment provider session creation failed. Your reservation was safely released.');

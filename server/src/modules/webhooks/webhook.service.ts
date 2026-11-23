@@ -260,23 +260,97 @@ export async function handlePaymentIntentSucceeded(
   });
 
   await tx.ticketReservation.updateMany({
-    where: { orderId: order.id },
+    where: { orderId: order.id, status: ReservationStatus.ACTIVE },
     data: { status: ReservationStatus.CONFIRMED },
   });
 
-  // Shift reserved inventory to sold counts
+  // Canonical lock order: Order -> TicketReservation -> TicketWaitlistOffer -> TicketWaitlistEntry -> TicketTier (sorted id ASC)
+  // Claim linked waitlist offers BEFORE acquiring TicketTier locks to prevent Offer <-> Tier cycles.
+  const linkedOffers = await tx.$queryRaw<
+    Array<{ id: string; entryId: string }>
+  >`
+    SELECT id, "entryId"
+    FROM "TicketWaitlistOffer"
+    WHERE "orderId" = ${order.id}
+    ORDER BY id ASC
+    FOR UPDATE
+  `;
+
+  if (linkedOffers.length > 0) {
+    const offerIds = linkedOffers.map((o) => o.id);
+    const entryIds = Array.from(new Set(linkedOffers.map((o) => o.entryId)));
+
+    await tx.ticketWaitlistOffer.updateMany({
+      where: { id: { in: offerIds } },
+      data: {
+        status: WaitlistOfferStatus.ACCEPTED,
+        claimedAt: new Date(),
+      },
+    });
+
+    await tx.ticketWaitlistEntry.updateMany({
+      where: { id: { in: entryIds } },
+      data: {
+        status: WaitlistEntryStatus.PURCHASED,
+      },
+    });
+  }
+
+  // Shift reserved inventory to sold counts in deterministic sorted ticketTierId order
   const hasActiveReservations = order.reservations.some(
     (r) => r.status === ReservationStatus.ACTIVE
   );
 
+  const tierQuantityMap = new Map<string, number>();
   for (const item of order.items) {
-    await tx.ticketTier.update({
-      where: { id: item.ticketTierId },
-      data: {
-        ...(hasActiveReservations ? { reservedQuantity: { decrement: item.quantity } } : {}),
-        soldQuantity: { increment: item.quantity },
-      },
-    });
+    tierQuantityMap.set(
+      item.ticketTierId,
+      (tierQuantityMap.get(item.ticketTierId) || 0) + item.quantity
+    );
+  }
+  const sortedTierIds = Array.from(tierQuantityMap.keys()).sort();
+
+  if (sortedTierIds.length > 0) {
+    const lockedTiers = await tx.$queryRaw<
+      Array<{ id: string; reservedQuantity: number }>
+    >`
+      SELECT id, "reservedQuantity"
+      FROM "TicketTier"
+      WHERE id = ANY(${sortedTierIds})
+      ORDER BY id ASC
+      FOR UPDATE
+    `;
+    const lockedTierMap = new Map(lockedTiers.map((t) => [t.id, t]));
+
+    for (const tierId of sortedTierIds) {
+      const qty = tierQuantityMap.get(tierId) || 0;
+      const lockedTier = lockedTierMap.get(tierId);
+      if (!lockedTier || qty <= 0) continue;
+
+      let nextReservedUpdate: { reservedQuantity?: number } = {};
+      if (hasActiveReservations) {
+        if (lockedTier.reservedQuantity < qty) {
+          console.warn('[InventoryUnderflow]', {
+            context: 'handlePaymentIntentSucceeded',
+            ticketTierId: tierId,
+            expectedReleaseQty: qty,
+            observedReservedQty: lockedTier.reservedQuantity,
+            clampedReservedQty: 0,
+          });
+        }
+        nextReservedUpdate = {
+          reservedQuantity: Math.max(0, lockedTier.reservedQuantity - qty),
+        };
+      }
+
+      await tx.ticketTier.update({
+        where: { id: tierId },
+        data: {
+          ...nextReservedUpdate,
+          soldQuantity: { increment: qty },
+        },
+      });
+    }
   }
 
   let issuedTicketCount = order.tickets.length;
@@ -313,28 +387,6 @@ export async function handlePaymentIntentSucceeded(
         amountInCents: paymentIntent.amount || order.totalInCents,
         currency: order.currency,
         rawResponse: paymentIntent as any,
-      },
-    });
-  }
-
-  // Claim any waitlist offers fulfilled by this order
-  const linkedOffers = await tx.ticketWaitlistOffer.findMany({
-    where: { orderId: order.id },
-  });
-
-  for (const offer of linkedOffers) {
-    await tx.ticketWaitlistOffer.update({
-      where: { id: offer.id },
-      data: {
-        status: WaitlistOfferStatus.ACCEPTED,
-        claimedAt: new Date(),
-      },
-    });
-
-    await tx.ticketWaitlistEntry.update({
-      where: { id: offer.entryId },
-      data: {
-        status: WaitlistEntryStatus.PURCHASED,
       },
     });
   }
