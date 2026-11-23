@@ -44,6 +44,8 @@ import {
   populateUserAuthCacheAtomically,
   checkRedisRateLimit,
   checkRedisRateLimitWithRetryAfter,
+  checkRedisSlidingWindowRateLimit,
+  resetSlidingWindowRateLimitsByPrefixForTests,
   acquireOwnedRedisCooldown,
   releaseOwnedRedisCooldown,
   hashRateLimitIdentifier,
@@ -103,30 +105,12 @@ function wrapOtpRedisError(err: unknown): never {
   );
 }
 
-const verifyAttemptTimestamps = new Map<string, number[]>();
-const resendRequestTimestamps = new Map<string, number[]>();
+const OTP_VERIFY_RATE_LIMIT_PREFIX = 'otp_verify:';
+const OTP_RESEND_RATE_LIMIT_PREFIX = 'otp_resend:';
 
-export function resetVerificationRateLimits(): void {
-  verifyAttemptTimestamps.clear();
-  resendRequestTimestamps.clear();
-}
-
-function checkSlidingWindowRateLimit(
-  store: Map<string, number[]>,
-  key: string,
-  maxRequests: number,
-  windowMs: number
-): boolean {
-  const now = Date.now();
-  const existing = store.get(key) || [];
-  const active = existing.filter((ts) => now - ts < windowMs);
-  if (active.length >= maxRequests) {
-    store.set(key, active);
-    return false;
-  }
-  active.push(now);
-  store.set(key, active);
-  return true;
+export async function resetVerificationRateLimits(): Promise<void> {
+  await resetSlidingWindowRateLimitsByPrefixForTests(OTP_VERIFY_RATE_LIMIT_PREFIX);
+  await resetSlidingWindowRateLimitsByPrefixForTests(OTP_RESEND_RATE_LIMIT_PREFIX);
 }
 
 export function hashVerificationCode(userId: string, code: string): string {
@@ -388,18 +372,17 @@ export async function verifyEmail(req: Request, res: Response, next: NextFunctio
       );
     }
 
-    const rateKey = `verify:${targetUser.id}`;
-    if (
-      !checkSlidingWindowRateLimit(
-        verifyAttemptTimestamps,
-        rateKey,
-        MAX_VERIFY_REQUESTS_PER_WINDOW,
-        RATE_LIMIT_WINDOW_MS
-      )
-    ) {
+    const rateKey = `${OTP_VERIFY_RATE_LIMIT_PREFIX}${hashRateLimitIdentifier(targetUser.id)}`;
+    const verifyRate = await checkRedisSlidingWindowRateLimit(
+      rateKey,
+      MAX_VERIFY_REQUESTS_PER_WINDOW,
+      RATE_LIMIT_WINDOW_MS
+    );
+    if (!verifyRate.allowed) {
       throw new TooManyRequestsError(
         'Too many verification attempts. Please wait before trying again.',
-        'VERIFICATION_RATE_LIMIT'
+        'VERIFICATION_RATE_LIMIT',
+        verifyRate.retryAfterSeconds
       );
     }
 
@@ -592,18 +575,17 @@ export async function resendVerification(
       );
     }
 
-    const rateKey = `resend:${targetUser.id}`;
-    if (
-      !checkSlidingWindowRateLimit(
-        resendRequestTimestamps,
-        rateKey,
-        MAX_RESEND_REQUESTS_PER_WINDOW,
-        RATE_LIMIT_WINDOW_MS
-      )
-    ) {
+    const rateKey = `${OTP_RESEND_RATE_LIMIT_PREFIX}${hashRateLimitIdentifier(targetUser.id)}`;
+    const resendRate = await checkRedisSlidingWindowRateLimit(
+      rateKey,
+      MAX_RESEND_REQUESTS_PER_WINDOW,
+      RATE_LIMIT_WINDOW_MS
+    );
+    if (!resendRate.allowed) {
       throw new TooManyRequestsError(
         'Too many verification code requests. Please try again later.',
-        'VERIFICATION_RESEND_RATE_LIMIT'
+        'VERIFICATION_RESEND_RATE_LIMIT',
+        resendRate.retryAfterSeconds
       );
     }
 

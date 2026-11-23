@@ -64,10 +64,10 @@ describe('Account, Role, Email Verification, Organizer Onboarding & Admin Archit
     seededActiveTierId = validTier ? validTier.id : chosenEvent!.ticketTiers[0].id;
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     resetSentVerificationEmails();
     resetRecordedAdminAuditLogs();
-    resetVerificationRateLimits();
+    await resetVerificationRateLimits();
     vi.restoreAllMocks();
   });
 

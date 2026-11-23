@@ -587,6 +587,50 @@ export async function resolveRotatedSessionUserId(req: Request): Promise<string 
   }
 }
 
+export const SLIDING_WINDOW_RATE_LIMIT_PREFIX = 'ratelimit:sliding:';
+
+/**
+ * Enforces an atomic, Redis-backed genuine sliding-window rate limit using
+ * sorted-set timestamps via Lua. Fails closed when Redis is unavailable.
+ */
+export async function checkRedisSlidingWindowRateLimit(
+  key: string,
+  maxRequests: number,
+  windowMs: number,
+  nowMs?: number
+): Promise<{ allowed: boolean; count: number; retryAfterSeconds: number }> {
+  try {
+    const redis = getRedisClient();
+    const fullKey = `${SLIDING_WINDOW_RATE_LIMIT_PREFIX}${key}`;
+    const result = await redis.consumeSlidingWindowRateLimit(
+      fullKey,
+      maxRequests,
+      windowMs,
+      nowMs
+    );
+    const retryAfterSeconds = result.allowed
+      ? 0
+      : Math.max(1, Math.ceil(result.retryAfterMs / 1000));
+    return {
+      allowed: result.allowed,
+      count: result.count,
+      retryAfterSeconds,
+    };
+  } catch (err) {
+    wrapRedisError(err);
+  }
+}
+
+export async function resetSlidingWindowRateLimitsByPrefixForTests(prefix: string): Promise<void> {
+  if ((process.env.NODE_ENV || env.NODE_ENV) === 'production') {
+    throw new Error('resetSlidingWindowRateLimitsByPrefixForTests is not permitted in production');
+  }
+  const redis = getRedisClient();
+  if (redis.delByPrefixForTests) {
+    await redis.delByPrefixForTests(`${SLIDING_WINDOW_RATE_LIMIT_PREFIX}${prefix}`);
+  }
+}
+
 export async function checkRedisRateLimit(
   key: string,
   maxRequests: number,

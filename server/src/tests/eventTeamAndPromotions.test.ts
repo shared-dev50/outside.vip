@@ -698,6 +698,7 @@ describe('Event Teams, Invitations & Host Promotional Tools (Stage 2)', () => {
         data: {
           email: `event_host2_${testRunId}@outside.vip`,
           name: 'Stage 2 Host Two',
+          passwordHash: '$2a$10$Stage2AdminFixturePasswordHash000000000000000000000000',
           role: 'ATTENDEE',
           emailVerified: true,
           emailVerifiedAt: new Date(),
@@ -1157,6 +1158,7 @@ describe('Event Teams, Invitations & Host Promotional Tools (Stage 2)', () => {
           data: {
             email: `archived_host_${testRunId}@outside.vip`,
             name: 'Archived Host User',
+            passwordHash: '$2a$10$Stage2AdminFixturePasswordHash000000000000000000000000',
             role: 'ATTENDEE',
             emailVerified: true,
             emailVerifiedAt: new Date(),

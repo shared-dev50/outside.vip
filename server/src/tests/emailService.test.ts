@@ -27,11 +27,11 @@ describe('Resend Email Service Hardening & Delivery Reliability', () => {
   };
   const createdUserIds: string[] = [];
 
-  beforeEach(() => {
+  beforeEach(async () => {
     resetSentVerificationEmails();
     resetSentStaffInvitationEmails();
     resetEmailServiceTestOptions();
-    resetVerificationRateLimits();
+    await resetVerificationRateLimits();
     vi.restoreAllMocks();
   });
 
