@@ -422,6 +422,8 @@ model TicketTier {
   validityStartAt  DateTime?
   validityEndAt    DateTime?
   status           TicketTierStatus @default(ACTIVE)
+  isHidden         Boolean          @default(false)
+  salesDisabled    Boolean          @default(false)
   waitlistEnabled  Boolean          @default(false)
 
   createdAt DateTime @default(now())

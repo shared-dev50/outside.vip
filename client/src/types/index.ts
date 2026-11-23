@@ -113,6 +113,8 @@ export interface TicketTier {
   validityStartAt?: string | null;
   validityEndAt?: string | null;
   status: TicketTierStatus;
+  isHidden?: boolean;
+  salesDisabled?: boolean;
   isAvailable?: boolean;
   isSalesPending?: boolean;
   isSalesEnded?: boolean;

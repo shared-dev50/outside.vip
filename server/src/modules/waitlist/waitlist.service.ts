@@ -16,6 +16,7 @@ import {
   ForbiddenError,
 } from '../../utils/errors.js';
 import { sendWaitlistOfferEmail } from './waitlistEmail.service.js';
+import { isTicketTierHidden, isTicketTierSalesDisabled } from '../../utils/ticketTierState.js';
 
 export const OFFER_EXPIRY_MINUTES = 30;
 
@@ -60,8 +61,12 @@ export async function joinWaitlist(input: JoinWaitlistInput) {
     },
   });
 
-  if (!tier || tier.eventId !== input.eventId) {
+  if (!tier || tier.eventId !== input.eventId || isTicketTierHidden(tier)) {
     throw new NotFoundError('Ticket tier not found for this event');
+  }
+
+  if (isTicketTierSalesDisabled(tier)) {
+    throw new BadRequestError('Sales are currently disabled for this ticket tier');
   }
 
   if (tier.event.status === EventStatus.CANCELLED) {
@@ -176,7 +181,13 @@ export async function processWaitlistForTier(
       },
     });
 
-    if (!tier || !tier.waitlistEnabled || tier.event.status === EventStatus.CANCELLED) {
+    if (
+      !tier ||
+      !tier.waitlistEnabled ||
+      isTicketTierHidden(tier) ||
+      isTicketTierSalesDisabled(tier) ||
+      tier.event.status === EventStatus.CANCELLED
+    ) {
       return { ticketTierId, offersCreated: 0, availableRemaining: 0, createdOffersList: [] };
     }
 
@@ -347,6 +358,9 @@ export async function lookupWaitlistOffer(rawToken: string) {
           currency: true,
           totalCapacity: true,
           maxPerOrder: true,
+          status: true,
+          isHidden: true,
+          salesDisabled: true,
         },
       },
       event: {
@@ -432,6 +446,16 @@ export async function lookupWaitlistOffer(rawToken: string) {
         offer.status === WaitlistOfferStatus.ACCEPTED
           ? 'This waitlist offer has already been claimed and purchased.'
           : 'This waitlist offer is no longer valid.',
+      event: offer.event,
+    };
+  }
+
+  if (isTicketTierHidden(offer.ticketTier) || isTicketTierSalesDisabled(offer.ticketTier)) {
+    return {
+      valid: false,
+      expired: false,
+      status: offer.status,
+      message: 'Sales for this ticket are currently unavailable.',
       event: offer.event,
     };
   }

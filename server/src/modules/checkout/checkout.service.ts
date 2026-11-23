@@ -4,6 +4,7 @@ import { prisma } from '../../db/prisma.js';
 import { stripe } from '../../lib/stripe.js';
 import { env } from '../../config/env.js';
 import { BadRequestError, ConflictError, NotFoundError, ForbiddenError } from '../../utils/errors.js';
+import { isTicketTierHidden, isTicketTierSalesDisabled } from '../../utils/ticketTierState.js';
 import { verifyEventAccessToken } from '../events/passwordAccess.service.js';
 import { hashOfferToken, processWaitlistForTier } from '../waitlist/waitlist.service.js';
 import {
@@ -255,6 +256,14 @@ export async function createCheckoutSession(
   for (const tier of foundTiers) {
     const qty = requestedTierMap.get(tier.id)!;
 
+    if (isTicketTierHidden(tier)) {
+      throw new BadRequestError(`Ticket tier '${tier.name}' is currently unavailable for purchase`);
+    }
+
+    if (isTicketTierSalesDisabled(tier)) {
+      throw new BadRequestError(`Sales for '${tier.name}' are currently disabled`);
+    }
+
     if (tier.status !== TicketTierStatus.ACTIVE) {
       throw new BadRequestError(`Ticket tier '${tier.name}' is currently unavailable for purchase`);
     }
@@ -307,9 +316,12 @@ export async function createCheckoutSession(
             priceInCents: number;
             currency: string;
             name: string;
+            status: TicketTierStatus;
+            isHidden: boolean;
+            salesDisabled: boolean;
           }>
         >`
-          SELECT id, "totalCapacity", "soldQuantity", "reservedQuantity", "priceInCents", currency, name
+          SELECT id, "totalCapacity", "soldQuantity", "reservedQuantity", "priceInCents", currency, name, status, "isHidden", "salesDisabled"
           FROM "TicketTier"
           WHERE id = ANY(${tierIds})
           FOR UPDATE
@@ -326,6 +338,18 @@ export async function createCheckoutSession(
           const locked = lockedMap.get(item.ticketTierId);
           if (!locked) {
             throw new BadRequestError(`Ticket tier '${item.ticketTierId}' not found`);
+          }
+
+          if (isTicketTierHidden(locked)) {
+            throw new BadRequestError(`Ticket tier '${locked.name}' is currently unavailable for purchase`);
+          }
+
+          if (isTicketTierSalesDisabled(locked)) {
+            throw new BadRequestError(`Sales for '${locked.name}' are currently disabled`);
+          }
+
+          if (locked.status !== TicketTierStatus.ACTIVE) {
+            throw new BadRequestError(`Ticket tier '${locked.name}' is currently unavailable for purchase`);
           }
 
           const isOfferItem = verifiedOffer && verifiedOffer.ticketTierId === item.ticketTierId;

@@ -7,7 +7,6 @@ import { EmailVerificationGate } from '../components/auth/EmailVerificationGate'
 import { AuthFormCard } from '../components/auth/AuthFormCard';
 import {
   EventCategory,
-  TicketTierStatus,
   RecurrenceFrequency,
   EventFeatureType,
   EventGalleryImage,
@@ -46,7 +45,6 @@ import {
   ArrowDown,
 } from 'lucide-react';
 import {
-  calculateTierEarnings,
   calculateCombinedEarnings,
   calculateDisplayPriceFromGross,
   calculateGrossPriceFromDisplay,
@@ -56,6 +54,7 @@ import { extractYouTubeVideoId, getYouTubeEmbedUrl } from '../lib/youtube';
 import { ImageCropModal } from '../components/events/ImageCropModal';
 import { UploadProgressCard, UploadProgressInfo } from '../components/events/UploadProgressCard';
 import { LocationAutocompleteInput } from '../components/events/LocationAutocompleteInput';
+import { TicketTierEditorSection } from '../components/events/TicketTierEditorSection';
 import {
   TIMEZONE_GROUPS,
   formatTimezoneDisplay,
@@ -65,31 +64,17 @@ import {
 } from '../lib/timezone';
 import { validateImageFile } from '../lib/imageCrop';
 import { NumericInput } from '../components/common/NumericInput';
+import {
+  FormTicketTier,
+  TicketTierFieldErrors,
+  createEmptyTicketTier,
+  mapExistingTicketTierToForm,
+  validateTicketTiers,
+  buildTicketTierPayload,
+  computeVisibleMinDisplayPrice,
+} from '../lib/ticketCreation';
 
 export type WizardStep = 1 | 2 | 3 | 4;
-
-interface FormTicketTier {
-  id?: string;
-  tempId: string;
-  name: string;
-  description: string;
-  price: number | ''; // Gross price in USD (organiser earns before fees)
-  displayPrice: number | ''; // All-in Display price in USD (customer pays incl fees)
-  totalCapacity: number | '';
-  minPerOrder: number | '';
-  maxPerOrder: number | '';
-  hasSalesPeriod?: boolean;
-  salesStartAt: string;
-  salesEndAt: string;
-  hasTicketValidity?: boolean;
-  validityStartAt?: string;
-  validityEndAt?: string;
-  status: TicketTierStatus;
-  soldQuantity?: number;
-  waitlistEnabled?: boolean;
-  waitlistWaitingCount?: number;
-  waitlistOfferedCount?: number;
-}
 
 const PRESET_COVERS = [
   {
@@ -249,44 +234,10 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
   const [cancelReason, setCancelReason] = useState('');
   const [cancelSeriesMode, setCancelSeriesMode] = useState(false);
 
-  const [ticketTiers, setTicketTiers] = useState<FormTicketTier[]>([
-    {
-      tempId: 'default-1',
-      name: 'Early Bird General Admission',
-      description: 'Standard entrance with early arrival benefits before 10 PM.',
-      price: 25,
-      displayPrice: calculateDisplayPriceFromGross(2500) / 100,
-      totalCapacity: 250,
-      minPerOrder: 1,
-      maxPerOrder: 6,
-      hasSalesPeriod: false,
-      salesStartAt: '',
-      salesEndAt: '',
-      hasTicketValidity: false,
-      validityStartAt: '',
-      validityEndAt: '',
-      status: 'ACTIVE',
-      waitlistEnabled: false,
-    },
-    {
-      tempId: 'default-2',
-      name: 'VIP Deck & Lounge',
-      description: 'Expedited admission line, elevated sound deck, and complimentary welcome drink.',
-      price: 75,
-      displayPrice: calculateDisplayPriceFromGross(7500) / 100,
-      totalCapacity: 100,
-      minPerOrder: 1,
-      maxPerOrder: 4,
-      hasSalesPeriod: false,
-      salesStartAt: '',
-      salesEndAt: '',
-      hasTicketValidity: false,
-      validityStartAt: '',
-      validityEndAt: '',
-      status: 'ACTIVE',
-      waitlistEnabled: false,
-    },
-  ]);
+  const [ticketTiers, setTicketTiers] = useState<FormTicketTier[]>([]);
+  const [tierValidationErrors, setTierValidationErrors] = useState<
+    Record<string, TicketTierFieldErrors>
+  >({});
 
   const [notification, setNotification] = useState<{
     type: 'success' | 'error';
@@ -332,41 +283,16 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
       }
 
       if (evt.ticketTiers && evt.ticketTiers.length > 0) {
+        const tierTz = evt.timezone || DEFAULT_US_TIMEZONE;
         setTicketTiers(
-          evt.ticketTiers.map((tier) => {
-            const grossPrice = tier.priceInCents / 100;
-            const displayPrice =
-              tier.displayPriceInCents !== undefined
-                ? tier.displayPriceInCents / 100
-                : calculateDisplayPriceFromGross(tier.priceInCents) / 100;
-            const hasSales = Boolean(tier.salesStartAt || tier.salesEndAt);
-            const hasValidity = Boolean(tier.validityStartAt || tier.validityEndAt);
-            const tierTz = evt.timezone || DEFAULT_US_TIMEZONE;
-            return {
-              id: tier.id,
-              tempId: tier.id,
-              name: tier.name,
-              description: tier.description || '',
-              price: grossPrice,
-              displayPrice,
-              totalCapacity: tier.totalCapacity,
-              minPerOrder: tier.minPerOrder,
-              maxPerOrder: tier.maxPerOrder,
-              hasSalesPeriod: hasSales,
-              salesStartAt: toInputValueInTimezone(tier.salesStartAt, tierTz),
-              salesEndAt: toInputValueInTimezone(tier.salesEndAt, tierTz),
-              hasTicketValidity: hasValidity,
-              validityStartAt: toInputValueInTimezone(tier.validityStartAt, tierTz),
-              validityEndAt: toInputValueInTimezone(tier.validityEndAt, tierTz),
-              status: tier.status,
-              soldQuantity: tier.soldQuantity,
-              waitlistEnabled: Boolean(tier.waitlistEnabled),
-              waitlistWaitingCount: tier.waitlistWaitingCount || 0,
-              waitlistOfferedCount: tier.waitlistOfferedCount || 0,
-            };
-          })
+          evt.ticketTiers.map((tier) =>
+            mapExistingTicketTierToForm(tier, tierTz, toInputValueInTimezone)
+          )
         );
+      } else {
+        setTicketTiers([]);
       }
+      setTierValidationErrors({});
       if (evt.galleryImages && Array.isArray(evt.galleryImages)) {
         setGalleryImages(evt.galleryImages);
       }
@@ -394,27 +320,7 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
   }, [startAt, isEditing]);
 
   const addTicketTier = () => {
-    setTicketTiers((prev) => [
-      ...prev,
-      {
-        tempId: Math.random().toString(36).substring(7),
-        name: 'General Admission',
-        description: 'Standard event entry pass.',
-        price: 40,
-        displayPrice: calculateDisplayPriceFromGross(4000) / 100,
-        totalCapacity: 300,
-        minPerOrder: 1,
-        maxPerOrder: 6,
-        hasSalesPeriod: false,
-        salesStartAt: '',
-        salesEndAt: '',
-        hasTicketValidity: false,
-        validityStartAt: '',
-        validityEndAt: '',
-        status: 'ACTIVE',
-        waitlistEnabled: false,
-      },
-    ]);
+    setTicketTiers((prev) => [...prev, createEmptyTicketTier()]);
     setHasUnsavedChanges(true);
   };
 
@@ -423,19 +329,27 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
     if (tier && tier.soldQuantity && tier.soldQuantity > 0) {
       showNotification(
         'error',
-        `Tier "${tier.name}" already has ${tier.soldQuantity} ticket sale(s) and cannot be deleted. You can mark it as HIDDEN or PAUSED instead.`
+        `Ticket "${tier.name}" already has ${tier.soldQuantity} ticket sale(s) and cannot be deleted. You can hide it or disable ticket sales under Additional settings instead.`
       );
       return;
     }
-    if (ticketTiers.length <= 1) {
-      showNotification('error', 'An event must have at least one ticket tier.');
-      return;
-    }
     setTicketTiers((prev) => prev.filter((t) => t.tempId !== tempId));
+    setTierValidationErrors((prev) => {
+      if (!prev[tempId]) return prev;
+      const next = { ...prev };
+      delete next[tempId];
+      return next;
+    });
     setHasUnsavedChanges(true);
   };
 
   const updateTier = (tempId: string, field: keyof FormTicketTier, value: any) => {
+    setTierValidationErrors((prev) => {
+      if (!prev[tempId]) return prev;
+      const next = { ...prev };
+      delete next[tempId];
+      return next;
+    });
     setTicketTiers((prev) =>
       prev.map((tier) => {
         if (tier.tempId !== tempId) return tier;
@@ -997,55 +911,11 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
         }
       }
     } else if (stepNumber === 3) {
-      if (ticketTiers.length === 0) {
-        showNotification('error', 'At least one ticket tier is required.');
+      const validation = validateTicketTiers(ticketTiers, { requireAtLeastOne: true });
+      setTierValidationErrors(validation.tierErrors);
+      if (!validation.isValid) {
+        showNotification('error', validation.summaryError || 'Please complete all required ticket fields.');
         return false;
-      }
-      for (const tier of ticketTiers) {
-        if (!tier.name.trim()) {
-          showNotification('error', 'All ticket tiers must have a valid tier name.');
-          return false;
-        }
-        if (tier.totalCapacity === '' || Number(tier.totalCapacity) < 1) {
-          showNotification('error', `Capacity for "${tier.name}" must be at least 1.`);
-          return false;
-        }
-        if (tier.price === '' || isNaN(Number(tier.price)) || Number(tier.price) < 0) {
-          showNotification('error', `Please provide a valid price for "${tier.name}" (enter 0 for free admission).`);
-          return false;
-        }
-        if (tier.minPerOrder !== '' && Number(tier.minPerOrder) < 1) {
-          showNotification('error', `Min per order for "${tier.name}" must be at least 1.`);
-          return false;
-        }
-        if (tier.maxPerOrder !== '' && Number(tier.maxPerOrder) < 1) {
-          showNotification('error', `Max per order for "${tier.name}" must be at least 1.`);
-          return false;
-        }
-        if (tier.minPerOrder !== '' && tier.maxPerOrder !== '' && Number(tier.maxPerOrder) < Number(tier.minPerOrder)) {
-          showNotification('error', `Max per order cannot be less than min per order for "${tier.name}".`);
-          return false;
-        }
-        if (tier.hasSalesPeriod) {
-          if (tier.salesStartAt && tier.salesEndAt) {
-            const startMs = new Date(tier.salesStartAt).getTime();
-            const endMs = new Date(tier.salesEndAt).getTime();
-            if (endMs <= startMs) {
-              showNotification('error', `Sales start time must precede sales end time for "${tier.name}".`);
-              return false;
-            }
-          }
-        }
-        if (tier.hasTicketValidity) {
-          if (tier.validityStartAt && tier.validityEndAt) {
-            const startMs = new Date(tier.validityStartAt).getTime();
-            const endMs = new Date(tier.validityEndAt).getTime();
-            if (endMs <= startMs) {
-              showNotification('error', `Ticket validity start time must precede validity end time for "${tier.name}".`);
-              return false;
-            }
-          }
-        }
       }
     }
     return true;
@@ -1069,30 +939,9 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
 
   const buildPayload = (statusOverride?: 'DRAFT' | 'PUBLISHED') => {
     const eventTz = timezone || DEFAULT_US_TIMEZONE;
-    const formattedTiers = ticketTiers.map((tier) => {
-      const priceInCents = Math.round((Number(tier.price) || 0) * 100);
-      const displayPriceInCents = calculateDisplayPriceFromGross(priceInCents);
-      return {
-        ...(tier.id ? { id: tier.id } : {}),
-        name: tier.name.trim() || 'General Admission',
-        description: tier.description.trim() || null,
-        priceInCents,
-        displayPriceInCents,
-        currency: 'USD',
-        totalCapacity: Math.max(1, Number(tier.totalCapacity) || 1),
-        minPerOrder: Math.max(1, Number(tier.minPerOrder) || 1),
-        maxPerOrder: Math.max(
-          Math.max(1, Number(tier.minPerOrder) || 1),
-          Number(tier.maxPerOrder) || 1
-        ),
-        salesStartAt: tier.hasSalesPeriod && tier.salesStartAt ? toIsoValueInTimezone(tier.salesStartAt, eventTz) : null,
-        salesEndAt: tier.hasSalesPeriod && tier.salesEndAt ? toIsoValueInTimezone(tier.salesEndAt, eventTz) : null,
-        validityStartAt: tier.hasTicketValidity && tier.validityStartAt ? toIsoValueInTimezone(tier.validityStartAt, eventTz) : null,
-        validityEndAt: tier.hasTicketValidity && tier.validityEndAt ? toIsoValueInTimezone(tier.validityEndAt, eventTz) : null,
-        status: tier.status,
-        waitlistEnabled: Boolean(tier.waitlistEnabled),
-      };
-    });
+    const formattedTiers = ticketTiers.map((tier) =>
+      buildTicketTierPayload(tier, eventTz, toIsoValueInTimezone)
+    );
 
     const fullDescription = doorPolicy.trim() && !description.includes(doorPolicy.trim())
       ? (description.trim() ? `${description.trim()}\n\nDoor Policy: ${doorPolicy.trim()}` : `Door Policy: ${doorPolicy.trim()}`)
@@ -1186,9 +1035,16 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
           if (!city.trim()) {
             throw new Error('City is required before publishing.');
           }
-          if (ticketTiers.length === 0) {
-            throw new Error('At least one ticket tier is required to publish.');
-          }
+        }
+
+        const willBePublished = publish || currentStatus === 'PUBLISHED';
+        const ticketValidation = validateTicketTiers(ticketTiers, {
+          requireAtLeastOne: willBePublished,
+          requireVisibleForPublish: willBePublished,
+        });
+        setTierValidationErrors(ticketValidation.tierErrors);
+        if (!ticketValidation.isValid) {
+          throw new Error(ticketValidation.summaryError || 'Please complete all required ticket fields.');
         }
 
         const payload = buildPayload(publish ? 'PUBLISHED' : undefined);
@@ -1624,17 +1480,11 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
                 <div className="flex justify-between">
                   <span>Display Price (From):</span>
                   <span className="text-stone-900 font-bold">
-                    {ticketTiers.length > 0
-                      ? (() => {
-                          const minDisplay = Math.min(
-                            ...ticketTiers.map((t) => {
-                              const p = Number(t.price) || 0;
-                              return p > 0 ? calculateDisplayPriceFromGross(Math.round(p * 100)) / 100 : 0;
-                            })
-                          );
-                          return minDisplay === 0 ? 'Free' : `$${minDisplay.toFixed(2)}`;
-                        })()
-                      : '$0.00'}
+                    {(() => {
+                      const minDisplay = computeVisibleMinDisplayPrice(ticketTiers);
+                      if (minDisplay === null) return '—';
+                      return minDisplay === 0 ? 'Free' : `$${minDisplay.toFixed(2)}`;
+                    })()}
                   </span>
                 </div>
                 <div className="flex justify-between">
@@ -2507,430 +2357,14 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
                   </p>
                 </div>
 
-                <div className="space-y-4">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <h3 className="text-sm font-display font-black text-stone-900 uppercase tracking-tight">
-                        Ticket Tiers & Capacity
-                      </h3>
-                      <p className="text-xs text-stone-500 font-sans">
-                        Each tier supports independent pricing, inventory reservation, and per-order restrictions. Free tickets ($0) supported.
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={addTicketTier}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-stone-900 hover:bg-black text-white font-mono text-xs font-semibold uppercase tracking-wider transition-colors shadow-2xs shrink-0"
-                    >
-                      <Plus className="w-3.5 h-3.5" />
-                      <span>Add Tier</span>
-                    </button>
-                  </div>
-
-                  <div className="space-y-4">
-                    {ticketTiers.map((tier, idx) => {
-                      const tierEarnings = calculateTierEarnings(
-                        Math.round((Number(tier.price) || 0) * 100),
-                        Math.max(0, Number(tier.totalCapacity) || 0)
-                      );
-
-                      return (
-                        <div
-                          key={tier.tempId}
-                          className="rounded-xl border border-stone-200 bg-[#FAF8F5] p-5 space-y-4"
-                        >
-                          <div className="flex items-center justify-between gap-3">
-                            <div className="flex items-center gap-2">
-                              <span className="w-6 h-6 rounded-full bg-stone-200 text-stone-700 font-mono text-xs font-bold flex items-center justify-center">
-                                {idx + 1}
-                              </span>
-                              <span className="font-display font-black text-base text-stone-900 uppercase">
-                                {tier.name || 'Untitled Tier'}
-                              </span>
-                              {tier.soldQuantity && tier.soldQuantity > 0 ? (
-                                <span className="px-2 py-0.5 rounded text-[10px] font-mono uppercase bg-emerald-50 text-emerald-700 border border-emerald-300 font-bold">
-                                  {tier.soldQuantity} Sold
-                                </span>
-                              ) : null}
-                            </div>
-                            <button
-                              type="button"
-                              onClick={() => removeTicketTier(tier.tempId)}
-                              className="p-1.5 rounded-md hover:bg-stone-200/80 text-stone-400 hover:text-rose-600 transition-colors"
-                              title="Delete Tier"
-                            >
-                              <Trash2 className="w-4 h-4" />
-                            </button>
-                          </div>
-
-                          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                            <div className="sm:col-span-2">
-                              <label className="block text-[11px] font-mono uppercase text-stone-700 font-bold mb-1">
-                                Tier Name <span className="text-rose-600">*</span>
-                              </label>
-                              <input
-                                type="text"
-                                value={tier.name}
-                                onChange={(e) => updateTier(tier.tempId, 'name', e.target.value)}
-                                className="w-full px-3 py-2 rounded-lg bg-white border border-stone-300 text-stone-900 text-xs focus:outline-none focus:border-stone-900"
-                              />
-                            </div>
-                            <div>
-                              <label className="block text-[11px] font-mono uppercase text-stone-700 font-bold mb-1">
-                                Status
-                              </label>
-                              <select
-                                value={tier.status}
-                                onChange={(e) => updateTier(tier.tempId, 'status', e.target.value as TicketTierStatus)}
-                                className="w-full px-3 py-2 rounded-lg bg-white border border-stone-300 text-stone-900 text-xs focus:outline-none focus:border-stone-900"
-                              >
-                                <option value="ACTIVE">ACTIVE (On Sale)</option>
-                                <option value="PAUSED">PAUSED (Paused)</option>
-                                <option value="HIDDEN">HIDDEN (Secret)</option>
-                              </select>
-                            </div>
-                          </div>
-
-                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 p-3.5 rounded-lg bg-stone-100/70 border border-stone-200">
-                            <div>
-                              <div className="flex items-center justify-between mb-1">
-                                <label className="text-[11px] font-mono uppercase text-stone-800 font-bold">
-                                  Gross Price (You Receive) <span className="text-rose-600">*</span>
-                                </label>
-                                <span className="text-[10px] text-stone-500 font-sans">Before fees</span>
-                              </div>
-                              <NumericInput
-                                value={tier.price}
-                                onChange={(val) => updateTier(tier.tempId, 'price', val)}
-                                min={0}
-                                step={1}
-                                allowDecimals={true}
-                                decimalPlaces={2}
-                                prefix="$"
-                                placeholder="20.00"
-                                className="w-full px-3 py-2 rounded-lg bg-white border border-stone-300 text-stone-900 text-xs font-mono font-semibold focus:outline-none focus:border-stone-900"
-                              />
-                              <p className="text-[10px] text-stone-500 mt-1 leading-tight">
-                                Amount you earn per ticket sold before fees.
-                              </p>
-                            </div>
-                            <div>
-                              <div className="flex items-center justify-between mb-1">
-                                <label className="text-[11px] font-mono uppercase text-stone-800 font-bold">
-                                  Display Price (Customer Pays) <span className="text-rose-600">*</span>
-                                </label>
-                                <span className="text-[10px] text-stone-500 font-sans">All-in</span>
-                              </div>
-                              <NumericInput
-                                value={tier.displayPrice}
-                                onChange={(val) => updateTier(tier.tempId, 'displayPrice', val)}
-                                min={0}
-                                step={1}
-                                allowDecimals={true}
-                                decimalPlaces={2}
-                                prefix="$"
-                                placeholder="23.94"
-                                className="w-full px-3 py-2 rounded-lg bg-white border border-stone-300 text-stone-900 text-xs font-mono font-semibold focus:outline-none focus:border-stone-900"
-                              />
-                              <p className="text-[10px] text-stone-500 mt-1 leading-tight">
-                                All-in price advertised to fans (includes all platform & processing fees).
-                              </p>
-                            </div>
-                          </div>
-
-                          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                            <div>
-                              <label className="block text-[11px] font-mono uppercase text-stone-700 font-bold mb-1">
-                                Capacity <span className="text-rose-600">*</span>
-                              </label>
-                              <NumericInput
-                                value={tier.totalCapacity}
-                                onChange={(val) => updateTier(tier.tempId, 'totalCapacity', val)}
-                                min={1}
-                                step={10}
-                                allowDecimals={false}
-                                placeholder="100"
-                                className="w-full px-3 py-2 rounded-lg bg-white border border-stone-300 text-stone-900 text-xs font-mono focus:outline-none focus:border-stone-900"
-                              />
-                            </div>
-                            <div>
-                              <label className="block text-[11px] font-mono uppercase text-stone-700 font-bold mb-1">
-                                Min / Order
-                              </label>
-                              <NumericInput
-                                value={tier.minPerOrder}
-                                onChange={(val) => updateTier(tier.tempId, 'minPerOrder', val)}
-                                min={1}
-                                step={1}
-                                allowDecimals={false}
-                                placeholder="1"
-                                className="w-full px-3 py-2 rounded-lg bg-white border border-stone-300 text-stone-900 text-xs font-mono focus:outline-none focus:border-stone-900"
-                              />
-                            </div>
-                            <div>
-                              <label className="block text-[11px] font-mono uppercase text-stone-700 font-bold mb-1">
-                                Max / Order
-                              </label>
-                              <NumericInput
-                                value={tier.maxPerOrder}
-                                onChange={(val) => updateTier(tier.tempId, 'maxPerOrder', val)}
-                                min={1}
-                                step={1}
-                                allowDecimals={false}
-                                placeholder="6"
-                                className="w-full px-3 py-2 rounded-lg bg-white border border-stone-300 text-stone-900 text-xs font-mono focus:outline-none focus:border-stone-900"
-                              />
-                            </div>
-                          </div>
-
-                          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 rounded-lg bg-white border border-stone-200">
-                            <div className="space-y-0.5 max-w-md">
-                              <div className="flex items-center gap-2">
-                                <label className="text-xs font-mono uppercase font-bold text-stone-900 cursor-pointer">
-                                  Enable Waitlist
-                                </label>
-                                {tier.waitlistEnabled ? (
-                                  <span className="px-2 py-0.5 rounded text-[10px] font-mono uppercase bg-amber-50 text-amber-800 border border-amber-300 font-bold">
-                                    Queue Active When Sold Out
-                                  </span>
-                                ) : (
-                                  <span className="px-2 py-0.5 rounded text-[10px] font-mono uppercase bg-stone-100 text-stone-500 font-bold">
-                                    Off
-                                  </span>
-                                )}
-                              </div>
-                              <p className="text-[11px] text-stone-500 leading-snug">
-                                Automatically queue fans when sold out. If tickets become available through cancellations or capacity increases, purchase offers are automatically issued in FIFO order.
-                              </p>
-                              {tier.id && (tier.waitlistWaitingCount !== undefined || tier.waitlistOfferedCount !== undefined) ? (
-                                <div className="flex items-center gap-3 pt-1 text-[11px] font-mono text-stone-700">
-                                  <span>Waiting: <strong className="text-stone-900">{tier.waitlistWaitingCount || 0}</strong></span>
-                                  <span>Active Offers: <strong className="text-amber-700">{tier.waitlistOfferedCount || 0}</strong></span>
-                                </div>
-                              ) : null}
-                            </div>
-                            <button
-                              type="button"
-                              role="switch"
-                              aria-checked={Boolean(tier.waitlistEnabled)}
-                              onClick={() => {
-                                updateTier(tier.tempId, 'waitlistEnabled', !tier.waitlistEnabled);
-                              }}
-                              className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
-                                tier.waitlistEnabled ? 'bg-amber-600' : 'bg-stone-300'
-                              }`}
-                            >
-                              <span
-                                className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
-                                  tier.waitlistEnabled ? 'translate-x-5' : 'translate-x-0'
-                                }`}
-                              />
-                            </button>
-                          </div>
-
-                          <div className="p-3.5 rounded-lg bg-white border border-stone-200 space-y-3">
-                            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                              <div className="space-y-0.5 max-w-md">
-                                <div className="flex items-center gap-2">
-                                  <label className="text-xs font-mono uppercase font-bold text-stone-900 cursor-pointer">
-                                    Limit Ticket Sales Period
-                                  </label>
-                                  {tier.hasSalesPeriod ? (
-                                    <span className="px-2 py-0.5 rounded text-[10px] font-mono uppercase bg-emerald-50 text-emerald-800 border border-emerald-300 font-bold">
-                                      Active Window
-                                    </span>
-                                  ) : (
-                                    <span className="px-2 py-0.5 rounded text-[10px] font-mono uppercase bg-stone-100 text-stone-500 font-bold">
-                                      Open Sales
-                                    </span>
-                                  )}
-                                </div>
-                                <p className="text-[11px] text-stone-500 leading-snug">
-                                  Restrict when fans can purchase this ticket. Before the start time or after the end time, this tier will not be available for checkout.
-                                </p>
-                              </div>
-                              <button
-                                type="button"
-                                role="switch"
-                                aria-checked={Boolean(tier.hasSalesPeriod)}
-                                onClick={() => {
-                                  updateTier(tier.tempId, 'hasSalesPeriod', !tier.hasSalesPeriod);
-                                }}
-                                className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
-                                  tier.hasSalesPeriod ? 'bg-stone-900' : 'bg-stone-300'
-                                }`}
-                              >
-                                <span
-                                  className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
-                                    tier.hasSalesPeriod ? 'translate-x-5' : 'translate-x-0'
-                                  }`}
-                                />
-                              </button>
-                            </div>
-
-                            {tier.hasSalesPeriod && (
-                              <div className="pt-2 border-t border-stone-100 space-y-2">
-                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                                  <div>
-                                    <label className="block text-[10px] font-mono uppercase text-stone-700 font-bold mb-1">
-                                      Sales Start Date & Time
-                                    </label>
-                                    <input
-                                      type="datetime-local"
-                                      value={tier.salesStartAt || ''}
-                                      onChange={(e) => updateTier(tier.tempId, 'salesStartAt', e.target.value)}
-                                      className="w-full px-3 py-2 rounded-lg bg-stone-50 border border-stone-300 text-stone-900 text-xs focus:outline-none focus:border-stone-900"
-                                    />
-                                    <span className="text-[10px] text-stone-400 mt-0.5 block">
-                                      Before this time, ticket cannot be purchased.
-                                    </span>
-                                  </div>
-                                  <div>
-                                    <label className="block text-[10px] font-mono uppercase text-stone-700 font-bold mb-1">
-                                      Sales End Date & Time
-                                    </label>
-                                    <input
-                                      type="datetime-local"
-                                      value={tier.salesEndAt || ''}
-                                      onChange={(e) => updateTier(tier.tempId, 'salesEndAt', e.target.value)}
-                                      className="w-full px-3 py-2 rounded-lg bg-stone-50 border border-stone-300 text-stone-900 text-xs focus:outline-none focus:border-stone-900"
-                                    />
-                                    <span className="text-[10px] text-stone-400 mt-0.5 block">
-                                      After this time, sales will close automatically.
-                                    </span>
-                                  </div>
-                                </div>
-                                <div className="text-[10px] font-mono text-stone-500">
-                                  Timezone: <strong>{timezone || DEFAULT_US_TIMEZONE}</strong>
-                                </div>
-                              </div>
-                            )}
-                          </div>
-
-                          <div className="p-3.5 rounded-lg bg-white border border-stone-200 space-y-3">
-                            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                              <div className="space-y-0.5 max-w-md">
-                                <div className="flex items-center gap-2">
-                                  <label className="text-xs font-mono uppercase font-bold text-stone-900 cursor-pointer">
-                                    Limit Ticket Validity
-                                  </label>
-                                  {tier.hasTicketValidity ? (
-                                    <span className="px-2 py-0.5 rounded text-[10px] font-mono uppercase bg-indigo-50 text-indigo-800 border border-indigo-300 font-bold">
-                                      Entry Restricted
-                                    </span>
-                                  ) : (
-                                    <span className="px-2 py-0.5 rounded text-[10px] font-mono uppercase bg-stone-100 text-stone-500 font-bold">
-                                      Full Event Window
-                                    </span>
-                                  )}
-                                </div>
-                                <p className="text-[11px] text-stone-500 leading-snug">
-                                  Restrict when an already-purchased ticket can be used for door entry. Gate scanners will reject passes scanned outside this designated window.
-                                </p>
-                              </div>
-                              <button
-                                type="button"
-                                role="switch"
-                                aria-checked={Boolean(tier.hasTicketValidity)}
-                                onClick={() => {
-                                  updateTier(tier.tempId, 'hasTicketValidity', !tier.hasTicketValidity);
-                                }}
-                                className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
-                                  tier.hasTicketValidity ? 'bg-stone-900' : 'bg-stone-300'
-                                }`}
-                              >
-                                <span
-                                  className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
-                                    tier.hasTicketValidity ? 'translate-x-5' : 'translate-x-0'
-                                  }`}
-                                />
-                              </button>
-                            </div>
-
-                            {tier.hasTicketValidity && (
-                              <div className="pt-2 border-t border-stone-100 space-y-2">
-                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                                  <div>
-                                    <label className="block text-[10px] font-mono uppercase text-stone-700 font-bold mb-1">
-                                      Validity Start Date & Time
-                                    </label>
-                                    <input
-                                      type="datetime-local"
-                                      value={tier.validityStartAt || ''}
-                                      onChange={(e) => updateTier(tier.tempId, 'validityStartAt', e.target.value)}
-                                      className="w-full px-3 py-2 rounded-lg bg-stone-50 border border-stone-300 text-stone-900 text-xs focus:outline-none focus:border-stone-900"
-                                    />
-                                    <span className="text-[10px] text-stone-400 mt-0.5 block">
-                                      Pass cannot be scanned before this time.
-                                    </span>
-                                  </div>
-                                  <div>
-                                    <label className="block text-[10px] font-mono uppercase text-stone-700 font-bold mb-1">
-                                      Validity End Date & Time
-                                    </label>
-                                    <input
-                                      type="datetime-local"
-                                      value={tier.validityEndAt || ''}
-                                      onChange={(e) => updateTier(tier.tempId, 'validityEndAt', e.target.value)}
-                                      className="w-full px-3 py-2 rounded-lg bg-stone-50 border border-stone-300 text-stone-900 text-xs focus:outline-none focus:border-stone-900"
-                                    />
-                                    <span className="text-[10px] text-stone-400 mt-0.5 block">
-                                      Pass expires for entry after this time.
-                                    </span>
-                                  </div>
-                                </div>
-                                <div className="text-[10px] font-mono text-stone-500">
-                                  Timezone: <strong>{timezone || DEFAULT_US_TIMEZONE}</strong>. Appears on attendee passes and ticket PDFs.
-                                </div>
-                              </div>
-                            )}
-                          </div>
-
-                          <div className="p-3.5 rounded-lg bg-white border border-stone-200 text-[11px] font-mono space-y-1.5">
-                            <div className="flex items-center justify-between text-stone-700">
-                              <span>Gross Ticket Earnings:</span>
-                              <span className="font-bold text-emerald-600">{formatCents(tierEarnings.organizerEarningsInCents)}</span>
-                            </div>
-                            {tierEarnings.organizerEarningsInCents > 0 ? (
-                              <>
-                                <div className="flex items-center justify-between text-stone-500 text-[10px]">
-                                  <span>· Platform Fee (10%):</span>
-                                  <span>{formatCents(tierEarnings.platformFeeInCents)}</span>
-                                </div>
-                                <div className="flex items-center justify-between text-stone-500 text-[10px]">
-                                  <span>· Fixed Service Fee ($0.95):</span>
-                                  <span>{formatCents(tierEarnings.serviceFeeInCents)}</span>
-                                </div>
-                                <div className="flex items-center justify-between text-stone-500 text-[10px]">
-                                  <span>· Payment Processing (est. 2.9% + $0.30):</span>
-                                  <span>{formatCents(tierEarnings.processingFeeInCents)}</span>
-                                </div>
-                                <div className="flex items-center justify-between text-stone-600 font-semibold pt-0.5">
-                                  <span>Combined Service Fee:</span>
-                                  <span>{formatCents(tierEarnings.customerServiceFeeInCents)}</span>
-                                </div>
-                              </>
-                            ) : (
-                              <div className="text-[10px] text-stone-400 italic">
-                                Free ticket tier — no platform or processing fees charged.
-                              </div>
-                            )}
-                            <div className="flex items-center justify-between pt-1.5 border-t border-stone-200 text-stone-900 font-bold">
-                              <span>All-In Display Price (Fan Pays):</span>
-                              <span className="font-extrabold text-stone-900">
-                                {tierEarnings.displayPriceInCents === 0 ? 'Free ($0.00)' : formatCents(tierEarnings.displayPriceInCents)}
-                              </span>
-                            </div>
-                            <div className="flex items-center justify-between pt-1 border-t border-stone-100 text-stone-900 font-bold">
-                              <span>Projected Sold Out Earnings ({tierEarnings.capacity} tickets):</span>
-                              <span className="text-emerald-700 font-extrabold">{formatCents(tierEarnings.projectedEarningsInCents)}</span>
-                            </div>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
+                <TicketTierEditorSection
+                  ticketTiers={ticketTiers}
+                  timezone={timezone || DEFAULT_US_TIMEZONE}
+                  tierErrors={tierValidationErrors}
+                  onAddTier={addTicketTier}
+                  onRemoveTier={removeTicketTier}
+                  onUpdateTier={updateTier}
+                />
 
                 <div className="pt-6 border-t border-stone-200 space-y-4">
                   <div>
@@ -3492,17 +2926,11 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
                             {venueName || city || country || 'United States'}
                           </span>
                           <span className="font-bold text-stone-900 font-mono text-xs">
-                            {ticketTiers.length > 0
-                              ? (() => {
-                                  const minDisplay = Math.min(
-                                    ...ticketTiers.map((t) => {
-                                      const p = Number(t.price) || 0;
-                                      return p > 0 ? calculateDisplayPriceFromGross(Math.round(p * 100)) / 100 : 0;
-                                    })
-                                  );
-                                  return minDisplay === 0 ? 'Free' : `From $${minDisplay.toFixed(2)}`;
-                                })()
-                              : 'From $0.00'}
+                            {(() => {
+                              const minDisplay = computeVisibleMinDisplayPrice(ticketTiers);
+                              if (minDisplay === null) return 'Price TBD';
+                              return minDisplay === 0 ? 'Free' : `From $${minDisplay.toFixed(2)}`;
+                            })()}
                           </span>
                         </div>
                         {features.length > 0 && (

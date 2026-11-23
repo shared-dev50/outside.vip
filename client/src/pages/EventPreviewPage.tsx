@@ -397,17 +397,36 @@ export const EventPreviewPage: React.FC = () => {
                 <div className="space-y-3">
                   {event.ticketTiers.map((tier: TicketTier) => {
                     const qty = selectedQuantities[tier.id] || 0;
+                    const isHidden = Boolean(tier.isHidden) || tier.status === 'HIDDEN';
+                    const isSalesDisabled = Boolean(tier.salesDisabled) || tier.status === 'PAUSED';
+                    const isSelectable = !isHidden && !isSalesDisabled && tier.status !== 'SOLD_OUT';
                     return (
                       <div
                         key={tier.id}
                         className={`p-3.5 rounded-xl border transition-colors ${
-                          qty > 0 ? 'bg-gray-50 border-gray-900' : 'border-gray-200 hover:border-gray-300'
+                          qty > 0
+                            ? 'bg-gray-50 border-gray-900'
+                            : isSelectable
+                            ? 'border-gray-200 hover:border-gray-300'
+                            : 'bg-gray-50/70 border-gray-200 opacity-75'
                         }`}
                       >
                         <div className="flex items-start justify-between gap-3">
                           <div className="space-y-0.5 flex-1">
-                            <div className="font-semibold text-gray-900 text-sm">
-                              {tier.name}
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="font-semibold text-gray-900 text-sm">
+                                {tier.name}
+                              </span>
+                              {isHidden && (
+                                <span className="text-[10px] font-mono uppercase font-bold px-2 py-0.5 rounded bg-stone-200 text-stone-800 border border-stone-300">
+                                  Hidden from public
+                                </span>
+                              )}
+                              {isSalesDisabled && (
+                                <span className="text-[10px] font-mono uppercase font-bold px-2 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-200">
+                                  Sales unavailable
+                                </span>
+                              )}
                             </div>
                             {tier.description && (
                               <p className="text-xs text-gray-500 leading-snug">
@@ -437,27 +456,29 @@ export const EventPreviewPage: React.FC = () => {
                             </div>
                           </div>
 
-                          <div className="flex items-center gap-1.5 bg-gray-50 border border-gray-200 rounded-md p-1 shrink-0">
-                            <button
-                              type="button"
-                              onClick={() => updateQuantity(tier.id, -1, tier.maxPerOrder)}
-                              disabled={qty === 0}
-                              className="w-6 h-6 rounded flex items-center justify-center text-gray-600 hover:text-black hover:bg-gray-200 disabled:opacity-20"
-                            >
-                              <Minus className="w-3 h-3" />
-                            </button>
-                            <span className="w-5 text-center text-xs font-bold text-gray-900">
-                              {qty}
-                            </span>
-                            <button
-                              type="button"
-                              onClick={() => updateQuantity(tier.id, 1, tier.maxPerOrder)}
-                              disabled={qty >= tier.maxPerOrder}
-                              className="w-6 h-6 rounded flex items-center justify-center text-gray-600 hover:text-black hover:bg-gray-200 disabled:opacity-20"
-                            >
-                              <Plus className="w-3 h-3" />
-                            </button>
-                          </div>
+                          {isSelectable && (
+                            <div className="flex items-center gap-1.5 bg-gray-50 border border-gray-200 rounded-md p-1 shrink-0">
+                              <button
+                                type="button"
+                                onClick={() => updateQuantity(tier.id, -1, tier.maxPerOrder)}
+                                disabled={qty === 0}
+                                className="w-6 h-6 rounded flex items-center justify-center text-gray-600 hover:text-black hover:bg-gray-200 disabled:opacity-20"
+                              >
+                                <Minus className="w-3 h-3" />
+                              </button>
+                              <span className="w-5 text-center text-xs font-bold text-gray-900">
+                                {qty}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => updateQuantity(tier.id, 1, tier.maxPerOrder)}
+                                disabled={qty >= tier.maxPerOrder}
+                                className="w-6 h-6 rounded flex items-center justify-center text-gray-600 hover:text-black hover:bg-gray-200 disabled:opacity-20"
+                              >
+                                <Plus className="w-3 h-3" />
+                              </button>
+                            </div>
+                          )}
                         </div>
                       </div>
                     );

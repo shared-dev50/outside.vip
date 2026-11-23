@@ -38,7 +38,7 @@ export type EventFeatureInput = z.infer<typeof eventFeatureInputSchema>;
 export const ticketTierInputSchema = z
   .object({
     id: z.string().optional(),
-    name: z.string().min(1, 'Ticket name is required').max(100),
+    name: z.string().trim().min(1, 'Ticket name is required').max(100),
     description: z.string().optional().nullable(),
     priceInCents: z.number().int().min(0, 'Price must be 0 or greater').optional(),
     displayPriceInCents: z.number().int().min(0, 'Display price must be 0 or greater').optional().nullable(),
@@ -50,7 +50,9 @@ export const ticketTierInputSchema = z
     salesEndAt: z.string().datetime().optional().nullable(),
     validityStartAt: z.string().datetime().optional().nullable(),
     validityEndAt: z.string().datetime().optional().nullable(),
-    status: z.nativeEnum(TicketTierStatus).default(TicketTierStatus.ACTIVE),
+    status: z.nativeEnum(TicketTierStatus).optional(),
+    isHidden: z.boolean().optional(),
+    salesDisabled: z.boolean().optional(),
     waitlistEnabled: z.boolean().default(false),
   })
   .refine(

@@ -1,6 +1,9 @@
 import { Request, Response, NextFunction } from 'express';
-import { EventStatus, OrderStatus, TicketStatus, Prisma } from '@prisma/client';
+import { EventStatus, OrderStatus, TicketStatus, TicketTierStatus, Prisma } from '@prisma/client';
 import { prisma } from '../../db/prisma.js';
+import {
+  isTicketTierSalesDisabled,
+} from '../../utils/ticketTierState.js';
 import { listEventsQuerySchema, verifyEventPasswordSchema } from './events.schema.js';
 import { NotFoundError, UnauthorizedError } from '../../utils/errors.js';
 import {
@@ -141,7 +144,8 @@ export async function listEvents(req: Request, res: Response, next: NextFunction
           },
           ticketTiers: {
             where: {
-              status: { in: ['ACTIVE', 'SOLD_OUT'] },
+              isHidden: false,
+              status: { not: TicketTierStatus.HIDDEN },
             },
             select: {
               id: true,
@@ -151,6 +155,8 @@ export async function listEvents(req: Request, res: Response, next: NextFunction
               totalCapacity: true,
               soldQuantity: true,
               status: true,
+              isHidden: true,
+              salesDisabled: true,
             },
           },
         },
@@ -163,19 +169,27 @@ export async function listEvents(req: Request, res: Response, next: NextFunction
       const { passwordHash: _, ...eventWithoutHash } = event;
       const tiersWithDisplay = event.ticketTiers.map((t) => ({
         ...t,
+        isHidden: false,
+        salesDisabled: isTicketTierSalesDisabled(t),
         grossPriceInCents: t.priceInCents,
         displayPriceInCents: calculateDisplayPriceFromGross(t.priceInCents),
       }));
 
+      const purchasablePriceCandidates = tiersWithDisplay.filter((t) => !t.salesDisabled);
+      const priceSourceTiers =
+        purchasablePriceCandidates.length > 0 ? purchasablePriceCandidates : tiersWithDisplay;
+
       const minPrice =
-        tiersWithDisplay.length > 0
-          ? Math.min(...tiersWithDisplay.map((t) => t.displayPriceInCents))
+        priceSourceTiers.length > 0
+          ? Math.min(...priceSourceTiers.map((t) => t.displayPriceInCents))
           : 0;
 
       const currency = event.ticketTiers[0]?.currency || 'USD';
-      const isSoldOut = event.ticketTiers.every(
-        (t) => t.status === 'SOLD_OUT' || t.soldQuantity >= t.totalCapacity
-      );
+      const isSoldOut =
+        tiersWithDisplay.length > 0 &&
+        tiersWithDisplay.every(
+          (t) => t.status === 'SOLD_OUT' || t.soldQuantity >= t.totalCapacity
+        );
 
       return {
         ...eventWithoutHash,
@@ -183,7 +197,7 @@ export async function listEvents(req: Request, res: Response, next: NextFunction
         minPriceInCents: minPrice,
         currency,
         isSoldOut,
-        tierCount: event.ticketTiers.length,
+        tierCount: tiersWithDisplay.length,
       };
     });
 
@@ -237,6 +251,10 @@ export async function getEventBySlug(req: Request, res: Response, next: NextFunc
           },
         },
         ticketTiers: {
+          where: {
+            isHidden: false,
+            status: { not: TicketTierStatus.HIDDEN },
+          },
           orderBy: { priceInCents: 'asc' },
           select: {
             id: true,
@@ -254,6 +272,8 @@ export async function getEventBySlug(req: Request, res: Response, next: NextFunc
             validityStartAt: true,
             validityEndAt: true,
             status: true,
+            isHidden: true,
+            salesDisabled: true,
             waitlistEnabled: true,
           },
         },
@@ -363,21 +383,32 @@ export async function getEventBySlug(req: Request, res: Response, next: NextFunc
       const displayPriceInCents = calculateDisplayPriceFromGross(tier.priceInCents);
       const isSalesPending = Boolean(tier.salesStartAt && new Date(tier.salesStartAt) > now);
       const isSalesEnded = Boolean(tier.salesEndAt && new Date(tier.salesEndAt) < now);
+      const salesDisabled = isTicketTierSalesDisabled(tier);
 
       return {
         ...tier,
+        isHidden: false,
+        salesDisabled,
         grossPriceInCents: tier.priceInCents,
         displayPriceInCents,
         remainingCapacity: remaining,
         isSalesPending,
         isSalesEnded,
-        isAvailable: tier.status === 'ACTIVE' && remaining > 0 && !isSalesPending && !isSalesEnded,
+        isAvailable:
+          !salesDisabled &&
+          tier.status === 'ACTIVE' &&
+          remaining > 0 &&
+          !isSalesPending &&
+          !isSalesEnded,
       };
     });
 
+    const activePriceTiers = tiersWithAvailability.filter((t) => !t.salesDisabled);
+    const priceSourceTiers =
+      activePriceTiers.length > 0 ? activePriceTiers : tiersWithAvailability;
     const minPriceInCents =
-      tiersWithAvailability.length > 0
-        ? Math.min(...tiersWithAvailability.map((t) => t.displayPriceInCents))
+      priceSourceTiers.length > 0
+        ? Math.min(...priceSourceTiers.map((t) => t.displayPriceInCents))
         : 0;
 
     // Compute verified attendee count if guest count is not hidden
@@ -488,10 +519,16 @@ export async function getFeaturedEvents(_req: Request, res: Response, next: Next
       orderBy: { startAt: 'asc' },
       include: {
         ticketTiers: {
+          where: {
+            isHidden: false,
+            status: { not: TicketTierStatus.HIDDEN },
+          },
           select: {
             priceInCents: true,
             currency: true,
             status: true,
+            isHidden: true,
+            salesDisabled: true,
           },
         },
       },
@@ -501,13 +538,18 @@ export async function getFeaturedEvents(_req: Request, res: Response, next: Next
       const { passwordHash: _, ...clean } = e;
       const tiersWithDisplay = clean.ticketTiers.map((t) => ({
         ...t,
+        isHidden: false,
+        salesDisabled: isTicketTierSalesDisabled(t),
         grossPriceInCents: t.priceInCents,
         displayPriceInCents: calculateDisplayPriceFromGross(t.priceInCents),
       }));
+      const activePriceTiers = tiersWithDisplay.filter((t) => !t.salesDisabled);
+      const priceSourceTiers =
+        activePriceTiers.length > 0 ? activePriceTiers : tiersWithDisplay;
       return {
         ...clean,
         ticketTiers: tiersWithDisplay,
-        minPriceInCents: tiersWithDisplay.length > 0 ? Math.min(...tiersWithDisplay.map((t) => t.displayPriceInCents)) : 0,
+        minPriceInCents: priceSourceTiers.length > 0 ? Math.min(...priceSourceTiers.map((t) => t.displayPriceInCents)) : 0,
         currency: clean.ticketTiers[0]?.currency || 'USD',
       };
     });

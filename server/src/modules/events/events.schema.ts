@@ -15,7 +15,7 @@ export const listEventsQuerySchema = z.object({
 
 export const createTicketTierBaseSchema = z.object({
   id: z.string().optional(),
-  name: z.string().min(1, 'Tier name is required'),
+  name: z.string().trim().min(1, 'Tier name is required'),
   description: z.string().optional(),
   priceInCents: z.number().int().min(0, 'Price must be 0 or positive').optional(),
   displayPriceInCents: z.number().int().min(0, 'Display price must be 0 or positive').optional().nullable(),
@@ -27,7 +27,9 @@ export const createTicketTierBaseSchema = z.object({
   salesEndAt: z.string().datetime().optional().nullable(),
   validityStartAt: z.string().datetime().optional().nullable(),
   validityEndAt: z.string().datetime().optional().nullable(),
-  status: z.nativeEnum(TicketTierStatus).default(TicketTierStatus.ACTIVE),
+  status: z.nativeEnum(TicketTierStatus).optional(),
+  isHidden: z.boolean().optional(),
+  salesDisabled: z.boolean().optional(),
 });
 
 export const createTicketTierSchema = createTicketTierBaseSchema

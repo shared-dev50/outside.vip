@@ -33,6 +33,12 @@ import {
 } from '../../lib/payoutCrypto.js';
 import { extractYouTubeVideoId, normalizeYouTubeUrl } from '../../utils/youtube.js';
 import { hashEventPassword } from '../events/passwordAccess.service.js';
+import {
+  isTicketTierHidden,
+  isTicketTierSalesDisabled,
+  normalizeTicketTierFlags,
+  resolveTicketTierPersistenceState,
+} from '../../utils/ticketTierState.js';
 import { cancelWaitlistForEventIds, processWaitlistForTier } from '../waitlist/waitlist.service.js';
 import { verifyAndNormalizeLocation } from '../places/places.service.js';
 import {
@@ -539,7 +545,7 @@ export async function getOrganizerEventById(req: Request, res: Response, next: N
     }
 
     const enrichedTicketTiers = event.ticketTiers.map((tier) => ({
-      ...tier,
+      ...normalizeTicketTierFlags(tier),
       waitlistWaitingCount: waitlistStats[tier.id]?.waiting ?? 0,
       waitlistOfferedCount: waitlistStats[tier.id]?.offered ?? 0,
     }));
@@ -622,15 +628,16 @@ export async function createOrganizerEvent(req: Request, res: Response, next: Ne
     // Saving drafts does not require Stripe onboarding.
     // Publishing a paid event directly on creation requires a ready Stripe Connect Express account.
     if (input.status === EventStatus.PUBLISHED) {
-      const activeTiers = input.ticketTiers.filter(
-        (t) => t.status !== TicketTierStatus.HIDDEN && t.totalCapacity > 0
-      );
-      if (activeTiers.length === 0) {
+      const visibleTiers = input.ticketTiers.filter((t) => {
+        const resolved = resolveTicketTierPersistenceState(t);
+        return !isTicketTierHidden(resolved) && t.totalCapacity > 0;
+      });
+      if (visibleTiers.length === 0) {
         throw new BadRequestError(
           'At least one active ticket tier with positive capacity is required to publish'
         );
       }
-      const hasPaidTier = activeTiers.some((t) => (t.priceInCents ?? 0) > 0);
+      const hasPaidTier = visibleTiers.some((t) => (t.priceInCents ?? 0) > 0);
       if (hasPaidTier) {
         await assertStripeReadyForPaidPublishing(organizerId);
       }
@@ -685,7 +692,13 @@ export async function createOrganizerEvent(req: Request, res: Response, next: Ne
       if (recentDuplicate) {
         res.status(200).json({
           success: true,
-          data: { event: recentDuplicate },
+          data: {
+            event: {
+              ...recentDuplicate,
+              ticketTiers: recentDuplicate.ticketTiers.map(normalizeTicketTierFlags),
+              passwordHash: undefined,
+            },
+          },
         });
         return;
       }
@@ -800,6 +813,7 @@ export async function createOrganizerEvent(req: Request, res: Response, next: Ne
               ticketTiers: {
                 create: input.ticketTiers.map((tier) => {
                   const shiftMs = occ.startAt.getTime() - occurrences[0].startAt.getTime();
+                  const tierState = resolveTicketTierPersistenceState(tier);
                   return {
                     name: tier.name,
                     description: tier.description,
@@ -820,7 +834,9 @@ export async function createOrganizerEvent(req: Request, res: Response, next: Ne
                     validityEndAt: tier.validityEndAt
                       ? new Date(new Date(tier.validityEndAt).getTime() + shiftMs)
                       : null,
-                    status: tier.status,
+                    status: tierState.status,
+                    isHidden: tierState.isHidden,
+                    salesDisabled: tierState.salesDisabled,
                     waitlistEnabled: tier.waitlistEnabled ?? false,
                   };
                 }),
@@ -848,6 +864,7 @@ export async function createOrganizerEvent(req: Request, res: Response, next: Ne
         data: {
           event: {
             ...result.primaryEvent,
+            ticketTiers: result.primaryEvent.ticketTiers.map(normalizeTicketTierFlags),
             passwordHash: undefined,
             payoutDetails: sanitizePayoutDetails(result.primaryEvent.payoutDetails),
             series: {
@@ -941,21 +958,26 @@ export async function createOrganizerEvent(req: Request, res: Response, next: Ne
             })),
           },
           ticketTiers: {
-            create: input.ticketTiers.map((tier) => ({
-              name: tier.name,
-              description: tier.description,
-              priceInCents: tier.priceInCents,
-              currency: tier.currency,
-              totalCapacity: tier.totalCapacity,
-              minPerOrder: tier.minPerOrder,
-              maxPerOrder: tier.maxPerOrder,
-              salesStartAt: tier.salesStartAt ? new Date(tier.salesStartAt) : null,
-              salesEndAt: tier.salesEndAt ? new Date(tier.salesEndAt) : null,
-              validityStartAt: tier.validityStartAt ? new Date(tier.validityStartAt) : null,
-              validityEndAt: tier.validityEndAt ? new Date(tier.validityEndAt) : null,
-              status: tier.status,
-              waitlistEnabled: tier.waitlistEnabled ?? false,
-            })),
+            create: input.ticketTiers.map((tier) => {
+              const tierState = resolveTicketTierPersistenceState(tier);
+              return {
+                name: tier.name,
+                description: tier.description,
+                priceInCents: tier.priceInCents,
+                currency: tier.currency,
+                totalCapacity: tier.totalCapacity,
+                minPerOrder: tier.minPerOrder,
+                maxPerOrder: tier.maxPerOrder,
+                salesStartAt: tier.salesStartAt ? new Date(tier.salesStartAt) : null,
+                salesEndAt: tier.salesEndAt ? new Date(tier.salesEndAt) : null,
+                validityStartAt: tier.validityStartAt ? new Date(tier.validityStartAt) : null,
+                validityEndAt: tier.validityEndAt ? new Date(tier.validityEndAt) : null,
+                status: tierState.status,
+                isHidden: tierState.isHidden,
+                salesDisabled: tierState.salesDisabled,
+                waitlistEnabled: tier.waitlistEnabled ?? false,
+              };
+            }),
           },
         },
         include: {
@@ -972,6 +994,7 @@ export async function createOrganizerEvent(req: Request, res: Response, next: Ne
       data: {
         event: {
           ...event,
+          ticketTiers: event.ticketTiers.map(normalizeTicketTierFlags),
           passwordHash: undefined,
           payoutDetails: sanitizePayoutDetails(event.payoutDetails),
         },
@@ -1108,11 +1131,27 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
       nextStatus === EventStatus.PUBLISHED &&
       (existingEvent.status !== EventStatus.PUBLISHED || input.ticketTiers !== undefined)
     ) {
-      const effectiveTiers = input.ticketTiers ?? existingEvent.ticketTiers;
-      const activeTiers = effectiveTiers.filter(
-        (t: any) => t.status !== TicketTierStatus.HIDDEN && t.totalCapacity > 0
+      const existingTierLookup = new Map<string, any>(
+        existingEvent.ticketTiers.map((t: any) => [t.id, t])
       );
-      const hasPaidTier = activeTiers.some((t: any) => (t.priceInCents ?? 0) > 0);
+      const effectiveTiers = input.ticketTiers
+        ? input.ticketTiers.map((t) => {
+            const resolved = resolveTicketTierPersistenceState(
+              t,
+              t.id ? existingTierLookup.get(t.id) : undefined
+            );
+            return { ...t, ...resolved };
+          })
+        : existingEvent.ticketTiers;
+      const visibleTiers = effectiveTiers.filter(
+        (t: any) => !isTicketTierHidden(t) && t.totalCapacity > 0
+      );
+      if (visibleTiers.length === 0) {
+        throw new BadRequestError(
+          'At least one active ticket tier with positive capacity is required to publish'
+        );
+      }
+      const hasPaidTier = visibleTiers.some((t: any) => (t.priceInCents ?? 0) > 0);
       if (hasPaidTier) {
         await assertStripeReadyForPaidPublishing(existingEvent.organizerId);
       }
@@ -1383,22 +1422,27 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
             if (occSales === 0) {
               await tx.ticketTier.deleteMany({ where: { eventId: occ.id } });
               await tx.ticketTier.createMany({
-                data: input.ticketTiers.map((tier) => ({
-                  eventId: occ.id,
-                  name: tier.name,
-                  description: tier.description,
-                  priceInCents: tier.priceInCents,
-                  currency: tier.currency,
-                  totalCapacity: tier.totalCapacity,
-                  minPerOrder: tier.minPerOrder,
-                  maxPerOrder: tier.maxPerOrder,
-                  salesStartAt: tier.salesStartAt ? new Date(tier.salesStartAt) : null,
-                  salesEndAt: tier.salesEndAt ? new Date(tier.salesEndAt) : null,
-                  validityStartAt: tier.validityStartAt ? new Date(tier.validityStartAt) : null,
-                  validityEndAt: tier.validityEndAt ? new Date(tier.validityEndAt) : null,
-                  status: tier.status,
-                  waitlistEnabled: tier.waitlistEnabled ?? false,
-                })),
+                data: input.ticketTiers.map((tier) => {
+                  const tierState = resolveTicketTierPersistenceState(tier);
+                  return {
+                    eventId: occ.id,
+                    name: tier.name,
+                    description: tier.description,
+                    priceInCents: tier.priceInCents,
+                    currency: tier.currency,
+                    totalCapacity: tier.totalCapacity,
+                    minPerOrder: tier.minPerOrder,
+                    maxPerOrder: tier.maxPerOrder,
+                    salesStartAt: tier.salesStartAt ? new Date(tier.salesStartAt) : null,
+                    salesEndAt: tier.salesEndAt ? new Date(tier.salesEndAt) : null,
+                    validityStartAt: tier.validityStartAt ? new Date(tier.validityStartAt) : null,
+                    validityEndAt: tier.validityEndAt ? new Date(tier.validityEndAt) : null,
+                    status: tierState.status,
+                    isHidden: tierState.isHidden,
+                    salesDisabled: tierState.salesDisabled,
+                    waitlistEnabled: tier.waitlistEnabled ?? false,
+                  };
+                }),
               });
             }
           }
@@ -1478,14 +1522,21 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
 
       if (input.ticketTiers) {
         const incomingTierIds = new Set(input.ticketTiers.filter((t) => t.id).map((t) => t.id));
+        const existingTierMap = new Map<string, any>(
+          existingEvent.ticketTiers.map((t: any) => [t.id, t])
+        );
 
         for (const existingTier of existingEvent.ticketTiers) {
           if (!incomingTierIds.has(existingTier.id)) {
             if (existingTier.soldQuantity > 0) {
-              // Preserve historical sales! Deactivate instead of deleting
+              // Preserve historical sales! Hide and disable new sales instead of deleting
               await tx.ticketTier.update({
                 where: { id: existingTier.id },
-                data: { status: TicketTierStatus.HIDDEN },
+                data: {
+                  status: TicketTierStatus.HIDDEN,
+                  isHidden: true,
+                  salesDisabled: true,
+                },
               });
             } else {
               await tx.ticketTier.delete({ where: { id: existingTier.id } });
@@ -1495,6 +1546,8 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
 
         for (const tier of input.ticketTiers) {
           if (tier.id) {
+            const existingTier = existingTierMap.get(tier.id);
+            const tierState = resolveTicketTierPersistenceState(tier, existingTier);
             await tx.ticketTier.update({
               where: { id: tier.id, eventId: id },
               data: {
@@ -1509,11 +1562,14 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
                 salesEndAt: tier.salesEndAt ? new Date(tier.salesEndAt) : null,
                 validityStartAt: tier.validityStartAt ? new Date(tier.validityStartAt) : null,
                 validityEndAt: tier.validityEndAt ? new Date(tier.validityEndAt) : null,
-                status: tier.status,
+                status: tierState.status,
+                isHidden: tierState.isHidden,
+                salesDisabled: tierState.salesDisabled,
                 ...(tier.waitlistEnabled !== undefined && { waitlistEnabled: tier.waitlistEnabled }),
               },
             });
           } else {
+            const tierState = resolveTicketTierPersistenceState(tier);
             await tx.ticketTier.create({
               data: {
                 eventId: id,
@@ -1528,7 +1584,9 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
                 salesEndAt: tier.salesEndAt ? new Date(tier.salesEndAt) : null,
                 validityStartAt: tier.validityStartAt ? new Date(tier.validityStartAt) : null,
                 validityEndAt: tier.validityEndAt ? new Date(tier.validityEndAt) : null,
-                status: tier.status,
+                status: tierState.status,
+                isHidden: tierState.isHidden,
+                salesDisabled: tierState.salesDisabled,
                 waitlistEnabled: tier.waitlistEnabled ?? false,
               },
             });
@@ -1598,7 +1656,7 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
 
     if (input.ticketTiers && updatedEvent?.ticketTiers) {
       for (const tier of updatedEvent.ticketTiers) {
-        if (tier.waitlistEnabled) {
+        if (tier.waitlistEnabled && !isTicketTierHidden(tier) && !isTicketTierSalesDisabled(tier)) {
           processWaitlistForTier(tier.id).catch((err) =>
             console.error(`Failed to process waitlist after updating tier ${tier.id}:`, err)
           );
@@ -1611,6 +1669,7 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
       data: {
         event: {
           ...updatedEvent,
+          ticketTiers: updatedEvent?.ticketTiers?.map(normalizeTicketTierFlags) ?? [],
           passwordHash: undefined,
           payoutDetails: isOwner ? sanitizePayoutDetails(updatedEvent?.payoutDetails) : null,
           payoutDetailsId: isOwner ? (updatedEvent?.payoutDetailsId ?? null) : null,
@@ -1678,7 +1737,7 @@ export async function publishEvent(req: Request, res: Response, next: NextFuncti
     }
 
     const activeTiers = event.ticketTiers.filter(
-      (t) => t.status !== TicketTierStatus.HIDDEN && t.totalCapacity > 0
+      (t) => !isTicketTierHidden(t) && t.totalCapacity > 0
     );
 
     if (activeTiers.length === 0) {
@@ -1706,7 +1765,7 @@ export async function publishEvent(req: Request, res: Response, next: NextFuncti
           throw new BadRequestError(`Occurrence #${occ.occurrenceIndex || 1} requires venue name`);
         }
         const occActiveTiers = occ.ticketTiers.filter(
-          (t) => t.status !== TicketTierStatus.HIDDEN && t.totalCapacity > 0
+          (t) => !isTicketTierHidden(t) && t.totalCapacity > 0
         );
         if (occActiveTiers.length === 0) {
           throw new BadRequestError(`Occurrence #${occ.occurrenceIndex || 1} requires at least one active ticket tier`);
