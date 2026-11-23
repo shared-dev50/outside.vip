@@ -29,6 +29,7 @@ import {
   sentOrderConfirmationEmails,
 } from '../lib/email.service.js';
 import {
+  buildLatePaymentRefundManualReviewDedupeKey,
   runEmailOutboxPass,
 } from '../modules/notifications/emailOutbox.service.js';
 import {
@@ -60,6 +61,7 @@ describe('P2-04 Late Payment Protection & Automatic Stripe Refund (Real PostgreS
   const createdEventIds: string[] = [];
   const createdOrderIds: string[] = [];
   const createdWebhookEventIds: string[] = [];
+  const createdOrphanRefundPiIds: string[] = [];
 
   let defaultOrganizer: any;
   let adminActor: any;
@@ -265,6 +267,11 @@ describe('P2-04 Late Payment Protection & Automatic Stripe Refund (Real PostgreS
       });
       await prisma.orderRefund.deleteMany({
         where: { orderId: { in: createdOrderIds } },
+      });
+    }
+    if (createdOrphanRefundPiIds.length > 0) {
+      await prisma.orderRefund.deleteMany({
+        where: { stripePaymentIntentId: { in: createdOrphanRefundPiIds } },
       });
     }
   });
@@ -1357,6 +1364,574 @@ describe('P2-04 Late Payment Protection & Automatic Stripe Refund (Real PostgreS
       expect(isOrderRefundWorkerRunning()).toBe(true);
       await stopOrderRefundWorker(2_000);
       expect(isOrderRefundWorkerRunning()).toBe(false);
+    });
+  });
+
+  describe('5. Independent Review Adversarial Remediation Cases', () => {
+    it('R1. escalates unattributed existing Stripe refund (matching amount/currency, no orderRefundId) to MANUAL_REVIEW_REQUIRED', async () => {
+      const { event } = await createOrganizerAndEvent({ suffix: 'unattr-ref' });
+      const tier = await createTier({ eventId: event.id, totalCapacity: 1, soldQuantity: 1 });
+      const { order, paymentIntentId } = await createOrderFixture({
+        eventId: event.id,
+        tierId: tier.id,
+        quantity: 1,
+        status: OrderStatus.EXPIRED,
+        reservationStatus: ReservationStatus.RELEASED,
+      });
+
+      await processStripeWebhookEvent(
+        makePiSucceededEvent(order.id, paymentIntentId, order.totalInCents)
+      );
+
+      // Existing refund matches PaymentIntent/amount/currency, but lacks metadata.orderRefundId and is not persisted on OrderRefund
+      vi.spyOn(stripe.refunds, 'list').mockResolvedValueOnce({
+        data: [
+          {
+            id: `re_unattr_${nanoid(10)}`,
+            object: 'refund',
+            amount: order.totalInCents,
+            currency: 'usd',
+            status: 'succeeded',
+            metadata: {},
+          },
+        ],
+        has_more: false,
+      } as any);
+      const createSpy = vi.spyOn(stripe.refunds, 'create');
+
+      const pass = await runOrderRefundPass({ workerId: 'w-unattr' });
+      expect(pass.manualReview).toBe(1);
+      expect(pass.succeeded).toBe(0);
+      expect(createSpy).not.toHaveBeenCalled();
+
+      await runEmailOutboxPass();
+
+      const refundRow = await prisma.orderRefund.findUniqueOrThrow({
+        where: { stripePaymentIntentId: paymentIntentId },
+      });
+      const updatedOrder = await prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+      const manualOutbox = await prisma.emailOutbox.findUnique({
+        where: { dedupeKey: buildLatePaymentRefundManualReviewDedupeKey(refundRow.id) },
+      });
+
+      expect(refundRow.status).toBe(OrderRefundStatus.MANUAL_REVIEW_REQUIRED);
+      expect(refundRow.requiresManualResolution).toBe(true);
+      expect(refundRow.lastErrorCode).toBe('STRIPE_UNATTRIBUTED_EXISTING_REFUND');
+      expect(updatedOrder.status).toBe(OrderStatus.EXPIRED);
+      expect(manualOutbox?.status).toBe(EmailOutboxStatus.SENT);
+      expect(
+        sentLatePaymentRefundEmails.some(
+          (m) => m.orderNumber === order.orderNumber && m.kind === 'CONFIRMED'
+        )
+      ).toBe(false);
+    });
+
+    it('R2. escalates incomplete Stripe refund pagination (20 pages with has_more=true) instead of issuing refund', async () => {
+      const { event } = await createOrganizerAndEvent({ suffix: 'pag-inc' });
+      const tier = await createTier({ eventId: event.id, totalCapacity: 1, soldQuantity: 1 });
+      const { order, paymentIntentId } = await createOrderFixture({
+        eventId: event.id,
+        tierId: tier.id,
+        quantity: 1,
+        status: OrderStatus.EXPIRED,
+        reservationStatus: ReservationStatus.RELEASED,
+      });
+
+      await processStripeWebhookEvent(
+        makePiSucceededEvent(order.id, paymentIntentId, order.totalInCents)
+      );
+
+      vi.spyOn(stripe.refunds, 'list').mockImplementation(async () => ({
+        data: [
+          {
+            id: `re_pag_${nanoid(8)}`,
+            amount: 100,
+            currency: 'usd',
+            status: 'succeeded',
+          },
+        ],
+        has_more: true,
+      }) as any);
+      const createSpy = vi.spyOn(stripe.refunds, 'create');
+
+      const pass = await runOrderRefundPass({ workerId: 'w-pag' });
+      expect(pass.manualReview).toBe(1);
+      expect(createSpy).not.toHaveBeenCalled();
+
+      const refundRow = await prisma.orderRefund.findUniqueOrThrow({
+        where: { stripePaymentIntentId: paymentIntentId },
+      });
+      expect(refundRow.status).toBe(OrderRefundStatus.MANUAL_REVIEW_REQUIRED);
+      expect(refundRow.lastErrorCode).toBe('STRIPE_REFUND_LIST_INCOMPLETE');
+    });
+
+    it('R3 & R4. isolates duplicate PaymentIntents pi_1 vs pi_2 across charge.refunded webhooks and financial ledger', async () => {
+      const { organizer, event } = await createOrganizerAndEvent({ suffix: 'dup-pi-iso' });
+      const tier = await createTier({ eventId: event.id, totalCapacity: 5, reservedQuantity: 1 });
+      const pi1 = `pi_primary_${nanoid(12)}`;
+      const pi2 = `pi_dup_${nanoid(12)}`;
+      const { order } = await createOrderFixture({
+        eventId: event.id,
+        tierId: tier.id,
+        quantity: 1,
+        status: OrderStatus.PENDING,
+        reservationStatus: ReservationStatus.ACTIVE,
+        expiresAt: new Date(Date.now() + 15 * 60_000),
+        paymentReference: pi1,
+      });
+
+      // Step 1: pi_1 fulfills legitimately
+      await processStripeWebhookEvent(makePiSucceededEvent(order.id, pi1, order.totalInCents));
+      const balAfterPi1 = await prisma.organizerBalance.findUniqueOrThrow({
+        where: { userId: organizer.id },
+      });
+      expect(balAfterPi1.pendingBalanceInCents).toBe(order.organizerNetInCents);
+
+      // Step 2: Duplicate pi_2 succeeds -> creates DUPLICATE_PAYMENT_INTENT MANUAL_REVIEW_REQUIRED OrderRefund
+      await processStripeWebhookEvent(makePiSucceededEvent(order.id, pi2, order.totalInCents));
+      const pi2Refund = await prisma.orderRefund.findUniqueOrThrow({
+        where: { stripePaymentIntentId: pi2 },
+      });
+      expect(pi2Refund.status).toBe(OrderRefundStatus.MANUAL_REVIEW_REQUIRED);
+      expect(pi2Refund.requiresManualResolution).toBe(true);
+
+      // Step 3: charge.refunded arrives for pi_1 (no orderRefundId metadata).
+      // Must debit ledger for pi_1 ONLY and must NOT misattribute pi_1's refund to pi_2's OrderRefund.
+      const evtChPi1: Stripe.Event = {
+        id: `evt_ch_pi1_${nanoid(12)}`,
+        type: 'charge.refunded',
+        data: {
+          object: {
+            id: `ch_pi1_${nanoid(10)}`,
+            payment_intent: pi1,
+            amount_refunded: order.totalInCents,
+            currency: 'usd',
+            metadata: { orderId: order.id },
+            refunds: {
+              data: [{ id: `re_pi1_${nanoid(10)}`, amount: order.totalInCents, currency: 'usd', status: 'succeeded' }],
+            },
+          } as any,
+        },
+      } as any;
+      createdWebhookEventIds.push(evtChPi1.id);
+
+      await processStripeWebhookEvent(evtChPi1);
+
+      const pi2AfterPi1Refund = await prisma.orderRefund.findUniqueOrThrow({
+        where: { id: pi2Refund.id },
+      });
+      const balAfterPi1Refund = await prisma.organizerBalance.findUniqueOrThrow({
+        where: { userId: organizer.id },
+      });
+      const pi1RefundLedgerCount = await prisma.financialLedgerEntry.count({
+        where: { orderId: order.id, type: LedgerEntryType.REFUND_PENDING },
+      });
+
+      expect(pi2AfterPi1Refund.status).toBe(OrderRefundStatus.MANUAL_REVIEW_REQUIRED);
+      expect(pi2AfterPi1Refund.requiresManualResolution).toBe(true);
+      expect(pi2AfterPi1Refund.stripeRefundId).toBeNull();
+      expect(pi1RefundLedgerCount).toBe(1);
+      expect(balAfterPi1Refund.pendingBalanceInCents).toBe(0);
+
+      // Step 4: Now suppose charge.refunded arrives specifically for pi_2 while pi_2 is in MANUAL_REVIEW_REQUIRED.
+      // Must NOT auto-transition MANUAL_REVIEW_REQUIRED -> SUCCEEDED, must NOT clear requiresManualResolution,
+      // and must NOT create another refund ledger deduction / recoverable debt using pi_1's sale ledger.
+      const evtChPi2: Stripe.Event = {
+        id: `evt_ch_pi2_${nanoid(12)}`,
+        type: 'charge.refunded',
+        data: {
+          object: {
+            id: `ch_pi2_${nanoid(10)}`,
+            payment_intent: pi2,
+            amount_refunded: order.totalInCents,
+            currency: 'usd',
+            metadata: { orderId: order.id },
+            refunds: {
+              data: [{ id: `re_pi2_${nanoid(10)}`, amount: order.totalInCents, currency: 'usd', status: 'succeeded' }],
+            },
+          } as any,
+        },
+      } as any;
+      createdWebhookEventIds.push(evtChPi2.id);
+
+      await processStripeWebhookEvent(evtChPi2);
+
+      const pi2Final = await prisma.orderRefund.findUniqueOrThrow({ where: { id: pi2Refund.id } });
+      const recoverableLedgerCount = await prisma.financialLedgerEntry.count({
+        where: { orderId: order.id, type: LedgerEntryType.REFUND_POST_TRANSFER },
+      });
+      const refundLedgerCountFinal = await prisma.financialLedgerEntry.count({
+        where: { orderId: order.id, type: LedgerEntryType.REFUND_PENDING },
+      });
+
+      expect(pi2Final.status).toBe(OrderRefundStatus.MANUAL_REVIEW_REQUIRED);
+      expect(pi2Final.requiresManualResolution).toBe(true);
+      expect(recoverableLedgerCount).toBe(0);
+      expect(refundLedgerCountFinal).toBe(1);
+    });
+
+    it('R5, R6 & R7. rejects null refund status, has_more=true, and empty charge.refunds lists without confirming refund or sending email', async () => {
+      const { event } = await createOrganizerAndEvent({ suffix: 'incomplete-wh' });
+      const tier = await createTier({ eventId: event.id, totalCapacity: 3, soldQuantity: 3 });
+
+      for (const caseSpec of ['null-status', 'has-more', 'empty-data'] as const) {
+        const { order, paymentIntentId } = await createOrderFixture({
+          eventId: event.id,
+          tierId: tier.id,
+          quantity: 1,
+          status: OrderStatus.EXPIRED,
+          reservationStatus: ReservationStatus.RELEASED,
+        });
+        await processStripeWebhookEvent(
+          makePiSucceededEvent(order.id, paymentIntentId, order.totalInCents)
+        );
+        const refundRow = await prisma.orderRefund.findUniqueOrThrow({
+          where: { stripePaymentIntentId: paymentIntentId },
+        });
+
+        const evt: Stripe.Event = {
+          id: `evt_inc_${caseSpec}_${nanoid(10)}`,
+          type: 'charge.refunded',
+          data: {
+            object: {
+              id: `ch_inc_${nanoid(10)}`,
+              payment_intent: paymentIntentId,
+              amount_refunded: order.totalInCents,
+              currency: 'usd',
+              metadata: { orderId: order.id },
+              refunds:
+                caseSpec === 'empty-data'
+                  ? { data: [], has_more: false }
+                  : caseSpec === 'has-more'
+                    ? {
+                        has_more: true,
+                        data: [
+                          {
+                            id: `re_more_${nanoid(8)}`,
+                            amount: order.totalInCents,
+                            currency: 'usd',
+                            status: 'succeeded',
+                            metadata: { orderRefundId: refundRow.id },
+                          },
+                        ],
+                      }
+                    : {
+                        has_more: false,
+                        data: [
+                          {
+                            id: `re_null_${nanoid(8)}`,
+                            amount: order.totalInCents,
+                            currency: 'usd',
+                            status: null,
+                            metadata: { orderRefundId: refundRow.id },
+                          },
+                        ],
+                      },
+            } as any,
+          },
+        } as any;
+        createdWebhookEventIds.push(evt.id);
+
+        await processStripeWebhookEvent(evt);
+        await runEmailOutboxPass();
+
+        const afterRefund = await prisma.orderRefund.findUniqueOrThrow({
+          where: { id: refundRow.id },
+        });
+        const afterOrder = await prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+        const confirmedOutboxCount = await prisma.emailOutbox.count({
+          where: { orderId: order.id, type: EmailOutboxType.LATE_PAYMENT_REFUND_CONFIRMED },
+        });
+
+        expect(afterRefund.status).toBe(OrderRefundStatus.PENDING);
+        expect(afterOrder.status).toBe(OrderStatus.EXPIRED);
+        expect(confirmedOutboxCount).toBe(0);
+      }
+    });
+
+    it('R8. creates durable MANUAL_REVIEW_REQUIRED record with orderId=null on ORDER_NOT_FOUND', async () => {
+      const orphanPi = `pi_orphan_${nanoid(14)}`;
+      createdOrphanRefundPiIds.push(orphanPi);
+
+      await processStripeWebhookEvent(
+        makePiSucceededEvent(`missing_ord_${nanoid(8)}`, orphanPi, 4500)
+      );
+
+      const orphanRefund = await prisma.orderRefund.findUniqueOrThrow({
+        where: { stripePaymentIntentId: orphanPi },
+      });
+      expect(orphanRefund.orderId).toBeNull();
+      expect(orphanRefund.status).toBe(OrderRefundStatus.MANUAL_REVIEW_REQUIRED);
+      expect(orphanRefund.requiresManualResolution).toBe(true);
+      expect(orphanRefund.reason).toBe('ORDER_NOT_FOUND');
+      expect(orphanRefund.amountInCents).toBe(4500);
+    });
+
+    it('R9, R10 & R11. retrieves Stripe BalanceTransaction BEFORE acquiring Order lock and preserves actual Stripe fee in both event orders', async () => {
+      const prevStripeKey = process.env.STRIPE_SECRET_KEY;
+      process.env.STRIPE_SECRET_KEY = 'sk_test_mock_key_for_retrieve';
+
+      try {
+        // Case A: charge.updated arrives BEFORE payment_intent.succeeded while Order lock is held via barrier
+        const { organizer: orgA, event: evtObjA } = await createOrganizerAndEvent({ suffix: 'fee-ooo' });
+        const tierA = await createTier({ eventId: evtObjA.id, totalCapacity: 5, reservedQuantity: 1 });
+        const { order: orderA, paymentIntentId: piA } = await createOrderFixture({
+          eventId: evtObjA.id,
+          tierId: tierA.id,
+          quantity: 1,
+          status: OrderStatus.PENDING,
+          reservationStatus: ReservationStatus.ACTIVE,
+          expiresAt: new Date(Date.now() + 15 * 60_000),
+        });
+
+        const chargeIdA = `ch_fee_ooo_${nanoid(10)}`;
+        const txnIdA = `txn_fee_ooo_${nanoid(10)}`;
+
+        let releaseOrderLock!: () => void;
+        const lockGate = new Promise<void>((resolve) => {
+          releaseOrderLock = resolve;
+        });
+        let orderLocked!: () => void;
+        const orderLockedPromise = new Promise<void>((resolve) => {
+          orderLocked = resolve;
+        });
+        let retrieveInvoked = false;
+
+        const retrieveSpy = vi
+          .spyOn(stripe.balanceTransactions, 'retrieve')
+          .mockImplementation(async (id: string) => {
+            retrieveInvoked = true;
+            return {
+              id,
+              status: 'available',
+              available_on: Math.floor(Date.now() / 1000) - 60,
+              fee: 175,
+            } as any;
+          });
+
+        // Hold exclusive row lock on orderA
+        const lockHolder = prisma.$transaction(async (tx) => {
+          await tx.$queryRaw`SELECT id FROM "Order" WHERE id = ${orderA.id} FOR UPDATE`;
+          orderLocked();
+          await lockGate;
+        });
+
+        await orderLockedPromise;
+
+        const earlyChargeEvt: Stripe.Event = {
+          id: `evt_ch_ooo_fee_${nanoid(10)}`,
+          type: 'charge.updated',
+          data: {
+            object: {
+              id: chargeIdA,
+              payment_intent: piA,
+              currency: 'usd',
+              status: 'succeeded',
+              metadata: { orderId: orderA.id },
+              balance_transaction: txnIdA,
+            } as any,
+          },
+        } as any;
+        createdWebhookEventIds.push(earlyChargeEvt.id);
+
+        const chargePromise = processStripeWebhookEvent(earlyChargeEvt);
+
+        // Give event loop ticks while Order FOR UPDATE lock is STILL held ->
+        // stripe.balanceTransactions.retrieve MUST already execute before Order lock is released
+        await new Promise((r) => setTimeout(r, 40));
+        expect(retrieveInvoked).toBe(true);
+        expect(retrieveSpy).toHaveBeenCalledWith(txnIdA);
+
+        releaseOrderLock();
+        await Promise.all([lockHolder, chargePromise]);
+
+        // Before payment_intent.succeeded arrives: zero ledger rows, balance untouched, fee buffered on Order
+        const preFeeEntries = await prisma.financialLedgerEntry.findMany({
+          where: { orderId: orderA.id },
+        });
+        expect(preFeeEntries).toHaveLength(0);
+
+        // Now payment_intent.succeeded arrives -> fulfills, settles to AVAILABLE, and records actual fee ONCE
+        await processStripeWebhookEvent(makePiSucceededEvent(orderA.id, piA, orderA.totalInCents));
+
+        // Deliver another charge.updated -> actual fee must NOT be duplicated
+        const dupChargeEvt: Stripe.Event = {
+          id: `evt_ch_ooo_dup_${nanoid(10)}`,
+          type: 'charge.updated',
+          data: {
+            object: {
+              id: chargeIdA,
+              payment_intent: piA,
+              currency: 'usd',
+              status: 'succeeded',
+              metadata: { orderId: orderA.id },
+              balance_transaction: {
+                id: txnIdA,
+                status: 'available',
+                available_on: Math.floor(Date.now() / 1000) - 60,
+                fee: 175,
+              } as any,
+            } as any,
+          },
+        } as any;
+        createdWebhookEventIds.push(dupChargeEvt.id);
+        await processStripeWebhookEvent(dupChargeEvt);
+
+        const actualFeeEntriesA = await prisma.financialLedgerEntry.findMany({
+          where: {
+            orderId: orderA.id,
+            type: LedgerEntryType.STRIPE_PROCESSING_FEE,
+          },
+        });
+        const actualReconciledA = actualFeeEntriesA.filter(
+          (e) => (e.metadata as any)?.isActualReconciliation === true
+        );
+        const balA = await prisma.organizerBalance.findUniqueOrThrow({ where: { userId: orgA.id } });
+        expect(actualReconciledA).toHaveLength(1);
+        expect(actualReconciledA[0].amountInCents).toBe(175);
+        expect(balA.availableBalanceInCents).toBe(orderA.organizerNetInCents);
+
+        // Case B: payment_intent.succeeded arrives BEFORE charge.updated -> still records actual fee once
+        const { event: evtObjB } = await createOrganizerAndEvent({ suffix: 'fee-normal' });
+        const tierB = await createTier({ eventId: evtObjB.id, totalCapacity: 5, reservedQuantity: 1 });
+        const { order: orderB, paymentIntentId: piB } = await createOrderFixture({
+          eventId: evtObjB.id,
+          tierId: tierB.id,
+          quantity: 1,
+          status: OrderStatus.PENDING,
+          reservationStatus: ReservationStatus.ACTIVE,
+          expiresAt: new Date(Date.now() + 15 * 60_000),
+        });
+        await processStripeWebhookEvent(makePiSucceededEvent(orderB.id, piB, orderB.totalInCents));
+        const chEvtB: Stripe.Event = {
+          id: `evt_ch_norm_fee_${nanoid(10)}`,
+          type: 'charge.updated',
+          data: {
+            object: {
+              id: `ch_norm_${nanoid(10)}`,
+              payment_intent: piB,
+              currency: 'usd',
+              status: 'succeeded',
+              metadata: { orderId: orderB.id },
+              balance_transaction: {
+                id: `txn_norm_${nanoid(10)}`,
+                status: 'available',
+                available_on: Math.floor(Date.now() / 1000) - 60,
+                fee: 188,
+              } as any,
+            } as any,
+          },
+        } as any;
+        createdWebhookEventIds.push(chEvtB.id);
+        await processStripeWebhookEvent(chEvtB);
+
+        const actualFeeEntriesB = await prisma.financialLedgerEntry.findMany({
+          where: {
+            orderId: orderB.id,
+            type: LedgerEntryType.STRIPE_PROCESSING_FEE,
+          },
+        });
+        expect(
+          actualFeeEntriesB.filter((e) => (e.metadata as any)?.isActualReconciliation === true)
+        ).toHaveLength(1);
+      } finally {
+        process.env.STRIPE_SECRET_KEY = prevStripeKey;
+      }
+    });
+
+    it('R13. cancels queued manual-review notification cleanly when operator resolves refund before email dispatch (both PENDING and claimed PROCESSING races)', async () => {
+      const { event } = await createOrganizerAndEvent({ suffix: 'manual-race' });
+      const tier = await createTier({ eventId: event.id, totalCapacity: 2, soldQuantity: 2 });
+
+      // Race 1: Operator resolves while EmailOutbox row is still PENDING
+      const { order: ord1, paymentIntentId: pi1 } = await createOrderFixture({
+        eventId: event.id,
+        tierId: tier.id,
+        quantity: 1,
+        status: OrderStatus.EXPIRED,
+        reservationStatus: ReservationStatus.RELEASED,
+      });
+      await processStripeWebhookEvent(makePiSucceededEvent(ord1.id, pi1, ord1.totalInCents));
+      vi.spyOn(stripe.refunds, 'list').mockResolvedValueOnce({ data: [], has_more: false } as any);
+      const cardErr: any = new Error('Resource missing');
+      cardErr.type = 'StripeInvalidRequestError';
+      cardErr.code = 'resource_missing';
+      cardErr.statusCode = 400;
+      vi.spyOn(stripe.refunds, 'create').mockRejectedValueOnce(cardErr);
+      await runOrderRefundPass({ workerId: 'w-race-1' });
+
+      const refund1 = await prisma.orderRefund.findUniqueOrThrow({
+        where: { stripePaymentIntentId: pi1 },
+      });
+
+      await resolveManualOrderRefund({
+        orderRefundId: refund1.id,
+        actorUserId: adminActor.id,
+        actorEmail: adminActor.email,
+        action: 'REFUNDED_MANUALLY',
+        stripeRefundId: `re_race1_${nanoid(8)}`,
+        notes: 'Resolved prior to outbox email dispatch',
+      });
+
+      const emailRow1 = await prisma.emailOutbox.findUniqueOrThrow({
+        where: { dedupeKey: buildLatePaymentRefundManualReviewDedupeKey(refund1.id) },
+      });
+      expect(emailRow1.status).toBe(EmailOutboxStatus.CANCELLED);
+
+      const passAfterCancel = await runEmailOutboxPass();
+      expect(passAfterCancel.cancelled).toBe(0);
+      expect(
+        sentLatePaymentRefundEmails.some((m) => m.orderNumber === ord1.orderNumber)
+      ).toBe(false);
+
+      // Race 2: Outbox worker already claimed into PROCESSING (or resolves mid-flight before processClaimedEmailOutboxItem)
+      const { order: ord2, paymentIntentId: pi2 } = await createOrderFixture({
+        eventId: event.id,
+        tierId: tier.id,
+        quantity: 1,
+        status: OrderStatus.EXPIRED,
+        reservationStatus: ReservationStatus.RELEASED,
+      });
+      await processStripeWebhookEvent(makePiSucceededEvent(ord2.id, pi2, ord2.totalInCents));
+      vi.spyOn(stripe.refunds, 'list').mockResolvedValueOnce({ data: [], has_more: false } as any);
+      vi.spyOn(stripe.refunds, 'create').mockRejectedValueOnce(cardErr);
+      await runOrderRefundPass({ workerId: 'w-race-2' });
+
+      const refund2 = await prisma.orderRefund.findUniqueOrThrow({
+        where: { stripePaymentIntentId: pi2 },
+      });
+      const emailRow2 = await prisma.emailOutbox.findUniqueOrThrow({
+        where: { dedupeKey: buildLatePaymentRefundManualReviewDedupeKey(refund2.id) },
+      });
+
+      // Simulate worker claiming row right as operator marks MANUALLY_RESOLVED
+      await prisma.emailOutbox.update({
+        where: { id: emailRow2.id },
+        data: {
+          status: EmailOutboxStatus.PROCESSING,
+          lockedBy: 'race-outbox-worker',
+          lockedUntil: new Date(Date.now() - 10_000), // reclaimable expired lease for runEmailOutboxPass
+        },
+      });
+      await resolveManualOrderRefund({
+        orderRefundId: refund2.id,
+        actorUserId: adminActor.id,
+        actorEmail: adminActor.email,
+        action: 'CONFIRMED_ALREADY_REFUNDED',
+        stripeRefundId: `re_race2_${nanoid(8)}`,
+        notes: 'Resolved concurrently while email was PROCESSING',
+      });
+
+      const outboxPass2 = await runEmailOutboxPass();
+      const emailRow2After = await prisma.emailOutbox.findUniqueOrThrow({
+        where: { id: emailRow2.id },
+      });
+      expect(outboxPass2.cancelled).toBe(1);
+      expect(outboxPass2.failedPermanent).toBe(0);
+      expect(emailRow2After.status).toBe(EmailOutboxStatus.CANCELLED);
+      expect(
+        sentLatePaymentRefundEmails.some((m) => m.orderNumber === ord2.orderNumber)
+      ).toBe(false);
     });
   });
 });

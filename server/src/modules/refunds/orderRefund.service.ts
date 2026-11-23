@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import os from 'os';
 import Stripe from 'stripe';
 import {
+  EmailOutboxStatus,
   OrderRefund,
   OrderRefundStatus,
   OrderStatus,
@@ -13,6 +14,7 @@ import { normalizeEmail } from '../../config/env.js';
 import { stripe } from '../../lib/stripe.js';
 import { redactSensitiveData } from '../finance/stripeError.js';
 import {
+  buildLatePaymentRefundManualReviewDedupeKey,
   enqueueLatePaymentRefundEmail,
   EMAIL_OUTBOX_MAX_ATTEMPTS,
 } from '../notifications/emailOutbox.service.js';
@@ -355,12 +357,13 @@ type StripeReconcileOutcome =
   | { kind: 'AMBIGUOUS_ESCALATE'; code: string; message: string; metadata?: Record<string, unknown> };
 
 async function listAllStripeRefundsForPaymentIntent(
-  paymentIntentId: string
-): Promise<Stripe.Refund[]> {
+  paymentIntentId: string,
+  maxPages = 20
+): Promise<{ refunds: Stripe.Refund[]; incomplete: boolean }> {
   const allRefunds: Stripe.Refund[] = [];
   let startingAfter: string | undefined;
 
-  for (let pageIndex = 0; pageIndex < 20; pageIndex++) {
+  for (let pageIndex = 0; pageIndex < maxPages; pageIndex++) {
     const page = await stripe.refunds.list({
       payment_intent: paymentIntentId,
       limit: 100,
@@ -371,19 +374,25 @@ async function listAllStripeRefundsForPaymentIntent(
     allRefunds.push(...data);
 
     if (!page?.has_more || data.length === 0) {
-      break;
+      return { refunds: allRefunds, incomplete: false };
     }
+
+    if (pageIndex === maxPages - 1) {
+      return { refunds: allRefunds, incomplete: true };
+    }
+
     startingAfter = data[data.length - 1].id;
   }
 
-  return allRefunds;
+  return { refunds: allRefunds, incomplete: false };
 }
 
 function evaluateExistingStripeRefunds(
   refunds: Stripe.Refund[],
   expectedAmountInCents: number,
   expectedCurrency: string,
-  orderRefundId: string
+  orderRefundId: string,
+  persistedStripeRefundId?: string | null
 ): StripeReconcileOutcome {
   if (refunds.length === 0) {
     return { kind: 'NONE' };
@@ -496,19 +505,38 @@ function evaluateExistingStripeRefunds(
     };
   }
 
-  if (failedRefunds.length > 0) {
-    // Only allow auto-reconciliation alongside historical failed attempts when metadata explicitly proves this OrderRefund created the active refund
-    if (metaRefundId !== orderRefundId) {
-      return {
-        kind: 'AMBIGUOUS_ESCALATE',
-        code: 'STRIPE_MIXED_FAILED_AND_ACTIVE_REFUNDS',
-        message: `PaymentIntent has both failed and active refunds without matching OrderRefund metadata.`,
-        metadata: {
-          activeRefundId: single.id,
-          failedRefundIds: failedRefunds.map((r) => r.id),
-        },
-      };
-    }
+  // Positive ownership proof required: explicit metadata.orderRefundId OR exact persisted stripeRefundId
+  const matchesMetadata = metaRefundId === orderRefundId;
+  const matchesPersistedRefundId = Boolean(
+    persistedStripeRefundId && single.id === persistedStripeRefundId
+  );
+
+  if (!matchesMetadata && !matchesPersistedRefundId) {
+    return {
+      kind: 'AMBIGUOUS_ESCALATE',
+      code: 'STRIPE_UNATTRIBUTED_EXISTING_REFUND',
+      message: `Existing Stripe refund ${single.id} (${single.amount} ${single.currency}) lacks OrderRefund ownership proof (missing metadata.orderRefundId and no persisted stripeRefundId match).`,
+      metadata: {
+        refundId: single.id,
+        amount: single.amount,
+        currency: single.currency,
+        status: single.status,
+        observedOrderRefundId: metaRefundId || null,
+        expectedOrderRefundId: orderRefundId,
+      },
+    };
+  }
+
+  if (failedRefunds.length > 0 && !matchesMetadata && !matchesPersistedRefundId) {
+    return {
+      kind: 'AMBIGUOUS_ESCALATE',
+      code: 'STRIPE_MIXED_FAILED_AND_ACTIVE_REFUNDS',
+      message: `PaymentIntent has both failed and active refunds without matching OrderRefund ownership.`,
+      metadata: {
+        activeRefundId: single.id,
+        failedRefundIds: failedRefunds.map((r) => r.id),
+      },
+    };
   }
 
   if (single.status === 'succeeded') {
@@ -930,14 +958,30 @@ export async function processClaimedOrderRefundItem(
 
   try {
     // 1. Reconcile existing Stripe refunds on the PaymentIntent before issuing another refund
-    const existingRefunds = await listAllStripeRefundsForPaymentIntent(
+    const { refunds: existingRefunds, incomplete } = await listAllStripeRefundsForPaymentIntent(
       item.stripePaymentIntentId
     );
+    if (incomplete) {
+      const res = await finalizeRefundManualReviewInTx({
+        item,
+        workerId,
+        category: 'ANOMALY',
+        code: 'STRIPE_REFUND_LIST_INCOMPLETE',
+        message: `Stripe refunds.list pagination exceeded maximum pages with has_more=true for PaymentIntent ${item.stripePaymentIntentId}; escalating to manual review rather than guessing from partial history.`,
+        extraMetadata: {
+          fetchedRefundCount: existingRefunds.length,
+        },
+      });
+      if (res.enqueuedEmail) triggerEmailOutboxDispatch();
+      return res.outcome;
+    }
+
     const reconcile = evaluateExistingStripeRefunds(
       existingRefunds,
       item.amountInCents,
       item.currency,
-      item.id
+      item.id,
+      item.stripeRefundId
     );
 
     if (reconcile.kind === 'AMBIGUOUS_ESCALATE') {
@@ -1139,26 +1183,38 @@ export async function reconcileOrderRefundFromStripeWebhook(
       eventTitle: string;
     } | null;
     paymentIntentId?: string | null;
+    hasMoreRefunds?: boolean;
     refunds: Array<{
       id: string;
       amount: number;
       currency: string;
       status: string | null;
       failure_reason?: string;
+      payment_intent?: string | null;
       metadata?: Record<string, string> | null;
     }>;
   }
 ): Promise<{ matchedLatePaymentRefund: boolean; enqueuedEmail: boolean }> {
-  const { lockedOrder, paymentIntentId, refunds } = params;
+  const { lockedOrder, paymentIntentId, hasMoreRefunds = false, refunds } = params;
 
   const refundIds = refunds.map((r) => r.id).filter(Boolean);
+  const metaOrderRefundIds = refunds
+    .map((r) => r.metadata?.orderRefundId)
+    .filter((id): id is string => typeof id === 'string' && id.length > 0);
+
+  if (!paymentIntentId && refundIds.length === 0 && metaOrderRefundIds.length === 0) {
+    return { matchedLatePaymentRefund: false, enqueuedEmail: false };
+  }
+
+  // Match strictly on trustworthy identifiers (PaymentIntent ID, persisted stripeRefundId, or metadata.orderRefundId).
+  // Never match solely on Order ID so another PaymentIntent's refund on the same Order cannot be misattributed.
   const existingRows = await tx.$queryRaw<OrderRefund[]>`
     SELECT *
     FROM "OrderRefund"
     WHERE (
       (${paymentIntentId ?? null}::text IS NOT NULL AND "stripePaymentIntentId" = ${paymentIntentId ?? null})
       OR (${refundIds.length > 0} AND "stripeRefundId" = ANY(${refundIds}))
-      OR (${lockedOrder?.id ?? null}::text IS NOT NULL AND "orderId" = ${lockedOrder?.id ?? null})
+      OR (${metaOrderRefundIds.length > 0} AND id = ANY(${metaOrderRefundIds}))
     )
     ORDER BY id ASC
     FOR UPDATE
@@ -1168,20 +1224,45 @@ export async function reconcileOrderRefundFromStripeWebhook(
     return { matchedLatePaymentRefund: false, enqueuedEmail: false };
   }
 
+  // Empty or truncated charge.refunds payload cannot safely prove refund outcome;
+  // leave record recoverable by worker or a subsequent attributable refund.updated webhook.
+  if (hasMoreRefunds || refunds.length === 0) {
+    return { matchedLatePaymentRefund: true, enqueuedEmail: false };
+  }
+
   let enqueuedEmail = false;
 
   for (const orderRefund of existingRows) {
+    // Terminal and MANUAL_REVIEW_REQUIRED records must not be overwritten or auto-cleared by ordinary webhooks.
     if (
       orderRefund.status === OrderRefundStatus.SUCCEEDED ||
-      orderRefund.status === OrderRefundStatus.MANUALLY_RESOLVED
+      orderRefund.status === OrderRefundStatus.MANUALLY_RESOLVED ||
+      orderRefund.status === OrderRefundStatus.MANUAL_REVIEW_REQUIRED ||
+      orderRefund.requiresManualResolution
     ) {
       continue;
     }
 
+    if (paymentIntentId && paymentIntentId !== orderRefund.stripePaymentIntentId) {
+      continue;
+    }
+
+    // Positive ownership proof required: exact persisted stripeRefundId OR metadata.orderRefundId match
     const matchingRefunds = refunds.filter((r) => {
-      if (orderRefund.stripeRefundId && r.id === orderRefund.stripeRefundId) return true;
-      if (r.metadata?.orderRefundId === orderRefund.id) return true;
-      return !orderRefund.stripeRefundId && refunds.length === 1;
+      const matchesPersisted = Boolean(
+        orderRefund.stripeRefundId && r.id === orderRefund.stripeRefundId
+      );
+      const matchesMetadata = r.metadata?.orderRefundId === orderRefund.id;
+      if (!matchesPersisted && !matchesMetadata) {
+        return false;
+      }
+      if (r.metadata?.orderRefundId && r.metadata.orderRefundId !== orderRefund.id) {
+        return false;
+      }
+      if (r.payment_intent && r.payment_intent !== orderRefund.stripePaymentIntentId) {
+        return false;
+      }
+      return true;
     });
 
     const targetRefund = matchingRefunds[0];
@@ -1191,10 +1272,11 @@ export async function reconcileOrderRefundFromStripeWebhook(
 
     const amountMatches = targetRefund.amount === orderRefund.amountInCents;
     const currencyMatches =
-      !targetRefund.currency ||
+      Boolean(targetRefund.currency) &&
       targetRefund.currency.toUpperCase() === orderRefund.currency.toUpperCase();
 
     if (!amountMatches || !currencyMatches || refunds.length > 1) {
+      const now = new Date();
       await tx.orderRefund.update({
         where: { id: orderRefund.id },
         data: {
@@ -1202,7 +1284,7 @@ export async function reconcileOrderRefundFromStripeWebhook(
           requiresManualResolution: true,
           lockedBy: null,
           lockedUntil: null,
-          failedAt: new Date(),
+          failedAt: now,
           lastErrorCategory: 'ANOMALY',
           lastErrorCode: 'WEBHOOK_REFUND_MISMATCH',
           lastErrorMessage: sanitizeRefundDiagnosticMessage(
@@ -1213,9 +1295,8 @@ export async function reconcileOrderRefundFromStripeWebhook(
       continue;
     }
 
-    if (targetRefund.status === 'succeeded' || targetRefund.status === null) {
-      // Note: Stripe `charge.refunded` Charge.refunds entries occasionally omit `status` in minimal payloads;
-      // when `refund.status` is explicitly 'failed' / 'canceled' / 'pending' / 'requires_action' we branch below.
+    // Explicit Stripe confirmation required: only 'succeeded' confirms completion (never null/missing)
+    if (targetRefund.status === 'succeeded') {
       const now = new Date();
       await tx.orderRefund.update({
         where: { id: orderRefund.id },
@@ -1335,6 +1416,7 @@ export async function reconcileOrderRefundFromStripeWebhook(
         }
       }
     }
+    // Note: if targetRefund.status is null/missing, leave OrderRefund unchanged without confirming success.
   }
 
   return { matchedLatePaymentRefund: true, enqueuedEmail };
@@ -1455,6 +1537,22 @@ export async function resolveManualOrderRefund(input: {
         data: { status: PaymentStatus.REFUNDED },
       });
     }
+
+    // Cancel any un-dispatched PENDING manual-review buyer notification so resolved cases
+    // never emit stale "still unresolved" notices or fail permanently on dispatch.
+    await tx.emailOutbox.updateMany({
+      where: {
+        dedupeKey: buildLatePaymentRefundManualReviewDedupeKey(refund.id),
+        status: EmailOutboxStatus.PENDING,
+      },
+      data: {
+        status: EmailOutboxStatus.CANCELLED,
+        lockedBy: null,
+        lockedUntil: null,
+        lastErrorCode: 'REFUND_ALREADY_MANUALLY_RESOLVED',
+        lastErrorMessage: 'Superseded by manual refund resolution prior to dispatch.',
+      },
+    });
 
     await tx.adminAuditLog.create({
       data: {

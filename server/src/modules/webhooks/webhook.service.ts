@@ -44,9 +44,51 @@ export class PaymentValidationError extends Error {
   }
 }
 
+async function resolveChargeBalanceTransaction(
+  charge: Stripe.Charge
+): Promise<Stripe.BalanceTransaction | null> {
+  if (typeof charge.balance_transaction === 'object' && charge.balance_transaction !== null) {
+    return charge.balance_transaction as Stripe.BalanceTransaction;
+  }
+
+  const effectiveStripeKey = process.env.STRIPE_SECRET_KEY ?? env.STRIPE_SECRET_KEY;
+  if (
+    typeof charge.balance_transaction === 'string' &&
+    effectiveStripeKey &&
+    effectiveStripeKey !== 'sk_test_placeholder'
+  ) {
+    try {
+      return await stripe.balanceTransactions.retrieve(charge.balance_transaction);
+    } catch (err: any) {
+      console.warn(
+        `[Settlement] Could not retrieve balance transaction ${charge.balance_transaction}: ${err?.message}`
+      );
+    }
+  }
+
+  return null;
+}
+
 export async function processStripeWebhookEvent(
   event: Stripe.Event
 ): Promise<{ handled: boolean; duplicate?: boolean }> {
+  // Fast non-locking duplicate check before any external Stripe HTTP pre-fetch
+  const alreadyProcessed = await prisma.processedWebhookEvent.findUnique({
+    where: { eventId: event.id },
+    select: { id: true },
+  });
+  if (alreadyProcessed) {
+    return { handled: true, duplicate: true };
+  }
+
+  // Retrieve Stripe BalanceTransaction strictly OUTSIDE Prisma transactions / row locks
+  let preloadedBalanceTx: Stripe.BalanceTransaction | null = null;
+  if (event.type === 'charge.updated') {
+    preloadedBalanceTx = await resolveChargeBalanceTransaction(
+      event.data.object as Stripe.Charge
+    );
+  }
+
   let txResult: {
     handled: boolean;
     duplicate?: boolean;
@@ -57,7 +99,7 @@ export async function processStripeWebhookEvent(
   try {
     txResult = await prisma.$transaction(
       async (tx) => {
-        // Skip duplicate deliveries
+        // Re-check inside transaction in case of concurrent duplicate delivery
         const existing = await tx.processedWebhookEvent.findUnique({
           where: { eventId: event.id },
         });
@@ -93,7 +135,7 @@ export async function processStripeWebhookEvent(
 
           case 'charge.updated': {
             const charge = event.data.object as Stripe.Charge;
-            await handleChargeUpdated(tx, charge);
+            await handleChargeUpdated(tx, charge, preloadedBalanceTx);
             break;
           }
 
@@ -936,6 +978,28 @@ export async function handlePaymentIntentSucceeded(
     autoSettle: shouldAutoSettleFromPriorCharge,
   });
 
+  // If charge.updated arrived out-of-order BEFORE payment_intent.succeeded and buffered the actual Stripe fee,
+  // record the reconciled Stripe fee entry once now that the sale is fulfilled.
+  if (
+    typeof order.stripeActualFeeInCents === 'number' &&
+    !order.stripeActualFeeRecordedAt &&
+    settlementChargeId
+  ) {
+    await recordActualStripeFee(tx, {
+      stripeChargeId: settlementChargeId,
+      actualFeeInCents: order.stripeActualFeeInCents,
+      currency: order.stripeActualFeeCurrency || order.currency,
+      orderId: order.id,
+    });
+    await tx.order.update({
+      where: { id: order.id },
+      data: {
+        stripeActualFeeRecordedAt: new Date(),
+        stripeActualFeeInCents: null,
+      },
+    });
+  }
+
   // Atomically enqueue the durable buyer confirmation email inside the same transaction.
   // Never performs external email I/O here.
   let enqueuedEmail = false;
@@ -1023,32 +1087,25 @@ async function lockOrderByIdentifier(
 
 async function handleChargeUpdated(
   tx: Prisma.TransactionClient,
-  charge: Stripe.Charge
+  charge: Stripe.Charge,
+  preloadedBalanceTx?: Stripe.BalanceTransaction | null
 ): Promise<void> {
   const paymentIntentId = typeof charge.payment_intent === 'string'
     ? charge.payment_intent
     : (charge.payment_intent as Stripe.PaymentIntent)?.id;
+
+  // Balance transaction was retrieved strictly outside this DB transaction / Order lock
+  const balanceTx: Stripe.BalanceTransaction | null =
+    preloadedBalanceTx ??
+    (typeof charge.balance_transaction === 'object' && charge.balance_transaction !== null
+      ? (charge.balance_transaction as Stripe.BalanceTransaction)
+      : null);
 
   const orderId = charge.metadata?.orderId as string | undefined;
   const order = await lockOrderByIdentifier(tx, orderId, paymentIntentId);
 
   if (!order) {
     return;
-  }
-
-  let balanceTx: Stripe.BalanceTransaction | null = null;
-  if (typeof charge.balance_transaction === 'object' && charge.balance_transaction !== null) {
-    balanceTx = charge.balance_transaction as Stripe.BalanceTransaction;
-  } else if (
-    typeof charge.balance_transaction === 'string' &&
-    env.STRIPE_SECRET_KEY &&
-    env.STRIPE_SECRET_KEY !== 'sk_test_placeholder'
-  ) {
-    try {
-      balanceTx = await stripe.balanceTransactions.retrieve(charge.balance_transaction);
-    } catch (err: any) {
-      console.warn(`[Settlement] Could not retrieve balance transaction ${charge.balance_transaction}: ${err?.message}`);
-    }
   }
 
   // Financially correct settlement detection:
@@ -1061,7 +1118,6 @@ async function handleChargeUpdated(
       (typeof balanceTx.available_on !== 'number' || balanceTx.available_on * 1000 <= Date.now())
   );
 
-  // Check actual sale/ledger evidence OR completed status; never settle unfulfilled late-payment/expired/refunded orders.
   const existingSaleLedger = await tx.financialLedgerEntry.findFirst({
     where: {
       orderId: order.id,
@@ -1069,15 +1125,32 @@ async function handleChargeUpdated(
     },
     select: { id: true },
   });
-  const hasLatePaymentRefund = Boolean(
-    await tx.orderRefund.findFirst({
-      where: { orderId: order.id },
-      select: { id: true },
-    })
+
+  // Scope OrderRefund check by PaymentIntent when available so a duplicate PI's OrderRefund
+  // does not block legitimate settlement for the original PI on the same Order.
+  const hasLatePaymentRefundForPi = paymentIntentId
+    ? Boolean(
+        await tx.orderRefund.findUnique({
+          where: { stripePaymentIntentId: paymentIntentId },
+          select: { id: true },
+        })
+      )
+    : Boolean(
+        await tx.orderRefund.findFirst({
+          where: { orderId: order.id },
+          select: { id: true },
+        })
+      );
+
+  const isDifferentPiFromCompletedOrder = Boolean(
+    paymentIntentId &&
+      order.paymentReference &&
+      order.paymentReference !== paymentIntentId
   );
 
   const isCompletedSale =
-    !hasLatePaymentRefund &&
+    !hasLatePaymentRefundForPi &&
+    !isDifferentPiFromCompletedOrder &&
     (order.status === OrderStatus.COMPLETED || Boolean(existingSaleLedger));
 
   if (charge.status === 'succeeded' && isFundsAvailable) {
@@ -1086,31 +1159,47 @@ async function handleChargeUpdated(
         orderId: order.id,
         stripeChargeId: charge.id,
       });
-    } else if (
-      order.status === OrderStatus.PENDING &&
-      !order.stripeFundsAvailableAt
-    ) {
-      // Out-of-order charge.updated arrived before payment_intent.succeeded:
-      // Persist durable availability signal so normal fulfillment settles immediately without
-      // crediting organizer balances prematurely if this turns out to be a late payment.
-      await tx.order.update({
-        where: { id: order.id },
-        data: {
-          stripeFundsAvailableAt: new Date(),
-          stripeSettledChargeId: charge.id,
-        },
-      });
     }
   }
 
-  // Reconcile actual Stripe fee only for legitimate completed sales
-  if (isCompletedSale && balanceTx && typeof balanceTx.fee === 'number') {
-    await recordActualStripeFee(tx, {
-      stripeChargeId: charge.id,
-      actualFeeInCents: balanceTx.fee,
-      currency: charge.currency,
-      orderId: order.id,
-    });
+  const hasFeeNumber = Boolean(balanceTx && typeof balanceTx.fee === 'number');
+  if (isCompletedSale) {
+    if (hasFeeNumber && !order.stripeActualFeeRecordedAt) {
+      await recordActualStripeFee(tx, {
+        stripeChargeId: charge.id,
+        actualFeeInCents: balanceTx!.fee,
+        currency: charge.currency,
+        orderId: order.id,
+      });
+      await tx.order.update({
+        where: { id: order.id },
+        data: {
+          stripeActualFeeRecordedAt: new Date(),
+          stripeActualFeeInCents: null,
+        },
+      });
+    }
+  } else if (order.status === OrderStatus.PENDING && !hasLatePaymentRefundForPi) {
+    // Out-of-order charge.updated arrived BEFORE payment_intent.succeeded:
+    // Persist funds-available + actual fee metadata on Order without crediting balances yet.
+    const updateData: Prisma.OrderUpdateInput = {};
+    if (charge.status === 'succeeded' && isFundsAvailable && !order.stripeFundsAvailableAt) {
+      updateData.stripeFundsAvailableAt = new Date();
+      updateData.stripeSettledChargeId = charge.id;
+    }
+    if (hasFeeNumber && !order.stripeActualFeeRecordedAt) {
+      updateData.stripeActualFeeInCents = balanceTx!.fee;
+      updateData.stripeActualFeeCurrency = (charge.currency || order.currency).toUpperCase();
+      if (!updateData.stripeSettledChargeId && !order.stripeSettledChargeId) {
+        updateData.stripeSettledChargeId = charge.id;
+      }
+    }
+    if (Object.keys(updateData).length > 0) {
+      await tx.order.update({
+        where: { id: order.id },
+        data: updateData,
+      });
+    }
   }
 }
 
@@ -1126,23 +1215,33 @@ async function handleChargeRefunded(
 
   let order = await lockOrderByIdentifier(tx, orderId, paymentIntentId);
 
+  const hasMoreRefunds = Boolean(charge.refunds?.has_more);
   const chargeRefunds = (charge.refunds?.data || []).map((r) => ({
     id: r.id,
-    amount: typeof r.amount === 'number' ? r.amount : charge.amount_refunded,
+    amount: typeof r.amount === 'number' ? r.amount : -1,
     currency: (r.currency || charge.currency || order?.currency || 'USD').toUpperCase(),
-    status: (r as any).status ?? null,
+    status: typeof (r as any).status === 'string' ? (r as any).status : null,
     failure_reason: r.failure_reason,
+    payment_intent:
+      typeof r.payment_intent === 'string'
+        ? r.payment_intent
+        : (r.payment_intent as Stripe.PaymentIntent)?.id ?? paymentIntentId ?? null,
     metadata: (r.metadata || null) as Record<string, string> | null,
   }));
 
-  // If Order wasn't matched directly via charge metadata/paymentReference, resolve Order via OrderRefund
-  if (!order && (paymentIntentId || chargeRefunds.length > 0)) {
-    const refundIds = chargeRefunds.map((r) => r.id).filter(Boolean);
+  const refundIds = chargeRefunds.map((r) => r.id).filter(Boolean);
+  const metaOrderRefundIds = chargeRefunds
+    .map((r) => r.metadata?.orderRefundId)
+    .filter((id): id is string => typeof id === 'string' && id.length > 0);
+
+  // Resolve Order strictly via trustworthy refund/PaymentIntent evidence if charge metadata missed it
+  if (!order && (paymentIntentId || refundIds.length > 0 || metaOrderRefundIds.length > 0)) {
     const linkedRefund = await tx.orderRefund.findFirst({
       where: {
         OR: [
           ...(paymentIntentId ? [{ stripePaymentIntentId: paymentIntentId }] : []),
           ...(refundIds.length > 0 ? [{ stripeRefundId: { in: refundIds } }] : []),
+          ...(metaOrderRefundIds.length > 0 ? [{ id: { in: metaOrderRefundIds } }] : []),
         ],
       },
       select: { orderId: true },
@@ -1166,6 +1265,7 @@ async function handleChargeRefunded(
   const lateReconcile = await reconcileOrderRefundFromStripeWebhook(tx, {
     lockedOrder: lockedOrderSummary,
     paymentIntentId: paymentIntentId ?? null,
+    hasMoreRefunds,
     refunds: chargeRefunds,
   });
 
@@ -1176,8 +1276,28 @@ async function handleChargeRefunded(
     throw new Error(`[ChargeRefunded] Order not found for charge ${charge.id}; throwing to trigger Stripe webhook retry`);
   }
 
-  // Use actual sale/ledger evidence before mutating organizer balances so late-payment refunds
-  // never create bogus organizer debits or phantom RECOVERABLE liabilities.
+  // Isolate refund ledger effects by PaymentIntent:
+  // Check whether this incoming charge/refund belongs to an OrderRefund OR a distinct PI from the fulfilled Order.
+  const orderRefundForIncomingCharge =
+    paymentIntentId || refundIds.length > 0 || metaOrderRefundIds.length > 0
+      ? await tx.orderRefund.findFirst({
+          where: {
+            OR: [
+              ...(paymentIntentId ? [{ stripePaymentIntentId: paymentIntentId }] : []),
+              ...(refundIds.length > 0 ? [{ stripeRefundId: { in: refundIds } }] : []),
+              ...(metaOrderRefundIds.length > 0 ? [{ id: { in: metaOrderRefundIds } }] : []),
+            ],
+          },
+          select: { id: true },
+        })
+      : null;
+
+  const isDifferentPiFromCompletedOrder = Boolean(
+    paymentIntentId &&
+      order.paymentReference &&
+      order.paymentReference !== paymentIntentId
+  );
+
   const saleLedgerEvidence = await tx.financialLedgerEntry.findFirst({
     where: {
       orderId: order.id,
@@ -1187,8 +1307,9 @@ async function handleChargeRefunded(
   });
 
   const isLegitimateSaleRefund =
-    Boolean(saleLedgerEvidence) ||
-    (!lateReconcile.matchedLatePaymentRefund && order.status === OrderStatus.COMPLETED);
+    !orderRefundForIncomingCharge &&
+    !isDifferentPiFromCompletedOrder &&
+    (Boolean(saleLedgerEvidence) || order.status === OrderStatus.COMPLETED);
 
   if (isLegitimateSaleRefund) {
     const stripeRefundId = charge.refunds?.data?.[0]?.id;
@@ -1213,6 +1334,7 @@ async function handleRefundEvent(
     : (refund.payment_intent as Stripe.PaymentIntent)?.id;
 
   const metaOrderId = refund.metadata?.orderId as string | undefined;
+  const metaOrderRefundId = refund.metadata?.orderRefundId as string | undefined;
   let order = await lockOrderByIdentifier(tx, metaOrderId, paymentIntentId);
 
   if (!order) {
@@ -1221,6 +1343,7 @@ async function handleRefundEvent(
         OR: [
           ...(refund.id ? [{ stripeRefundId: refund.id }] : []),
           ...(paymentIntentId ? [{ stripePaymentIntentId: paymentIntentId }] : []),
+          ...(metaOrderRefundId ? [{ id: metaOrderRefundId }] : []),
         ],
       },
       select: { orderId: true },
@@ -1242,13 +1365,15 @@ async function handleRefundEvent(
         }
       : null,
     paymentIntentId: paymentIntentId ?? null,
+    hasMoreRefunds: false,
     refunds: [
       {
         id: refund.id,
         amount: refund.amount,
         currency: (refund.currency || order?.currency || 'USD').toUpperCase(),
-        status: refund.status,
+        status: typeof refund.status === 'string' ? refund.status : null,
         failure_reason: refund.failure_reason,
+        payment_intent: paymentIntentId ?? null,
         metadata: (refund.metadata || null) as Record<string, string> | null,
       },
     ],

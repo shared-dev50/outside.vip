@@ -60,6 +60,7 @@ export interface EmailOutboxPassStats {
   accepted: number;
   retried: number;
   failedPermanent: number;
+  cancelled: number;
   leaseLost: number;
   reapedExhausted: number;
 }
@@ -588,7 +589,36 @@ export async function processClaimedEmailOutboxItem(
   options?: {
     randomFn?: () => number;
   }
-): Promise<'accepted' | 'retried' | 'failedPermanent' | 'leaseLost'> {
+): Promise<'accepted' | 'retried' | 'failedPermanent' | 'cancelled' | 'leaseLost'> {
+  const markCancelledGuarded = async (
+    code: string,
+    message: string
+  ): Promise<'cancelled' | 'leaseLost'> => {
+    const updated = await prisma.emailOutbox.updateMany({
+      where: {
+        id: item.id,
+        status: EmailOutboxStatus.PROCESSING,
+        lockedBy: workerId,
+      },
+      data: {
+        status: EmailOutboxStatus.CANCELLED,
+        lockedBy: null,
+        lockedUntil: null,
+        lastErrorCode: code,
+        lastErrorMessage: message,
+      },
+    });
+
+    if (updated.count === 0) {
+      console.warn(
+        `[EmailOutbox] Lease lost before marking CANCELLED for outbox=${item.id} (worker=${workerId})`
+      );
+      return 'leaseLost';
+    }
+
+    return 'cancelled';
+  };
+
   const markPermanentGuarded = async (
     code: string,
     message: string,
@@ -675,6 +705,17 @@ export async function processClaimedEmailOutboxItem(
         `Refund confirmation email blocked because OrderRefund status is ${refundRecord.status}, not SUCCEEDED.`,
         'CRITICAL',
         'REFUND_STATE_MISMATCH'
+      );
+    }
+
+    if (
+      kind === 'MANUAL_REVIEW' &&
+      (refundRecord.status === OrderRefundStatus.MANUALLY_RESOLVED ||
+        refundRecord.status === OrderRefundStatus.SUCCEEDED)
+    ) {
+      return markCancelledGuarded(
+        'REFUND_ALREADY_RESOLVED',
+        `Superseded stale manual-review notification because OrderRefund is already ${refundRecord.status}.`
       );
     }
 
@@ -984,6 +1025,7 @@ export async function runEmailOutboxPass(options?: {
     accepted: 0,
     retried: 0,
     failedPermanent: 0,
+    cancelled: 0,
     leaseLost: 0,
     reapedExhausted,
   };
