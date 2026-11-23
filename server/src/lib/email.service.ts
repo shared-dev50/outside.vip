@@ -32,6 +32,7 @@ export interface EmailDeliveryResult {
 
 export class EmailDeliveryError extends ServiceUnavailableError {
   public readonly providerStatusCode: number | null;
+  public readonly providerErrorName: string | null;
   public readonly retryable: boolean;
   public readonly timedOut: boolean;
   public readonly providerDetail?: string;
@@ -41,6 +42,7 @@ export class EmailDeliveryError extends ServiceUnavailableError {
     options?: {
       code?: string;
       providerStatusCode?: number | null;
+      providerErrorName?: string | null;
       retryable?: boolean;
       timedOut?: boolean;
       providerDetail?: string;
@@ -49,6 +51,7 @@ export class EmailDeliveryError extends ServiceUnavailableError {
     super(message, options?.code || 'EMAIL_DELIVERY_FAILED');
     this.name = 'EmailDeliveryError';
     this.providerStatusCode = options?.providerStatusCode ?? null;
+    this.providerErrorName = options?.providerErrorName ?? null;
     this.retryable = options?.retryable ?? false;
     this.timedOut = options?.timedOut ?? false;
     this.providerDetail = options?.providerDetail;
@@ -83,6 +86,58 @@ export const sentLoginOtpEmails: LoginOtpEmailMessage[] = [];
 export const sentStaffInvitationEmails: StaffInvitationEmailMessage[] = [];
 export const sentStaffOtpEmails: StaffOtpEmailMessage[] = [];
 export const sentTeamInvitationEmails: TeamInvitationEmailMessage[] = [];
+export const sentOrderConfirmationEmails: OrderConfirmationEmailMessage[] = [];
+
+export const ORDER_CONFIRMATION_TEMPLATE_VERSION = 1;
+
+export interface OrderConfirmationSnapshotItem {
+  tierName: string;
+  quantity: number;
+  unitPriceInCents: number;
+  subtotalInCents: number;
+  currency: string;
+  validityStartAtIso: string | null;
+  validityEndAtIso: string | null;
+}
+
+/**
+ * Immutable fulfillment-time snapshot used to render buyer confirmation emails deterministically
+ * across retries so Resend idempotency payload checks always see an identical message body.
+ * Must NEVER contain bearer tokens (orderAccessToken) or individual QR ticket tokens.
+ */
+export interface OrderConfirmationContentSnapshot {
+  templateVersion: 1;
+  clientOrigin: string;
+  orderNumber: string;
+  purchaseDateIso: string;
+  totalInCents: number;
+  currency: string;
+  buyerName: string;
+  eventTitle: string;
+  eventStartAtIso: string;
+  eventEndAtIso: string | null;
+  eventTimezone: string;
+  venueName: string;
+  venueAddress: string;
+  city: string;
+  country: string;
+  organizerName: string;
+  totalTickets: number;
+  items: OrderConfirmationSnapshotItem[];
+}
+
+export interface OrderConfirmationEmailMessage {
+  to: string;
+  from: string;
+  subject: string;
+  text: string;
+  html: string;
+  orderNumber: string;
+  ticketAccessUrl: string;
+  idempotencyKey: string;
+  templateVersion: number;
+  sentAt: Date;
+}
 
 export interface LoginOtpEmailMessage {
   to: string;
@@ -152,6 +207,25 @@ export function resetSentStaffInvitationEmails(): void {
 
 export function resetSentStaffOtpEmails(): void {
   sentStaffOtpEmails.length = 0;
+}
+
+export function resetSentOrderConfirmationEmails(): void {
+  sentOrderConfirmationEmails.length = 0;
+}
+
+export function getLatestOrderConfirmationEmail(
+  email: string
+): OrderConfirmationEmailMessage | undefined {
+  if (getActiveNodeEnv() !== 'test') {
+    return undefined;
+  }
+  const normalized = normalizeEmail(email);
+  for (let i = sentOrderConfirmationEmails.length - 1; i >= 0; i--) {
+    if (normalizeEmail(sentOrderConfirmationEmails[i].to) === normalized) {
+      return sentOrderConfirmationEmails[i];
+    }
+  }
+  return undefined;
 }
 
 export function getLatestVerificationEmail(email: string): VerificationEmailMessage | undefined {
@@ -244,10 +318,13 @@ export function sanitizeEmailLogMessage(raw: string, sensitiveValues: string[] =
   }
   clean = clean.replace(/\bre_[A-Za-z0-9_-]{6,}\b/g, '[REDACTED_API_KEY]');
   clean = clean.replace(/\bBearer\s+[A-Za-z0-9._-]+\b/gi, 'Bearer [REDACTED]');
+  clean = clean.replace(/\boat_[A-Za-z0-9_-]{8,}\b/g, '[REDACTED_ORDER_TOKEN]');
+  clean = clean.replace(/\btkt_sec_[A-Za-z0-9_-]{8,}\b/g, '[REDACTED_TICKET_TOKEN]');
+  clean = clean.replace(/([?&]token=)[^&\s"']+/gi, '$1[REDACTED]');
   return clean.slice(0, 300);
 }
 
-function maskEmailForLog(email: string): string {
+export function maskEmailForLog(email: string): string {
   const atIndex = email.indexOf('@');
   if (atIndex <= 0) return '[redacted-email]';
   const local = email.slice(0, atIndex);
@@ -288,6 +365,7 @@ function classifyProviderError(error: {
   message?: string;
 }): EmailDeliveryError {
   const statusCode = typeof error.statusCode === 'number' ? error.statusCode : null;
+  const providerErrorName = typeof error.name === 'string' && error.name.trim() ? error.name.trim() : null;
   const providerDetail = error.message ? `${error.name || 'error'}: ${error.message}` : error.name;
 
   if (statusCode === 401 || statusCode === 403) {
@@ -296,6 +374,41 @@ function classifyProviderError(error: {
       {
         code: 'EMAIL_PROVIDER_AUTH_FAILED',
         providerStatusCode: statusCode,
+        providerErrorName,
+        retryable: false,
+        providerDetail,
+      }
+    );
+  }
+
+  if (statusCode === 409) {
+    const lowerName = (providerErrorName || '').toLowerCase();
+    const lowerMsg = (error.message || '').toLowerCase();
+    const isConcurrent =
+      lowerName === 'concurrent_idempotent_requests' ||
+      lowerMsg.includes('concurrent') ||
+      lowerMsg.includes('still being processed') ||
+      lowerMsg.includes('in progress');
+
+    if (isConcurrent) {
+      return new EmailDeliveryError(
+        'An identical email request is currently being processed by the provider. Retry later.',
+        {
+          code: 'EMAIL_IDEMPOTENCY_CONCURRENT',
+          providerStatusCode: 409,
+          providerErrorName: providerErrorName || 'concurrent_idempotent_requests',
+          retryable: true,
+          providerDetail,
+        }
+      );
+    }
+
+    return new EmailDeliveryError(
+      'Idempotency key conflict: email payload differs from an earlier request using the same key.',
+      {
+        code: 'EMAIL_IDEMPOTENCY_PAYLOAD_CONFLICT',
+        providerStatusCode: 409,
+        providerErrorName: providerErrorName || 'invalid_idempotent_request',
         retryable: false,
         providerDetail,
       }
@@ -308,6 +421,7 @@ function classifyProviderError(error: {
       {
         code: 'EMAIL_PROVIDER_RATE_LIMITED',
         providerStatusCode: 429,
+        providerErrorName,
         retryable: false,
         providerDetail,
       }
@@ -320,6 +434,7 @@ function classifyProviderError(error: {
       {
         code: 'EMAIL_DELIVERY_REJECTED',
         providerStatusCode: statusCode,
+        providerErrorName,
         retryable: false,
         providerDetail,
       }
@@ -332,6 +447,7 @@ function classifyProviderError(error: {
       {
         code: 'EMAIL_PROVIDER_UNAVAILABLE',
         providerStatusCode: statusCode,
+        providerErrorName,
         retryable: true,
         providerDetail,
       }
@@ -343,6 +459,7 @@ function classifyProviderError(error: {
     {
       code: 'EMAIL_NETWORK_ERROR',
       providerStatusCode: null,
+      providerErrorName,
       retryable: true,
       providerDetail,
     }
@@ -1275,4 +1392,440 @@ export async function sendLoginOtpEmail(params: {
   }
 
   throw lastError!;
+}
+
+function formatDeterministicDateTime(isoDate: string, timeZone?: string | null): string {
+  const date = new Date(isoDate);
+  if (Number.isNaN(date.getTime())) {
+    return isoDate;
+  }
+  const safeTz = (timeZone || '').trim() || 'UTC';
+  try {
+    return new Intl.DateTimeFormat('en-US', {
+      weekday: 'short',
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+      timeZone: safeTz,
+      timeZoneName: 'short',
+    }).format(date);
+  } catch {
+    return new Intl.DateTimeFormat('en-US', {
+      weekday: 'short',
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+      timeZone: 'UTC',
+      timeZoneName: 'short',
+    }).format(date);
+  }
+}
+
+function formatDeterministicDateRange(
+  startIso: string,
+  endIso?: string | null,
+  timeZone?: string | null
+): string {
+  const startFormatted = formatDeterministicDateTime(startIso, timeZone);
+  if (!endIso) {
+    return startFormatted;
+  }
+  const endFormatted = formatDeterministicDateTime(endIso, timeZone);
+  return `${startFormatted} – ${endFormatted}`;
+}
+
+function formatDeterministicMoney(cents: number, currency: string): string {
+  const safeCurrency = (currency || 'USD').trim().toUpperCase() || 'USD';
+  if (cents === 0) {
+    return '$0.00 (Free)';
+  }
+  try {
+    return new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency: safeCurrency,
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    }).format(cents / 100);
+  } catch {
+    return `${safeCurrency} ${(cents / 100).toFixed(2)}`;
+  }
+}
+
+/**
+ * Normalizes a client base origin (scheme + host + optional non-root path, no trailing slashes)
+ * for snapshotting at fulfillment time so confirmation URLs stay identical across retries even
+ * if CLIENT_URL changes later.
+ */
+export function normalizeClientOrigin(rawOrigin?: string | null): string {
+  const candidate = (rawOrigin ?? process.env.CLIENT_URL ?? env.CLIENT_URL ?? 'http://localhost:5173')
+    .trim()
+    .replace(/^["']+|["']+$/g, '')
+    .trim()
+    .replace(/\/+$/, '');
+
+  if (!candidate) {
+    return 'http://localhost:5173';
+  }
+
+  try {
+    const parsed = new URL(candidate);
+    const cleanPath = parsed.pathname.replace(/\/+$/, '');
+    return `${parsed.origin}${cleanPath}`;
+  } catch {
+    return candidate;
+  }
+}
+
+/**
+ * Builds the canonical buyer ticket-access URL reusing the existing /orders/:orderNumber route
+ * and orderAccessToken bearer credential. Prefers the snapshotted clientOrigin when provided so
+ * retries produce identical URLs regardless of subsequent CLIENT_URL changes.
+ * Never includes PII or individual QR ticket tokens.
+ */
+export function buildOrderTicketAccessUrl(
+  orderNumber: string,
+  orderAccessToken: string,
+  clientOrigin?: string | null
+): string {
+  const baseUrl = normalizeClientOrigin(clientOrigin);
+  return `${baseUrl}/orders/${encodeURIComponent(orderNumber)}?token=${encodeURIComponent(orderAccessToken)}`;
+}
+
+/**
+ * Pure deterministic renderer for buyer ticket confirmation emails.
+ * Given an immutable fulfillment snapshot and canonical ticket-access URL, produces identical
+ * subject, plain text, and HTML across retries to satisfy Resend idempotency payload rules.
+ */
+export function renderOrderConfirmationEmail(params: {
+  to: string;
+  from?: string;
+  snapshot: OrderConfirmationContentSnapshot;
+  ticketAccessUrl: string;
+}): {
+  to: string;
+  from: string;
+  subject: string;
+  text: string;
+  html: string;
+} {
+  const { snapshot } = params;
+  const from = params.from ? sanitizeHeaderField(params.from) : resolveEmailFrom();
+  const to = sanitizeHeaderField(normalizeEmail(params.to));
+  const cleanTitle = sanitizeHeaderField(snapshot.eventTitle || 'Outside.vip Event');
+  const cleanOrderNumber = sanitizeHeaderField(snapshot.orderNumber);
+  const cleanBuyerName = sanitizeHeaderField(snapshot.buyerName || 'Attendee') || 'Attendee';
+  const cleanOrganizer = sanitizeHeaderField(snapshot.organizerName || 'Outside.vip');
+  const cleanUrl = params.ticketAccessUrl.trim();
+
+  const eventDateRange = formatDeterministicDateRange(
+    snapshot.eventStartAtIso,
+    snapshot.eventEndAtIso,
+    snapshot.eventTimezone
+  );
+  const purchaseDateFormatted = formatDeterministicDateTime(
+    snapshot.purchaseDateIso,
+    snapshot.eventTimezone
+  );
+  const totalFormatted = formatDeterministicMoney(snapshot.totalInCents, snapshot.currency);
+
+  const venueParts = [
+    snapshot.venueName,
+    snapshot.venueAddress,
+    snapshot.city,
+    snapshot.country,
+  ]
+    .map((p) => (p || '').trim())
+    .filter(Boolean);
+  const venueSummary = venueParts.join(', ') || 'See event page for venue details';
+
+  const subject = sanitizeHeaderField(
+    `Your tickets for ${cleanTitle} — Order #${cleanOrderNumber}`
+  );
+
+  const ticketLinesText: string[] = [];
+  const ticketRowsHtml: string[] = [];
+
+  for (const item of snapshot.items) {
+    const tierName = sanitizeHeaderField(item.tierName || 'Ticket Pass');
+    const qty = item.quantity;
+    const subtotalStr = formatDeterministicMoney(item.subtotalInCents, item.currency || snapshot.currency);
+    const hasCustomValidity = Boolean(item.validityStartAtIso || item.validityEndAtIso);
+    const validityLabel = hasCustomValidity
+      ? formatDeterministicDateRange(
+          item.validityStartAtIso || snapshot.eventStartAtIso,
+          item.validityEndAtIso || snapshot.eventEndAtIso,
+          snapshot.eventTimezone
+        )
+      : eventDateRange;
+
+    ticketLinesText.push(
+      `- ${qty}x ${tierName} (${subtotalStr})` +
+        (hasCustomValidity ? `\n  Entry validity: ${validityLabel}` : '')
+    );
+
+    ticketRowsHtml.push(`
+      <tr>
+        <td style="padding: 12px 0; border-bottom: 1px solid #22222A; vertical-align: top;">
+          <div style="font-size: 14px; font-weight: 600; color: #FFFFFF;">${escapeHtml(String(qty))} &times; ${escapeHtml(tierName)}</div>
+          <div style="font-size: 12px; color: #8E8E99; margin-top: 4px;">
+            Entry validity: ${escapeHtml(validityLabel)}
+          </div>
+        </td>
+        <td align="right" style="padding: 12px 0; border-bottom: 1px solid #22222A; vertical-align: top; font-size: 14px; font-weight: 600; color: #F5F5F7; white-space: nowrap;">
+          ${escapeHtml(subtotalStr)}
+        </td>
+      </tr>
+    `.trim());
+  }
+
+  const ticketPlural = snapshot.totalTickets === 1 ? 'ticket' : 'tickets';
+
+  const text = [
+    `Hi ${cleanBuyerName},`,
+    '',
+    `Your order is confirmed! Thank you for purchasing ${snapshot.totalTickets} ${ticketPlural} for "${cleanTitle}" on Outside.vip.`,
+    '',
+    `ORDER SUMMARY`,
+    `Order Reference: #${cleanOrderNumber}`,
+    `Purchase Date: ${purchaseDateFormatted}`,
+    `Total Paid: ${totalFormatted}`,
+    '',
+    `EVENT DETAILS`,
+    `Event: ${cleanTitle}`,
+    `Organizer: ${cleanOrganizer}`,
+    `Date & Time: ${eventDateRange}`,
+    `Location: ${venueSummary}`,
+    '',
+    `YOUR TICKETS (${snapshot.totalTickets})`,
+    ...ticketLinesText,
+    '',
+    `HOW TO ACCESS YOUR TICKETS`,
+    `Open your private ticket link below to view your QR passes on your phone or download printable PDF passes for entry:`,
+    cleanUrl,
+    '',
+    `Keep this link private — anyone with this link can view and download your passes.`,
+    '',
+    `Outside.vip`,
+  ].join('\n');
+
+  const escapedBuyerName = escapeHtml(cleanBuyerName);
+  const escapedTitle = escapeHtml(cleanTitle);
+  const escapedOrderNumber = escapeHtml(cleanOrderNumber);
+  const escapedPurchaseDate = escapeHtml(purchaseDateFormatted);
+  const escapedTotal = escapeHtml(totalFormatted);
+  const escapedOrganizer = escapeHtml(cleanOrganizer);
+  const escapedEventDate = escapeHtml(eventDateRange);
+  const escapedVenue = escapeHtml(venueSummary);
+  const escapedUrl = escapeHtml(cleanUrl);
+  const escapedTotalTickets = escapeHtml(String(snapshot.totalTickets));
+
+  const html = `<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en">
+  <head>
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>${escapedTitle} - Order #${escapedOrderNumber}</title>
+  </head>
+  <body style="margin: 0; padding: 24px; background-color: #0A0A0C; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #F5F5F7;">
+    <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="max-width: 580px; margin: 0 auto; background: #121216; border: 1px solid #22222A; border-radius: 16px; overflow: hidden;">
+      <tr>
+        <td style="padding: 32px;">
+          <p style="font-size: 11px; text-transform: uppercase; letter-spacing: 0.14em; color: #FF5500; font-weight: 700; margin: 0 0 10px 0;">Outside.vip Order Confirmation</p>
+          <h1 style="font-size: 24px; font-weight: 700; margin: 0 0 12px 0; color: #FFFFFF; line-height: 1.3;">Your tickets are confirmed</h1>
+          <p style="font-size: 15px; line-height: 1.6; color: #B8B8C2; margin: 0 0 24px 0;">
+            Hi <strong style="color: #FFFFFF;">${escapedBuyerName}</strong>, your purchase of <strong style="color: #FFFFFF;">${escapedTotalTickets} ${ticketPlural}</strong> for <strong style="color: #FFFFFF;">${escapedTitle}</strong> is confirmed.
+          </p>
+
+          <!-- Primary CTA Button -->
+          <table role="presentation" border="0" cellpadding="0" cellspacing="0" style="margin: 0 auto 28px auto;">
+            <tr>
+              <td align="center" bgcolor="#FF5500" style="border-radius: 10px;">
+                <a href="${escapedUrl}" target="_blank" rel="noopener noreferrer" style="font-size: 15px; font-weight: 600; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: #FFFFFF; text-decoration: none; padding: 14px 32px; border-radius: 10px; border: 1px solid #FF5500; display: inline-block; mso-padding-alt: 0;">
+                  <!--[if mso]><i style="letter-spacing: 32px; mso-font-width: -100%; mso-text-raise: 20pt">&nbsp;</i><![endif]-->
+                  <span style="mso-text-raise: 10pt; font-weight: 600; color: #FFFFFF;">View &amp; Download Tickets</span>
+                  <!--[if mso]><i style="letter-spacing: 32px; mso-font-width: -100%">&nbsp;</i><![endif]-->
+                </a>
+              </td>
+            </tr>
+          </table>
+
+          <!-- Event Details Card -->
+          <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="background: #18181F; border: 1px solid #262630; border-radius: 12px; margin-bottom: 20px;">
+            <tr>
+              <td style="padding: 18px 20px;">
+                <p style="font-size: 11px; text-transform: uppercase; letter-spacing: 0.12em; color: #8E8E99; font-weight: 700; margin: 0 0 8px 0;">Event Details</p>
+                <p style="font-size: 16px; font-weight: 700; color: #FFFFFF; margin: 0 0 6px 0;">${escapedTitle}</p>
+                <p style="font-size: 13px; color: #B8B8C2; margin: 0 0 4px 0;"><strong style="color: #E5E5EC;">Presented by:</strong> ${escapedOrganizer}</p>
+                <p style="font-size: 13px; color: #B8B8C2; margin: 0 0 4px 0;"><strong style="color: #E5E5EC;">When:</strong> ${escapedEventDate}</p>
+                <p style="font-size: 13px; color: #B8B8C2; margin: 0;"><strong style="color: #E5E5EC;">Where:</strong> ${escapedVenue}</p>
+              </td>
+            </tr>
+          </table>
+
+          <!-- Order & Ticket Breakdown -->
+          <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="margin-bottom: 20px;">
+            <tr>
+              <td style="padding-bottom: 8px;">
+                <p style="font-size: 11px; text-transform: uppercase; letter-spacing: 0.12em; color: #8E8E99; font-weight: 700; margin: 0;">Order Summary</p>
+              </td>
+            </tr>
+            <tr>
+              <td style="font-size: 13px; color: #B8B8C2; padding-bottom: 12px;">
+                Order <strong style="color: #FFFFFF; font-family: monospace;">#${escapedOrderNumber}</strong> &middot; Purchased ${escapedPurchaseDate}
+              </td>
+            </tr>
+            <tr>
+              <td>
+                <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%">
+                  ${ticketRowsHtml.join('\n')}
+                  <tr>
+                    <td style="padding: 14px 0 4px 0; font-size: 14px; font-weight: 700; color: #FFFFFF;">Total Paid</td>
+                    <td align="right" style="padding: 14px 0 4px 0; font-size: 16px; font-weight: 700; color: #FF5500; white-space: nowrap;">${escapedTotal}</td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+          </table>
+
+          <!-- Retrieval Instructions -->
+          <div style="border-top: 1px solid #22222A; padding-top: 20px; margin-top: 8px;">
+            <p style="font-size: 13px; line-height: 1.6; color: #B8B8C2; margin: 0 0 12px 0;">
+              <strong style="color: #FFFFFF;">How to use your tickets:</strong> Click the button above anytime to view your QR passes on your phone for scanning at the door or download PDF passes for offline access.
+            </p>
+            <p style="font-size: 12px; line-height: 1.5; color: #8E8E99; margin: 0 0 14px 0;">
+              Keep this link private &mdash; anyone with this link can view and download your passes.
+            </p>
+            <p style="font-size: 12px; line-height: 1.5; color: #6E6E78; margin: 0;">
+              If the button above does not work, copy and paste this secure link into your browser:<br />
+              <a href="${escapedUrl}" target="_blank" rel="noopener noreferrer" style="color: #FF5500; text-decoration: underline; word-break: break-all; font-size: 12px; display: inline-block; margin-top: 4px;">${escapedUrl}</a>
+            </p>
+          </div>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>`.trim();
+
+  return { to, from, subject, text, html };
+}
+
+/**
+ * Dispatches a single attempt of a buyer ticket confirmation email via Resend.
+ * Intentionally performs NO inline retries: durable retries, exponential backoff, and
+ * lease management are owned by the PostgreSQL EmailOutbox worker.
+ *
+ * A resolved result indicates provider acceptance (Resend HTTP 200), not confirmed inbox delivery.
+ */
+export async function sendOrderConfirmationEmail(params: {
+  to: string;
+  snapshot: OrderConfirmationContentSnapshot;
+  ticketAccessUrl: string;
+  orderAccessToken: string;
+  idempotencyKey: string;
+}): Promise<EmailDeliveryResult> {
+  const rendered = renderOrderConfirmationEmail({
+    to: params.to,
+    snapshot: params.snapshot,
+    ticketAccessUrl: params.ticketAccessUrl,
+  });
+
+  const sentAt = new Date();
+  const activeNodeEnv = getActiveNodeEnv();
+  const shouldUseResendInTest = env.NODE_ENV === 'test' && Boolean(testOptions.useResendInTest);
+
+  if (activeNodeEnv === 'test' && !shouldUseResendInTest) {
+    const message: OrderConfirmationEmailMessage = {
+      to: rendered.to,
+      from: rendered.from,
+      subject: rendered.subject,
+      text: rendered.text,
+      html: rendered.html,
+      orderNumber: params.snapshot.orderNumber,
+      ticketAccessUrl: params.ticketAccessUrl,
+      idempotencyKey: params.idempotencyKey,
+      templateVersion: params.snapshot.templateVersion,
+      sentAt,
+    };
+    sentOrderConfirmationEmails.push(message);
+    return {
+      sent: true,
+      status: 'recorded',
+      provider: 'test-recorder',
+      messageId: `test_rec_${crypto.randomUUID()}`,
+      from: rendered.from,
+      to: rendered.to,
+      expiresInMinutes: 0,
+      sentAt,
+    };
+  }
+
+  const resendApiKey = resolveResendApiKey();
+  if (!resendApiKey) {
+    console.error(
+      `[EmailService] Order confirmation email aborted for ${maskEmailForLog(rendered.to)} (order=${params.snapshot.orderNumber}): RESEND_API_KEY is not configured.`
+    );
+    throw new EmailDeliveryError(
+      'Email delivery service is not configured. RESEND_API_KEY is missing.',
+      {
+        code: 'EMAIL_SERVICE_UNCONFIGURED',
+        providerStatusCode: null,
+        retryable: false,
+      }
+    );
+  }
+
+  const resend = new Resend(resendApiKey);
+  const timeoutMs = getEffectiveTimeoutMs();
+  const sensitiveValues = [resendApiKey, params.orderAccessToken, params.ticketAccessUrl];
+
+  try {
+    const { messageId } = await sendSingleResendAttempt({
+      resend,
+      from: rendered.from,
+      to: rendered.to,
+      subject: rendered.subject,
+      text: rendered.text,
+      html: rendered.html,
+      idempotencyKey: params.idempotencyKey,
+      timeoutMs,
+    });
+
+    return {
+      sent: true,
+      status: 'sent',
+      provider: 'resend',
+      messageId,
+      from: rendered.from,
+      to: rendered.to,
+      expiresInMinutes: 0,
+      sentAt,
+    };
+  } catch (err) {
+    const deliveryError =
+      err instanceof EmailDeliveryError
+        ? err
+        : classifyProviderError({ message: err instanceof Error ? err.message : undefined });
+
+    const safeDetail = sanitizeEmailLogMessage(
+      deliveryError.providerDetail || deliveryError.message,
+      sensitiveValues
+    );
+
+    console.error(
+      `[EmailService] Order confirmation dispatch failed for ${maskEmailForLog(rendered.to)} (order=${params.snapshot.orderNumber}, code=${deliveryError.code}, status=${deliveryError.providerStatusCode ?? 'network'}): ${safeDetail}`
+    );
+
+    throw new EmailDeliveryError(deliveryError.message, {
+      code: deliveryError.code,
+      providerStatusCode: deliveryError.providerStatusCode,
+      providerErrorName: deliveryError.providerErrorName,
+      retryable: deliveryError.retryable,
+      timedOut: deliveryError.timedOut,
+      providerDetail: safeDetail,
+    });
+  }
 }

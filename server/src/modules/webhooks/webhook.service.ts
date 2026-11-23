@@ -24,155 +24,215 @@ import {
   recordRefundLedger,
   recordDisputeLedger,
 } from '../finance/ledger.service.js';
+import { enqueueOrderConfirmationEmail } from '../notifications/emailOutbox.service.js';
+import { triggerEmailOutboxDispatch } from '../notifications/emailOutboxWorker.js';
 
 export async function processStripeWebhookEvent(
   event: Stripe.Event
 ): Promise<{ handled: boolean; duplicate?: boolean }> {
-  return await prisma.$transaction(
-    async (tx) => {
-      // Skip duplicate deliveries
-      const existing = await tx.processedWebhookEvent.findUnique({
-        where: { eventId: event.id },
-      });
+  let txResult: { handled: boolean; duplicate?: boolean; shouldWakeOutbox?: boolean };
 
-      if (existing) {
+  try {
+    txResult = await prisma.$transaction(
+      async (tx) => {
+        // Skip duplicate deliveries
+        const existing = await tx.processedWebhookEvent.findUnique({
+          where: { eventId: event.id },
+        });
+
+        if (existing) {
+          return { handled: true, duplicate: true, shouldWakeOutbox: false };
+        }
+
+        let shouldWakeOutbox = false;
+
+        switch (event.type) {
+          case 'payment_intent.succeeded': {
+            const paymentIntent = event.data.object as Stripe.PaymentIntent;
+            const fulfillment = await handlePaymentIntentSucceeded(tx, paymentIntent);
+            shouldWakeOutbox = fulfillment.enqueuedEmail;
+            break;
+          }
+
+          case 'payment_intent.payment_failed': {
+            const paymentIntent = event.data.object as Stripe.PaymentIntent;
+            await handlePaymentIntentFailed(tx, paymentIntent);
+            break;
+          }
+
+          case 'charge.updated': {
+            const charge = event.data.object as Stripe.Charge;
+            await handleChargeUpdated(tx, charge);
+            break;
+          }
+
+          case 'charge.refunded': {
+            const charge = event.data.object as Stripe.Charge;
+            await handleChargeRefunded(tx, charge);
+            break;
+          }
+
+          case 'charge.dispute.created':
+          case 'charge.dispute.updated':
+          case 'charge.dispute.closed': {
+            const dispute = event.data.object as Stripe.Dispute;
+            await handleDisputeEvent(tx, event.type, dispute);
+            break;
+          }
+
+          case 'transfer.created':
+          case 'transfer.updated':
+          case 'transfer.reversed': {
+            const transfer = event.data.object as Stripe.Transfer;
+            await handleTransferEvent(tx, event.type, transfer);
+            break;
+          }
+
+          case 'account.updated': {
+            const account = event.data.object as Stripe.Account;
+            await handleAccountUpdated(tx, account);
+            break;
+          }
+
+          case 'payout.created':
+          case 'payout.updated':
+          case 'payout.paid':
+          case 'payout.failed': {
+            const payout = event.data.object as Stripe.Payout;
+            const stripeAccountId = (event as any).account as string | undefined;
+            await handlePayoutEvent(tx, event.type, payout, stripeAccountId);
+            break;
+          }
+
+          default:
+            break;
+        }
+
+        // Record processed event to guarantee idempotent retries
+        await tx.processedWebhookEvent.create({
+          data: {
+            provider: PaymentProvider.STRIPE,
+            eventId: event.id,
+          },
+        });
+
+        return { handled: true, shouldWakeOutbox };
+      },
+      {
+        isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
+        timeout: 10000,
+      }
+    );
+  } catch (error: any) {
+    // Handle concurrent duplicate delivery of the exact same Stripe event ID cleanly
+    if (error?.code === 'P2002') {
+      const target = error?.meta?.target;
+      const isEventIdUnique =
+        (Array.isArray(target) && target.includes('eventId')) ||
+        (typeof target === 'string' && target.includes('eventId'));
+      if (isEventIdUnique) {
         return { handled: true, duplicate: true };
       }
-
-      switch (event.type) {
-        case 'payment_intent.succeeded': {
-          const paymentIntent = event.data.object as Stripe.PaymentIntent;
-          await handlePaymentIntentSucceeded(tx, paymentIntent);
-          break;
-        }
-
-        case 'payment_intent.payment_failed': {
-          const paymentIntent = event.data.object as Stripe.PaymentIntent;
-          await handlePaymentIntentFailed(tx, paymentIntent);
-          break;
-        }
-
-        case 'charge.updated': {
-          const charge = event.data.object as Stripe.Charge;
-          await handleChargeUpdated(tx, charge);
-          break;
-        }
-
-        case 'charge.refunded': {
-          const charge = event.data.object as Stripe.Charge;
-          await handleChargeRefunded(tx, charge);
-          break;
-        }
-
-        case 'charge.dispute.created':
-        case 'charge.dispute.updated':
-        case 'charge.dispute.closed': {
-          const dispute = event.data.object as Stripe.Dispute;
-          await handleDisputeEvent(tx, event.type, dispute);
-          break;
-        }
-
-        case 'transfer.created':
-        case 'transfer.updated':
-        case 'transfer.reversed': {
-          const transfer = event.data.object as Stripe.Transfer;
-          await handleTransferEvent(tx, event.type, transfer);
-          break;
-        }
-
-        case 'account.updated': {
-          const account = event.data.object as Stripe.Account;
-          await handleAccountUpdated(tx, account);
-          break;
-        }
-
-        case 'payout.created':
-        case 'payout.updated':
-        case 'payout.paid':
-        case 'payout.failed': {
-          const payout = event.data.object as Stripe.Payout;
-          const stripeAccountId = (event as any).account as string | undefined;
-          await handlePayoutEvent(tx, event.type, payout, stripeAccountId);
-          break;
-        }
-
-        default:
-          break;
-      }
-
-      // Record processed event to guarantee idempotent retries
-      await tx.processedWebhookEvent.create({
-        data: {
-          provider: PaymentProvider.STRIPE,
-          eventId: event.id,
-        },
-      });
-
-      return { handled: true };
-    },
-    {
-      isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
-      timeout: 10000,
     }
-  );
+    throw error;
+  }
+
+  // Strictly post-commit, non-blocking wake-up: never affects webhook response or fulfillment durability
+  if (txResult.shouldWakeOutbox) {
+    triggerEmailOutboxDispatch();
+  }
+
+  return txResult.duplicate
+    ? { handled: txResult.handled, duplicate: true }
+    : { handled: txResult.handled };
 }
 
 export async function fulfillPaidOrder(
   paymentIntent: Stripe.PaymentIntent
 ): Promise<boolean> {
-  return await prisma.$transaction(
+  const txResult = await prisma.$transaction(
     async (tx) => {
-      await handlePaymentIntentSucceeded(tx, paymentIntent);
-      return true;
+      return await handlePaymentIntentSucceeded(tx, paymentIntent);
     },
     {
       isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
       timeout: 10000,
     }
   );
+
+  // Strictly post-commit, non-blocking wake-up: never affects reconciliation response
+  if (txResult.enqueuedEmail) {
+    triggerEmailOutboxDispatch();
+  }
+
+  return true;
 }
 
 export async function handlePaymentIntentSucceeded(
   tx: Prisma.TransactionClient,
   paymentIntent: Stripe.PaymentIntent
-): Promise<void> {
-  const orderId = paymentIntent.metadata?.orderId as string | undefined;
-
-  let order = orderId
-    ? await tx.order.findUnique({
-        where: { id: orderId },
-        include: {
-          items: { include: { ticketTier: true } },
-          reservations: true,
-          tickets: true,
-        },
-      })
-    : null;
-
-  if (!order && paymentIntent.id) {
-    order = await tx.order.findFirst({
-      where: { paymentReference: paymentIntent.id },
-      include: {
-        items: { include: { ticketTier: true } },
-        reservations: true,
-        tickets: true,
-      },
-    });
-  }
-
-  if (!order) {
-    console.warn(`Order referenced by Stripe PaymentIntent ${paymentIntent.id} not found.`);
-    return;
-  }
-
+): Promise<{ fulfilled: boolean; enqueuedEmail: boolean }> {
   // Fulfill ONLY when payment is verified as succeeded
   if (paymentIntent.status !== 'succeeded') {
     console.info(`Stripe PaymentIntent ${paymentIntent.id} status is '${paymentIntent.status}', deferring fulfillment.`);
-    return;
+    return { fulfilled: false, enqueuedEmail: false };
+  }
+
+  const orderId = paymentIntent.metadata?.orderId as string | undefined;
+
+  // Acquire an exclusive row-level lock on the target Order BEFORE reading its completion state.
+  // This serializes concurrent Stripe webhook and order reconciliation transactions so tickets,
+  // inventory shifts, ledger entries, and confirmation outbox rows are never duplicated.
+  let lockedOrderId: string | undefined;
+  if (orderId) {
+    const locked = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT id FROM "Order" WHERE id = ${orderId} FOR UPDATE
+    `;
+    lockedOrderId = locked[0]?.id;
+  }
+
+  if (!lockedOrderId && paymentIntent.id) {
+    const locked = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT id FROM "Order" WHERE "paymentReference" = ${paymentIntent.id} ORDER BY "createdAt" ASC LIMIT 1 FOR UPDATE
+    `;
+    lockedOrderId = locked[0]?.id;
+  }
+
+  if (!lockedOrderId) {
+    console.warn(`Order referenced by Stripe PaymentIntent ${paymentIntent.id} not found.`);
+    return { fulfilled: false, enqueuedEmail: false };
+  }
+
+  const order = await tx.order.findUnique({
+    where: { id: lockedOrderId },
+    include: {
+      event: {
+        include: {
+          organizer: {
+            select: {
+              name: true,
+              organizer: {
+                select: {
+                  displayName: true,
+                },
+              },
+            },
+          },
+        },
+      },
+      items: { include: { ticketTier: true } },
+      reservations: true,
+      tickets: true,
+    },
+  });
+
+  if (!order) {
+    console.warn(`Order referenced by Stripe PaymentIntent ${paymentIntent.id} not found after lock.`);
+    return { fulfilled: false, enqueuedEmail: false };
   }
 
   if (order.status === OrderStatus.COMPLETED) {
-    return;
+    return { fulfilled: false, enqueuedEmail: false };
   }
 
   if (paymentIntent.amount !== null && paymentIntent.amount !== order.totalInCents) {
@@ -187,11 +247,15 @@ export async function handlePaymentIntentSucceeded(
     );
   }
 
+  // Ensure canonical orderAccessToken exists before creating the durable confirmation notification
+  const ensuredOrderAccessToken = order.orderAccessToken || `oat_${nanoid(32)}`;
+
   await tx.order.update({
     where: { id: order.id },
     data: {
       status: OrderStatus.COMPLETED,
       paymentReference: paymentIntent.id,
+      ...(order.orderAccessToken ? {} : { orderAccessToken: ensuredOrderAccessToken }),
     },
   });
 
@@ -215,6 +279,7 @@ export async function handlePaymentIntentSucceeded(
     });
   }
 
+  let issuedTicketCount = order.tickets.length;
   if (order.tickets.length === 0) {
     for (const item of order.items) {
       for (let i = 0; i < item.quantity; i++) {
@@ -230,6 +295,7 @@ export async function handlePaymentIntentSucceeded(
             status: TicketStatus.ISSUED,
           },
         });
+        issuedTicketCount += 1;
       }
     }
   }
@@ -283,6 +349,16 @@ export async function handlePaymentIntentSucceeded(
     stripeChargeId: latestChargeId,
     autoSettle: false,
   });
+
+  // Atomically enqueue the durable buyer confirmation email inside the same transaction.
+  // Never performs external email I/O here.
+  let enqueuedEmail = false;
+  if (issuedTicketCount > 0 && order.event) {
+    const outboxResult = await enqueueOrderConfirmationEmail(tx, order);
+    enqueuedEmail = outboxResult.enqueued;
+  }
+
+  return { fulfilled: true, enqueuedEmail };
 }
 
 export async function handlePaymentIntentFailed(

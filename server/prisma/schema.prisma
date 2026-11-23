@@ -490,6 +490,7 @@ model Order {
   transactions   PaymentTransaction[]
   waitlistOffers TicketWaitlistOffer[]
   ledgerEntries  FinancialLedgerEntry[]
+  emailOutbox    EmailOutbox[]
 
   @@index([orderNumber])
   @@index([customerEmail])
@@ -1023,4 +1024,59 @@ model PromotionDailyAggregate {
 
   @@unique([promotionLinkId, date])
   @@index([eventId, date])
+}
+
+// ==========================================
+// TRANSACTIONAL EMAIL OUTBOX
+// ==========================================
+
+enum EmailOutboxType {
+  ORDER_CONFIRMATION
+}
+
+enum EmailOutboxStatus {
+  PENDING
+  PROCESSING
+  SENT // Accepted by email provider (e.g. Resend HTTP 200); does not guarantee inbox delivery
+  FAILED_PERMANENT
+}
+
+model EmailOutbox {
+  id                String            @id @default(uuid())
+  dedupeKey         String            @unique // e.g. "order_confirmation:<orderId>"
+  type              EmailOutboxType
+  status            EmailOutboxStatus @default(PENDING)
+
+  // Preservation strategy (matches FinancialLedgerEntry): deleting an Order sets orderId = NULL
+  // so pending or historical confirmation records are never silently deleted.
+  orderId           String?
+  order             Order?            @relation(fields: [orderId], references: [id], onDelete: SetNull)
+
+  recipientEmail    String
+  idempotencyKey    String            @unique // Deterministic provider key, e.g. "order-confirmation:<orderId>"
+  templateVersion   Int               @default(1)
+  // Immutable fulfillment-time rendering snapshot (must never store orderAccessToken or ticket QR tokens)
+  contentSnapshot   Json
+
+  attempts          Int               @default(0)
+  maxAttempts       Int               @default(8)
+  nextAttemptAt     DateTime          @default(now())
+  lockedBy          String?
+  lockedUntil       DateTime?
+
+  provider          String?           // "resend" | "test-recorder"
+  providerMessageId String?
+  lastErrorCode     String?
+  lastErrorMessage  String?           @db.Text
+  lastAttemptAt     DateTime?
+  // Timestamp when the provider accepted the message (HTTP 200), not confirmed inbox delivery.
+  sentAt            DateTime?
+  failedAt          DateTime?
+
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+
+  @@index([status, nextAttemptAt])
+  @@index([status, lockedUntil])
+  @@index([orderId])
 }

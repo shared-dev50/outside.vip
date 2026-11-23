@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import { Request, Response, NextFunction } from 'express';
 import { prisma } from '../../db/prisma.js';
 import { stripe } from '../../lib/stripe.js';
@@ -94,10 +95,13 @@ async function fetchAndAuthorizeOrder(req: Request, orderNumber: string) {
   // 2. OR authenticated user who owns the order
   // 3. OR admin user
   // 4. OR organizer of the event
-  const hasValidAccessToken =
-    Boolean(order.orderAccessToken) &&
-    Boolean(providedToken) &&
-    providedToken === order.orderAccessToken;
+  const hasValidAccessToken = (() => {
+    if (!order.orderAccessToken || !providedToken) return false;
+    const expected = Buffer.from(order.orderAccessToken, 'utf8');
+    const supplied = Buffer.from(providedToken, 'utf8');
+    if (expected.length !== supplied.length) return false;
+    return crypto.timingSafeEqual(expected, supplied);
+  })();
 
   const isOwner =
     Boolean(req.user?.userId) && Boolean(order.userId) && req.user?.userId === order.userId;
