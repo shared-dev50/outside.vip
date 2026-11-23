@@ -17,13 +17,14 @@ import {
   ORDER_CONFIRMATION_TEMPLATE_VERSION,
   OrderConfirmationContentSnapshot,
   OrderConfirmationSnapshotItem,
+  resolveEmailFrom,
   sanitizeEmailLogMessage,
   sendOrderConfirmationEmail,
 } from '../../lib/email.service.js';
 
 export const EMAIL_OUTBOX_MAX_ATTEMPTS = 8;
-export const EMAIL_OUTBOX_LEASE_MS = 90_000; // 90s lease (9x the 10s Resend HTTP timeout)
-export const EMAIL_OUTBOX_BATCH_SIZE = 10;
+export const EMAIL_OUTBOX_LEASE_MS = 90_000; // 90s lease (comfortably > 5 * 10s worst-case sequential batch timeouts)
+export const EMAIL_OUTBOX_BATCH_SIZE = 5;
 
 // Exponential backoff base delays (ms) for retries after attempts 1..7.
 // Total retry window (~4.25h) remains comfortably inside Resend's 24-hour idempotency retention window.
@@ -116,7 +117,8 @@ export function buildOrderConfirmationIdempotencyKey(orderId: string): string {
  */
 export function buildOrderConfirmationSnapshot(
   order: OrderSnapshotSource,
-  clientOrigin?: string | null
+  clientOrigin?: string | null,
+  fromEmail?: string | null
 ): OrderConfirmationContentSnapshot {
   const items: OrderConfirmationSnapshotItem[] = order.items.map((item) => ({
     tierName: item.ticketTier.name,
@@ -138,9 +140,15 @@ export function buildOrderConfirmationSnapshot(
     order.event.organizer?.name ||
     'Outside.vip';
 
+  const resolvedFromEmail =
+    (typeof fromEmail === 'string'
+      ? fromEmail.replace(/[\r\n]+/g, ' ').trim().replace(/^["']+|["']+$/g, '').trim()
+      : '') || resolveEmailFrom();
+
   return {
     templateVersion: ORDER_CONFIRMATION_TEMPLATE_VERSION,
     clientOrigin: normalizeClientOrigin(clientOrigin),
+    fromEmail: resolvedFromEmail,
     orderNumber: order.orderNumber,
     purchaseDateIso: order.createdAt.toISOString(),
     totalInCents: order.totalInCents,
@@ -317,18 +325,28 @@ function isValidOrderConfirmationSnapshot(
 ): raw is OrderConfirmationContentSnapshot {
   if (!raw || typeof raw !== 'object') return false;
   const candidate = raw as Record<string, unknown>;
-  return (
-    candidate.templateVersion === ORDER_CONFIRMATION_TEMPLATE_VERSION &&
-    typeof candidate.clientOrigin === 'string' &&
-    candidate.clientOrigin.trim().length > 0 &&
-    typeof candidate.orderNumber === 'string' &&
-    candidate.orderNumber.length > 0 &&
-    typeof candidate.eventTitle === 'string' &&
-    typeof candidate.purchaseDateIso === 'string' &&
-    typeof candidate.totalInCents === 'number' &&
-    typeof candidate.currency === 'string' &&
-    Array.isArray(candidate.items)
-  );
+  if (
+    candidate.templateVersion !== ORDER_CONFIRMATION_TEMPLATE_VERSION ||
+    typeof candidate.clientOrigin !== 'string' ||
+    candidate.clientOrigin.trim().length === 0 ||
+    typeof candidate.fromEmail !== 'string' ||
+    candidate.fromEmail.trim().length === 0 ||
+    typeof candidate.orderNumber !== 'string' ||
+    candidate.orderNumber.length === 0 ||
+    typeof candidate.eventTitle !== 'string' ||
+    typeof candidate.purchaseDateIso !== 'string' ||
+    typeof candidate.totalInCents !== 'number' ||
+    typeof candidate.currency !== 'string' ||
+    !Array.isArray(candidate.items)
+  ) {
+    return false;
+  }
+  try {
+    normalizeClientOrigin(candidate.clientOrigin);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function emitOperationalAlert(

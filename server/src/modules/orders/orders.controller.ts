@@ -77,9 +77,12 @@ const orderInclude = {
  * Common order loader with reconciliation and strict access authorization.
  */
 async function fetchAndAuthorizeOrder(req: Request, orderNumber: string) {
-  const providedToken =
-    (req.query.token as string | undefined) ||
-    (req.headers['x-order-token'] as string | undefined);
+  const rawQueryToken = typeof req.query.token === 'string' ? req.query.token : undefined;
+  const rawHeaderToken =
+    typeof req.headers['x-order-token'] === 'string' ? req.headers['x-order-token'] : undefined;
+  const providedToken = rawQueryToken || rawHeaderToken;
+  const hasSuppliedTokenInput =
+    req.query.token !== undefined || req.headers['x-order-token'] !== undefined;
 
   let order = await prisma.order.findUnique({
     where: { orderNumber },
@@ -96,7 +99,14 @@ async function fetchAndAuthorizeOrder(req: Request, orderNumber: string) {
   // 3. OR admin user
   // 4. OR organizer of the event
   const hasValidAccessToken = (() => {
-    if (!order.orderAccessToken || !providedToken) return false;
+    if (
+      typeof order.orderAccessToken !== 'string' ||
+      order.orderAccessToken.length === 0 ||
+      typeof providedToken !== 'string' ||
+      providedToken.length === 0
+    ) {
+      return false;
+    }
     const expected = Buffer.from(order.orderAccessToken, 'utf8');
     const supplied = Buffer.from(providedToken, 'utf8');
     if (expected.length !== supplied.length) return false;
@@ -112,7 +122,7 @@ async function fetchAndAuthorizeOrder(req: Request, orderNumber: string) {
     Boolean(req.user?.userId) && order.event?.organizerId === req.user?.userId;
 
   if (!hasValidAccessToken && !isOwner && !isAdmin && !isOrganizer) {
-    if (!providedToken && !req.user) {
+    if (!hasSuppliedTokenInput && !req.user) {
       throw new UnauthorizedError('Order access token or authentication required to access this order');
     }
     throw new ForbiddenError('You do not have permission to access details for this order');

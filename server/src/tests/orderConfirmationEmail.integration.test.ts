@@ -25,8 +25,10 @@ import {
   claimPendingEmailOutboxBatch,
   EMAIL_OUTBOX_MAX_ATTEMPTS,
   processClaimedEmailOutboxItem,
+  reapExpiredExhaustedLeases,
   runEmailOutboxPass,
 } from '../modules/notifications/emailOutbox.service.js';
+import { getOrderByOrderNumber } from '../modules/orders/orders.controller.js';
 import {
   isEmailOutboxWorkerRunning,
   startEmailOutboxWorker,
@@ -341,6 +343,44 @@ describe('P1-01 Buyer Ticket Confirmation Email — PostgreSQL Integration Tests
       expect(outboxRows).toHaveLength(1);
     });
 
+    it('handles concurrent duplicate deliveries of the exact same Stripe event ID safely with one fulfillment, one ledger entry, and one outbox row', async () => {
+      const { order, paymentIntentId } = await createPendingTestOrder({ quantity: 2 });
+      const sharedEventId = `evt_p101_conc_dup_${nanoid(10)}`;
+      createdWebhookEventIds.push(sharedEventId);
+
+      const pi = makeSucceededPaymentIntent(order, paymentIntentId);
+      const sharedEvt = {
+        id: sharedEventId,
+        type: 'payment_intent.succeeded',
+        data: { object: pi },
+      } as any;
+
+      const [resA, resB] = await Promise.all([
+        processStripeWebhookEvent(sharedEvt),
+        processStripeWebhookEvent(sharedEvt),
+      ]);
+
+      expect(resA.handled).toBe(true);
+      expect(resB.handled).toBe(true);
+      expect(Boolean(resA.duplicate) || Boolean(resB.duplicate)).toBe(true);
+
+      const [updatedOrder, tickets, ledgerSales, outboxRows, processedEvents] = await Promise.all([
+        prisma.order.findUniqueOrThrow({ where: { id: order.id } }),
+        prisma.ticket.findMany({ where: { orderId: order.id } }),
+        prisma.financialLedgerEntry.findMany({
+          where: { orderId: order.id, type: LedgerEntryType.TICKET_SALE_PENDING },
+        }),
+        prisma.emailOutbox.findMany({ where: { orderId: order.id } }),
+        prisma.processedWebhookEvent.findMany({ where: { eventId: sharedEventId } }),
+      ]);
+
+      expect(updatedOrder.status).toBe(OrderStatus.COMPLETED);
+      expect(tickets).toHaveLength(2);
+      expect(ledgerSales).toHaveLength(1);
+      expect(outboxRows).toHaveLength(1);
+      expect(processedEvents).toHaveLength(1);
+    });
+
     it('serializes concurrent webhook and reconciliation calls via FOR UPDATE with zero duplicate tickets, inventory drift, ledger entries, or notifications', async () => {
       const { order, paymentIntentId } = await createPendingTestOrder({ quantity: 3 });
       const tierBefore = await prisma.ticketTier.findUnique({ where: { id: testTierId } });
@@ -502,6 +542,50 @@ describe('P1-01 Buyer Ticket Confirmation Email — PostgreSQL Integration Tests
       expect(finalState.status).toBe(EmailOutboxStatus.SENT);
       expect(finalState.providerMessageId).toBe(originalMessageId);
     });
+
+    it('reaps expired PROCESSING leases with attempts >= maxAttempts to FAILED_PERMANENT with alert and prevents automatic reclaim', async () => {
+      const { order, paymentIntentId } = await createPendingTestOrder({ quantity: 1 });
+      await fulfillPaidOrder(makeSucceededPaymentIntent(order, paymentIntentId));
+
+      const alertSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const outbox = await prisma.emailOutbox.findUniqueOrThrow({
+        where: { dedupeKey: `order_confirmation:${order.id}` },
+      });
+
+      // Simulate crashed worker holding an expired lease on its final allowed attempt
+      await prisma.emailOutbox.update({
+        where: { id: outbox.id },
+        data: {
+          status: EmailOutboxStatus.PROCESSING,
+          lockedBy: 'crashed-final-attempt-worker',
+          lockedUntil: new Date(Date.now() - 120_000),
+          attempts: EMAIL_OUTBOX_MAX_ATTEMPTS,
+          lastAttemptAt: new Date(Date.now() - 210_000),
+        },
+      });
+
+      const reapedCount = await reapExpiredExhaustedLeases();
+      expect(reapedCount).toBeGreaterThanOrEqual(1);
+
+      const reapedRow = await prisma.emailOutbox.findUniqueOrThrow({ where: { id: outbox.id } });
+      expect(reapedRow.status).toBe(EmailOutboxStatus.FAILED_PERMANENT);
+      expect(reapedRow.lockedBy).toBeNull();
+      expect(reapedRow.lockedUntil).toBeNull();
+      expect(reapedRow.failedAt).toBeInstanceOf(Date);
+      expect(reapedRow.lastErrorCode).toBe('WORKER_LEASE_EXPIRED_MAX_ATTEMPTS');
+
+      const alertText = alertSpy.mock.calls
+        .flat()
+        .map((v) => (typeof v === 'string' ? v : JSON.stringify(v)))
+        .join(' ');
+      expect(alertText).toContain('LEASE_EXHAUSTED');
+      expect(alertText).toContain('WORKER_LEASE_EXPIRED_MAX_ATTEMPTS');
+      expect(alertText).not.toContain(order.orderAccessToken!);
+
+      // Verify subsequent claim pass cannot automatically reclaim the permanently failed row
+      const nextClaim = await claimPendingEmailOutboxBatch({ workerId: 'post-reap-worker' });
+      expect(nextClaim.claimed.some((r) => r.id === outbox.id)).toBe(false);
+    });
   });
 
   describe('3. Resend Retry Semantics, Immutable Payload Stability & Error Modes', () => {
@@ -564,6 +648,17 @@ describe('P1-01 Buyer Ticket Confirmation Email — PostgreSQL Integration Tests
             { status: 409, headers: { 'Content-Type': 'application/json' } }
           );
         })
+        .mockImplementationOnce((_url, init) => {
+          capturedPayloads.push(String(init?.body));
+          capturedKeys.push(new Headers(init?.headers).get('idempotency-key') || '');
+          return new Promise((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () => {
+              const abortErr = new Error('Request aborted by timeout');
+              abortErr.name = 'AbortError';
+              reject(abortErr);
+            });
+          });
+        })
         .mockImplementationOnce(async (_url, init) => {
           capturedPayloads.push(String(init?.body));
           capturedKeys.push(new Headers(init?.headers).get('idempotency-key') || '');
@@ -604,7 +699,18 @@ describe('P1-01 Buyer Ticket Confirmation Email — PostgreSQL Integration Tests
         expect(row.attempts).toBe(3);
         expect(row.lastErrorCode).toBe('EMAIL_IDEMPOTENCY_CONCURRENT');
 
-        // Make immediately due for attempt 4 -> 200 -> SENT
+        // Make immediately due for attempt 4 -> mocked timeout (AbortError) -> retried
+        await prisma.emailOutbox.update({
+          where: { id: outbox.id },
+          data: { nextAttemptAt: new Date(Date.now() - 1000) },
+        });
+        await runEmailOutboxPass({ randomFn: () => 0.5 });
+        row = await prisma.emailOutbox.findUniqueOrThrow({ where: { id: outbox.id } });
+        expect(row.status).toBe(EmailOutboxStatus.PENDING);
+        expect(row.attempts).toBe(4);
+        expect(row.lastErrorCode).toBe('EMAIL_DELIVERY_TIMEOUT');
+
+        // Make immediately due for attempt 5 -> 200 -> SENT
         await prisma.emailOutbox.update({
           where: { id: outbox.id },
           data: { nextAttemptAt: new Date(Date.now() - 1000) },
@@ -612,13 +718,13 @@ describe('P1-01 Buyer Ticket Confirmation Email — PostgreSQL Integration Tests
         await runEmailOutboxPass({ randomFn: () => 0.5 });
         row = await prisma.emailOutbox.findUniqueOrThrow({ where: { id: outbox.id } });
         expect(row.status).toBe(EmailOutboxStatus.SENT);
-        expect(row.attempts).toBe(4);
+        expect(row.attempts).toBe(5);
         expect(row.provider).toBe('resend');
         expect(row.providerMessageId).toBe('re_msg_after_retries_001');
         expect(row.sentAt).toBeInstanceOf(Date);
 
-        // Verify all 4 requests used the identical idempotency key and byte-for-byte identical payload
-        expect(fetchSpy).toHaveBeenCalledTimes(4);
+        // Verify all 5 requests used the identical idempotency key and byte-for-byte identical payload
+        expect(fetchSpy).toHaveBeenCalledTimes(5);
         expect(new Set(capturedKeys).size).toBe(1);
         expect(capturedKeys[0]).toBe(`order-confirmation:${order.id}`);
         expect(new Set(capturedPayloads).size).toBe(1);
@@ -736,9 +842,10 @@ describe('P1-01 Buyer Ticket Confirmation Email — PostgreSQL Integration Tests
       expect(alertText).not.toContain(caseA.order.orderAccessToken!);
     });
 
-    it('keeps rendered confirmation URL and complete Resend payload byte-for-byte identical when CLIENT_URL changes after enqueueing', async () => {
+    it('keeps rendered confirmation URL, sender fromEmail, and complete Resend payload byte-for-byte identical when CLIENT_URL and EMAIL_FROM change after enqueueing', async () => {
       process.env.RESEND_API_KEY = fakeKey;
       process.env.CLIENT_URL = 'https://ORIGIN-A.out-side.vip///';
+      process.env.EMAIL_FROM = 'Outside.vip <sender-a@out-side.vip>';
       setEmailServiceTestOptions({ useResendInTest: true });
 
       const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -752,10 +859,13 @@ describe('P1-01 Buyer Ticket Confirmation Email — PostgreSQL Integration Tests
         where: { dedupeKey: `order_confirmation:${order.id}` },
       });
 
-      // Verify normalized origin A was snapshotted and bearer token is absent from snapshot
+      // Verify normalized origin A and sender A were snapshotted and bearer token is absent from snapshot
       const snapshotJson = JSON.stringify(enqueuedRow.contentSnapshot);
       expect((enqueuedRow.contentSnapshot as any).clientOrigin).toBe(
         'https://origin-a.out-side.vip'
+      );
+      expect((enqueuedRow.contentSnapshot as any).fromEmail).toBe(
+        'Outside.vip <sender-a@out-side.vip>'
       );
       expect(snapshotJson).not.toContain(order.orderAccessToken!);
       expect(snapshotJson).not.toContain('orderAccessToken');
@@ -786,7 +896,7 @@ describe('P1-01 Buyer Ticket Confirmation Email — PostgreSQL Integration Tests
           });
         });
 
-      // Attempt 1 under CLIENT_URL A -> transient 503 -> scheduled for retry
+      // Attempt 1 under CLIENT_URL A + EMAIL_FROM A -> transient 503 -> scheduled for retry
       await runEmailOutboxPass({ randomFn: () => 0.5 });
       const afterAttempt1 = await prisma.emailOutbox.findUniqueOrThrow({
         where: { id: enqueuedRow.id },
@@ -795,14 +905,15 @@ describe('P1-01 Buyer Ticket Confirmation Email — PostgreSQL Integration Tests
       expect(afterAttempt1.attempts).toBe(1);
       expect(afterAttempt1.lastErrorMessage).not.toContain(order.orderAccessToken!);
 
-      // Mutate CLIENT_URL to value B BEFORE retry
+      // Mutate BOTH CLIENT_URL and EMAIL_FROM to B values BEFORE retry
       process.env.CLIENT_URL = 'https://origin-b.different-domain.example';
+      process.env.EMAIL_FROM = 'Changed Brand <sender-b@different-domain.example>';
       await prisma.emailOutbox.update({
         where: { id: enqueuedRow.id },
         data: { nextAttemptAt: new Date(Date.now() - 1000) },
       });
 
-      // Attempt 2 under mutated CLIENT_URL B -> succeeds with identical payload using origin A
+      // Attempt 2 under mutated CLIENT_URL B + EMAIL_FROM B -> succeeds with identical payload using A values
       await runEmailOutboxPass({ randomFn: () => 0.5 });
       const afterAttempt2 = await prisma.emailOutbox.findUniqueOrThrow({
         where: { id: enqueuedRow.id },
@@ -821,6 +932,10 @@ describe('P1-01 Buyer Ticket Confirmation Email — PostgreSQL Integration Tests
 
       const expectedUrl = `https://origin-a.out-side.vip/orders/${order.orderNumber}?token=${order.orderAccessToken}`;
       const parsedBody = JSON.parse(capturedPayloads[1]);
+      expect(parsedBody.from).toBe('Outside.vip <sender-a@out-side.vip>');
+      expect(parsedBody.from).not.toContain('sender-b@different-domain.example');
+      expect(parsedBody.to).toEqual([order.customerEmail.toLowerCase()]);
+      expect(parsedBody.subject).toContain(order.orderNumber);
       expect(parsedBody.html).toContain(expectedUrl);
       expect(parsedBody.text).toContain(expectedUrl);
       expect(parsedBody.html).not.toContain('origin-b.different-domain.example');
@@ -999,6 +1114,42 @@ describe('P1-01 Buyer Ticket Confirmation Email — PostgreSQL Integration Tests
         `/api/orders/${order.orderNumber}/tickets/pdf?token=oat_invalid_wrong_token_00000000`
       );
       expect(wrongPdfRes.status).toBe(403);
+
+      // Malformed non-string query tokens (?token[a]=1 and ?token=a&token=b) return 403, never 500
+      const objTokenRes = await request(app).get(`/api/orders/${order.orderNumber}?token[a]=1`);
+      expect(objTokenRes.status).toBe(403);
+
+      const arrTokenRes = await request(app).get(
+        `/api/orders/${order.orderNumber}?token=a&token=b`
+      );
+      expect(arrTokenRes.status).toBe(403);
+
+      const objPdfRes = await request(app).get(
+        `/api/orders/${order.orderNumber}/tickets/pdf?token[a]=1`
+      );
+      expect(objPdfRes.status).toBe(403);
+
+      const arrPdfRes = await request(app).get(
+        `/api/orders/${order.orderNumber}/tickets/pdf?token=a&token=b`
+      );
+      expect(arrPdfRes.status).toBe(403);
+
+      // Direct controller invocation with synthetic non-string query/header tokens passes 403 ForbiddenError to next (never TypeError 500)
+      const capturedErrors: any[] = [];
+      await getOrderByOrderNumber(
+        {
+          params: { orderNumber: order.orderNumber },
+          query: { token: { nested: 'object' } },
+          headers: { 'x-order-token': ['array-token-1', 'array-token-2'] },
+        } as any,
+        { json: vi.fn() } as any,
+        (err?: any) => {
+          if (err) capturedErrors.push(err);
+        }
+      );
+      expect(capturedErrors).toHaveLength(1);
+      expect(capturedErrors[0].statusCode).toBe(403);
+      expect(capturedErrors[0]).not.toBeInstanceOf(TypeError);
     });
   });
 });

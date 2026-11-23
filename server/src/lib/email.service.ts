@@ -108,6 +108,7 @@ export interface OrderConfirmationSnapshotItem {
 export interface OrderConfirmationContentSnapshot {
   templateVersion: 1;
   clientOrigin: string;
+  fromEmail: string;
   orderNumber: string;
   purchaseDateIso: string;
   totalInCents: number;
@@ -281,10 +282,12 @@ export function getLatestStaffOtpEmail(email: string): StaffOtpEmailMessage | un
 }
 
 export function resolveEmailFrom(): string {
-  const raw = (process.env.EMAIL_FROM ?? env.EMAIL_FROM ?? '')
-    .trim()
-    .replace(/^["']+|["']+$/g, '')
-    .trim();
+  const raw = sanitizeHeaderField(
+    (process.env.EMAIL_FROM ?? env.EMAIL_FROM ?? '')
+      .trim()
+      .replace(/^["']+|["']+$/g, '')
+      .trim()
+  );
   return raw || DEFAULT_EMAIL_FROM;
 }
 
@@ -1440,25 +1443,24 @@ function formatDeterministicDateRange(
 
 function formatDeterministicMoney(cents: number, currency: string): string {
   const safeCurrency = (currency || 'USD').trim().toUpperCase() || 'USD';
-  if (cents === 0) {
-    return '$0.00 (Free)';
-  }
+  let formatted: string;
   try {
-    return new Intl.NumberFormat('en-US', {
+    formatted = new Intl.NumberFormat('en-US', {
       style: 'currency',
       currency: safeCurrency,
       minimumFractionDigits: 2,
       maximumFractionDigits: 2,
     }).format(cents / 100);
   } catch {
-    return `${safeCurrency} ${(cents / 100).toFixed(2)}`;
+    formatted = `${safeCurrency} ${(cents / 100).toFixed(2)}`;
   }
+  return cents === 0 ? `${formatted} (Free)` : formatted;
 }
 
 /**
- * Normalizes a client base origin (scheme + host + optional non-root path, no trailing slashes)
+ * Normalizes a client base origin (http/https scheme + host + optional non-root path, no trailing slashes)
  * for snapshotting at fulfillment time so confirmation URLs stay identical across retries even
- * if CLIENT_URL changes later.
+ * if CLIENT_URL changes later. Rejects unsupported protocols or malformed URLs.
  */
 export function normalizeClientOrigin(rawOrigin?: string | null): string {
   const candidate = (rawOrigin ?? process.env.CLIENT_URL ?? env.CLIENT_URL ?? 'http://localhost:5173')
@@ -1471,13 +1473,21 @@ export function normalizeClientOrigin(rawOrigin?: string | null): string {
     return 'http://localhost:5173';
   }
 
+  let parsed: URL;
   try {
-    const parsed = new URL(candidate);
-    const cleanPath = parsed.pathname.replace(/\/+$/, '');
-    return `${parsed.origin}${cleanPath}`;
+    parsed = new URL(candidate);
   } catch {
-    return candidate;
+    throw new Error('Invalid CLIENT_URL: must be a valid http or https URL');
   }
+
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error(
+      `Unsupported CLIENT_URL protocol "${parsed.protocol}": only http: and https: are allowed`
+    );
+  }
+
+  const cleanPath = parsed.pathname.replace(/\/+$/, '');
+  return `${parsed.origin}${cleanPath}`;
 }
 
 /**
@@ -1513,7 +1523,9 @@ export function renderOrderConfirmationEmail(params: {
   html: string;
 } {
   const { snapshot } = params;
-  const from = params.from ? sanitizeHeaderField(params.from) : resolveEmailFrom();
+  const from = sanitizeHeaderField(
+    params.from || snapshot.fromEmail || resolveEmailFrom()
+  );
   const to = sanitizeHeaderField(normalizeEmail(params.to));
   const cleanTitle = sanitizeHeaderField(snapshot.eventTitle || 'Outside.vip Event');
   const cleanOrderNumber = sanitizeHeaderField(snapshot.orderNumber);
@@ -1729,6 +1741,7 @@ export async function sendOrderConfirmationEmail(params: {
 }): Promise<EmailDeliveryResult> {
   const rendered = renderOrderConfirmationEmail({
     to: params.to,
+    from: params.snapshot.fromEmail,
     snapshot: params.snapshot,
     ticketAccessUrl: params.ticketAccessUrl,
   });

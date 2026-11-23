@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   buildOrderTicketAccessUrl,
+  DEFAULT_EMAIL_TIMEOUT_MS,
   EmailDeliveryError,
   normalizeClientOrigin,
   ORDER_CONFIRMATION_TEMPLATE_VERSION,
@@ -8,6 +9,7 @@ import {
   renderOrderConfirmationEmail,
   resetEmailServiceTestOptions,
   resetSentOrderConfirmationEmails,
+  resolveEmailFrom,
   sanitizeEmailLogMessage,
   sendOrderConfirmationEmail,
   setEmailServiceTestOptions,
@@ -18,6 +20,8 @@ import {
   buildOrderConfirmationSnapshot,
   classifyOutboxFailure,
   computeNextRetryDelayMs,
+  EMAIL_OUTBOX_BATCH_SIZE,
+  EMAIL_OUTBOX_LEASE_MS,
   EMAIL_OUTBOX_MAX_ATTEMPTS,
   EMAIL_OUTBOX_RETRY_DELAYS_MS,
 } from '../modules/notifications/emailOutbox.service.js';
@@ -28,6 +32,7 @@ function makeSampleSnapshot(
   return {
     templateVersion: ORDER_CONFIRMATION_TEMPLATE_VERSION,
     clientOrigin: 'https://out-side.vip',
+    fromEmail: 'Outside.vip <no-reply@out-side.vip>',
     orderNumber: 'OUT-2026-48291',
     purchaseDateIso: '2026-11-20T14:30:00.000Z',
     totalInCents: 11590,
@@ -94,8 +99,9 @@ describe('P1-01 Buyer Ticket Confirmation Email — Unit Tests', () => {
       expect(buildOrderConfirmationIdempotencyKey('ord_123')).toBe('order-confirmation:ord_123');
     });
 
-    it('builds immutable content snapshot with normalized clientOrigin and without orderAccessToken or ticket tokens', () => {
+    it('builds immutable content snapshot with normalized clientOrigin and sanitized fromEmail, without bearer tokens', () => {
       process.env.CLIENT_URL = '  "https://OUT-SIDE.VIP///"  ';
+      process.env.EMAIL_FROM = '  "Outside.vip <tickets-a@out-side.vip>\r\nBcc: bad@example.com"  ';
       const snapshot = buildOrderConfirmationSnapshot({
         id: 'ord_123',
         orderNumber: 'OUT-2026-90001',
@@ -135,6 +141,9 @@ describe('P1-01 Buyer Ticket Confirmation Email — Unit Tests', () => {
 
       expect(snapshot.templateVersion).toBe(1);
       expect(snapshot.clientOrigin).toBe('https://out-side.vip');
+      expect(snapshot.fromEmail).not.toMatch(/[\r\n]/);
+      expect(snapshot.fromEmail).toBe('Outside.vip <tickets-a@out-side.vip> Bcc: bad@example.com');
+      expect(resolveEmailFrom()).not.toMatch(/[\r\n]/);
       expect(snapshot.currency).toBe('USD');
       expect(snapshot.organizerName).toBe('Nairobi Sound System');
       expect(snapshot.totalTickets).toBe(2);
@@ -147,8 +156,9 @@ describe('P1-01 Buyer Ticket Confirmation Email — Unit Tests', () => {
       expect(serialized).not.toContain('oat_');
       expect(serialized).not.toContain('tkt_sec_');
 
-      // Changing CLIENT_URL after snapshotting does not alter URL built from snapshot.clientOrigin
+      // Changing CLIENT_URL and EMAIL_FROM after snapshotting does not alter rendered output
       process.env.CLIENT_URL = 'https://changed-later.example.com';
+      process.env.EMAIL_FROM = 'Other Sender <other@changed-later.example.com>';
       const stableUrl = buildOrderTicketAccessUrl(
         snapshot.orderNumber,
         'oat_canonical_token_123456',
@@ -157,8 +167,26 @@ describe('P1-01 Buyer Ticket Confirmation Email — Unit Tests', () => {
       expect(stableUrl).toBe(
         'https://out-side.vip/orders/OUT-2026-90001?token=oat_canonical_token_123456'
       );
+      const rendered = renderOrderConfirmationEmail({
+        to: 'buyer@example.com',
+        snapshot,
+        ticketAccessUrl: stableUrl,
+      });
+      expect(rendered.from).toBe(snapshot.fromEmail);
+
       expect(normalizeClientOrigin('https://Sub.Out-Side.VIP/app///')).toBe(
         'https://sub.out-side.vip/app'
+      );
+      expect(() => normalizeClientOrigin('javascript:alert(1)')).toThrow(/Unsupported CLIENT_URL protocol/);
+      expect(() => normalizeClientOrigin('ftp://files.example.com')).toThrow(/Unsupported CLIENT_URL protocol/);
+      expect(() => normalizeClientOrigin('not-a-valid-url')).toThrow(/Invalid CLIENT_URL/);
+    });
+
+    it('keeps batch worst-case sequential timeout safely below the 90s worker lease', () => {
+      expect(EMAIL_OUTBOX_BATCH_SIZE).toBe(5);
+      expect(EMAIL_OUTBOX_LEASE_MS).toBe(90_000);
+      expect(EMAIL_OUTBOX_BATCH_SIZE * DEFAULT_EMAIL_TIMEOUT_MS).toBeLessThan(
+        EMAIL_OUTBOX_LEASE_MS
       );
     });
 
@@ -285,6 +313,74 @@ describe('P1-01 Buyer Ticket Confirmation Email — Unit Tests', () => {
       expect(sanitized).not.toContain('tkt_sec_9876543210abcdef');
       expect(sanitized).toContain('[REDACTED_API_KEY]');
       expect(sanitized).toContain('[REDACTED]');
+    });
+
+    it('formats zero-price tickets using the order currency rather than hardcoding USD', () => {
+      const kesRendered = renderOrderConfirmationEmail({
+        to: 'buyer@example.com',
+        snapshot: makeSampleSnapshot({
+          totalInCents: 0,
+          currency: 'KES',
+          items: [
+            {
+              tierName: 'Guest List Pass',
+              quantity: 1,
+              unitPriceInCents: 0,
+              subtotalInCents: 0,
+              currency: 'KES',
+              validityStartAtIso: null,
+              validityEndAtIso: null,
+            },
+          ],
+        }),
+        ticketAccessUrl: 'https://out-side.vip/orders/OUT-2026-48291?token=oat_safe_1234567890',
+      });
+      expect(kesRendered.text).toContain('(Free)');
+      expect(kesRendered.text).toContain('KES');
+      expect(kesRendered.text).not.toContain('$0.00');
+
+      const eurRendered = renderOrderConfirmationEmail({
+        to: 'buyer@example.com',
+        snapshot: makeSampleSnapshot({
+          totalInCents: 0,
+          currency: 'EUR',
+          items: [
+            {
+              tierName: 'RSVP Pass',
+              quantity: 1,
+              unitPriceInCents: 0,
+              subtotalInCents: 0,
+              currency: 'EUR',
+              validityStartAtIso: null,
+              validityEndAtIso: null,
+            },
+          ],
+        }),
+        ticketAccessUrl: 'https://out-side.vip/orders/OUT-2026-48291?token=oat_safe_1234567890',
+      });
+      expect(eurRendered.text).toContain('€0.00 (Free)');
+      expect(eurRendered.text).not.toContain('$0.00');
+
+      const usdRendered = renderOrderConfirmationEmail({
+        to: 'buyer@example.com',
+        snapshot: makeSampleSnapshot({
+          totalInCents: 0,
+          currency: 'USD',
+          items: [
+            {
+              tierName: 'Complimentary Pass',
+              quantity: 1,
+              unitPriceInCents: 0,
+              subtotalInCents: 0,
+              currency: 'USD',
+              validityStartAtIso: null,
+              validityEndAtIso: null,
+            },
+          ],
+        }),
+        ticketAccessUrl: 'https://out-side.vip/orders/OUT-2026-48291?token=oat_safe_1234567890',
+      });
+      expect(usdRendered.text).toContain('$0.00 (Free)');
     });
   });
 
