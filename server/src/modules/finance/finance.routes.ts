@@ -1,9 +1,11 @@
 import { Router } from 'express';
+import { Role } from '@prisma/client';
 import {
   requireAuth,
   requireVerifiedEmail,
   requireAdmin,
   requireFreshUserVerification,
+  requireRole,
 } from '../../middleware/auth.js';
 import {
   handleGetAccountStatus,
@@ -23,19 +25,41 @@ import {
 
 export const financeRouter = Router();
 
+const requireOrganizerOrAdmin = requireRole(Role.ORGANIZER, Role.ADMIN);
+
 financeRouter.use(requireAuth);
 financeRouter.use(requireVerifiedEmail);
 
-financeRouter.get('/countries', handleGetSupportedCountries);
-financeRouter.get('/account', handleGetAccountStatus);
-financeRouter.post('/onboarding-link', requireFreshUserVerification, handleCreateOnboardingLink);
-financeRouter.post('/login-link', requireFreshUserVerification, handleCreateLoginLink);
-financeRouter.get('/balance', handleGetBalance);
-financeRouter.post('/withdraw', requireFreshUserVerification, handleExecuteWithdrawal);
+financeRouter.get('/countries', requireOrganizerOrAdmin, handleGetSupportedCountries);
+financeRouter.get('/account', requireOrganizerOrAdmin, handleGetAccountStatus);
+financeRouter.post(
+  '/onboarding-link',
+  requireFreshUserVerification,
+  requireOrganizerOrAdmin,
+  handleCreateOnboardingLink
+);
+financeRouter.post(
+  '/login-link',
+  requireFreshUserVerification,
+  requireOrganizerOrAdmin,
+  handleCreateLoginLink
+);
+financeRouter.get('/balance', requireOrganizerOrAdmin, handleGetBalance);
+financeRouter.post(
+  '/withdraw',
+  requireFreshUserVerification,
+  requireOrganizerOrAdmin,
+  handleExecuteWithdrawal
+);
 financeRouter.post('/admin/withdraw', requireAdmin, handleAdminWithdrawal);
-financeRouter.get('/transfers', handleGetTransfers);
-financeRouter.get('/ledger', handleGetLedger);
-financeRouter.get('/payouts', handleGetPayouts);
-financeRouter.get('/disputes', handleGetDisputes);
-financeRouter.patch('/payout-schedule', requireFreshUserVerification, handleUpdatePayoutSchedule);
-financeRouter.get('/reconcile', handleReconcile);
+financeRouter.get('/transfers', requireOrganizerOrAdmin, handleGetTransfers);
+financeRouter.get('/ledger', requireOrganizerOrAdmin, handleGetLedger);
+financeRouter.get('/payouts', requireOrganizerOrAdmin, handleGetPayouts);
+financeRouter.get('/disputes', requireOrganizerOrAdmin, handleGetDisputes);
+financeRouter.patch(
+  '/payout-schedule',
+  requireFreshUserVerification,
+  requireOrganizerOrAdmin,
+  handleUpdatePayoutSchedule
+);
+financeRouter.get('/reconcile', requireOrganizerOrAdmin, handleReconcile);

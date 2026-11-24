@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
+import { Role } from '@prisma/client';
 import {
   getConnectedAccountStatus,
   createOnboardingLink,
@@ -296,8 +297,11 @@ export async function handleGetDisputes(
 ): Promise<void> {
   try {
     const userId = req.user!.userId;
-    const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 10;
-    const disputes = await getConnectedAccountDisputes(userId, limit);
+    const rawLimit = req.query.limit ? parseInt(req.query.limit as string, 10) : 10;
+    const limit = Number.isFinite(rawLimit) ? rawLimit : 10;
+    const disputes = await getConnectedAccountDisputes(userId, limit, {
+      isPlatformAdmin: req.user!.role === Role.ADMIN,
+    });
     res.json({
       success: true,
       data: disputes,

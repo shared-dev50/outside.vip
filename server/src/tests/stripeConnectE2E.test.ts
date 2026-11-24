@@ -38,7 +38,7 @@ describe('Stripe Connect End-to-End Automated Integration Test Suite', () => {
     organizerUserId = regRes.body.data.user.id;
     await prisma.user.update({
       where: { id: organizerUserId },
-      data: { emailVerified: true, emailVerifiedAt: new Date() },
+      data: { role: Role.ORGANIZER, emailVerified: true, emailVerifiedAt: new Date() },
     });
 
     const event = await prisma.event.create({

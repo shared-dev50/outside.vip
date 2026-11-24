@@ -1,8 +1,10 @@
 import { Router } from 'express';
+import { Role } from '@prisma/client';
 import {
   requireAuth,
   requireVerifiedEmail,
   requireFreshUserVerification,
+  requireRole,
 } from '../../middleware/auth.js';
 import {
   getDashboardStats,
@@ -57,8 +59,13 @@ organizerRouter.post('/upload', uploadCoverMiddleware.single('image'), handleDir
 organizerRouter.get('/dashboard', getDashboardStats);
 organizerRouter.get('/orders', getOrganizerOrders);
 organizerRouter.post('/earnings-preview', getOrganizerEarningsPreview);
-organizerRouter.get('/payout-details', getOrganizerPayoutDetails);
-organizerRouter.put('/payout-details', requireFreshUserVerification, updateOrganizerPayoutDetails);
+organizerRouter.get('/payout-details', requireRole(Role.ORGANIZER, Role.ADMIN), getOrganizerPayoutDetails);
+organizerRouter.put(
+  '/payout-details',
+  requireFreshUserVerification,
+  requireRole(Role.ORGANIZER, Role.ADMIN),
+  updateOrganizerPayoutDetails
+);
 organizerRouter.get('/events', listOrganizerEvents);
 organizerRouter.post('/events', createOrganizerEvent);
 organizerRouter.get('/events/:id', getOrganizerEventById);

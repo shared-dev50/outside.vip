@@ -43,7 +43,7 @@ describe('Outside.vip Stripe Connect Finance & Account Dashboard API', () => {
     secondOrganizerUserId = regRes.body.data.user.id;
     await prisma.user.update({
       where: { id: secondOrganizerUserId },
-      data: { emailVerified: true, emailVerifiedAt: new Date() },
+      data: { role: 'ORGANIZER', emailVerified: true, emailVerifiedAt: new Date() },
     });
   });
 
@@ -485,35 +485,75 @@ describe('Outside.vip Stripe Connect Finance & Account Dashboard API', () => {
         data: { stripeAccountId: mockAcctId },
       });
 
-      const nowSeconds = Math.floor(Date.now() / 1000);
-      vi.spyOn(stripe.disputes, 'list').mockResolvedValueOnce({
-        object: 'list',
-        data: [
-          {
-            id: 'dp_test_01',
-            amount: 5000,
-            currency: 'usd',
-            status: 'needs_response',
-            reason: 'fraudulent',
-            created: nowSeconds,
-            evidence_details: {
-              due_by: nowSeconds + 7 * 86400,
+      const uniq = Date.now();
+      const dispEvent = await prisma.event.create({
+        data: {
+          organizerId: organizerUserId,
+          title: `Dispute Test Event ${uniq}`,
+          description: 'Owned event for dispute retrieval test',
+          slug: `disp-test-event-${uniq}`,
+          coverImageUrl: 'https://images.unsplash.com/photo-1514525253161-7a46d19cd819',
+          venueName: 'Test Venue',
+          venueAddress: '100 Main St',
+          city: 'New York',
+          country: 'US',
+          startAt: new Date(Date.now() + 86400000),
+          endAt: new Date(Date.now() + 86400000 * 2),
+        },
+      });
+      const dispOrder = await prisma.order.create({
+        data: {
+          orderNumber: `OUT-FDISP-${uniq}`,
+          eventId: dispEvent.id,
+          status: 'COMPLETED',
+          customerName: 'Dispute Buyer',
+          customerEmail: 'dispute.buyer@outside.vip',
+          totalInCents: 5000,
+          currency: 'USD',
+          idempotencyKey: `idem_fdisp_${uniq}`,
+          paymentReference: `pi_test_disp_${uniq}`,
+          stripeSettledChargeId: `ch_test_disp_${uniq}`,
+          expiresAt: new Date(),
+        },
+      });
+
+      try {
+        const nowSeconds = Math.floor(Date.now() / 1000);
+        vi.spyOn(stripe.disputes, 'list').mockResolvedValueOnce({
+          object: 'list',
+          data: [
+            {
+              id: 'dp_test_01',
+              amount: 5000,
+              currency: 'usd',
+              charge: `ch_test_disp_${uniq}`,
+              payment_intent: `pi_test_disp_${uniq}`,
+              status: 'needs_response',
+              reason: 'fraudulent',
+              created: nowSeconds,
+              evidence_details: {
+                due_by: nowSeconds + 7 * 86400,
+              },
+              is_charge_refundable: false,
             },
-            is_charge_refundable: false,
-          },
-        ],
-      } as any);
+          ],
+          has_more: false,
+        } as any);
 
-      const res = await request(app)
-        .get('/api/organizer/finance/disputes')
-        .set('Authorization', `Bearer ${organizerToken}`);
+        const res = await request(app)
+          .get('/api/organizer/finance/disputes')
+          .set('Authorization', `Bearer ${organizerToken}`);
 
-      expect(res.status).toBe(200);
-      const disputes = res.body.data.disputes;
-      expect(disputes.length).toBe(1);
-      expect(disputes[0].amount).toBe(5000);
-      expect(disputes[0].reason).toBe('fraudulent');
-      expect(disputes[0].status).toBe('needs_response');
+        expect(res.status).toBe(200);
+        const disputes = res.body.data.disputes;
+        expect(disputes.length).toBe(1);
+        expect(disputes[0].amount).toBe(5000);
+        expect(disputes[0].reason).toBe('fraudulent');
+        expect(disputes[0].status).toBe('needs_response');
+      } finally {
+        await prisma.order.delete({ where: { id: dispOrder.id } }).catch(() => {});
+        await prisma.event.delete({ where: { id: dispEvent.id } }).catch(() => {});
+      }
     });
   });
 

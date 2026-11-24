@@ -42,7 +42,7 @@ describe('Posh-Inspired Organizer Finance & Transfer Workflow', () => {
     organizerUserId = organizerReg.body.data.user.id;
     await prisma.user.update({
       where: { id: organizerUserId },
-      data: { emailVerified: true, emailVerifiedAt: new Date() },
+      data: { role: Role.ORGANIZER, emailVerified: true, emailVerifiedAt: new Date() },
     });
 
     // Authenticate seeded admin user
@@ -67,7 +67,7 @@ describe('Posh-Inspired Organizer Finance & Transfer Workflow', () => {
     secondOrganizerUserId = secondReg.body.data.user.id;
     await prisma.user.update({
       where: { id: secondOrganizerUserId },
-      data: { emailVerified: true, emailVerifiedAt: new Date() },
+      data: { role: Role.ORGANIZER, emailVerified: true, emailVerifiedAt: new Date() },
     });
 
     // Create a test event with a paid ticket tier for the main organizer

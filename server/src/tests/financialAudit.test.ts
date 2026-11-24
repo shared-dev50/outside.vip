@@ -49,6 +49,7 @@ describe('Stripe Connect Financial Correctness & Money Movement Audit Suite', ()
     await prisma.user.update({
       where: { id: organizerUserId },
       data: {
+        role: Role.ORGANIZER,
         stripeAccountId: organizerStripeAccountId,
         emailVerified: true,
         emailVerifiedAt: new Date(),
@@ -901,15 +902,32 @@ describe('Stripe Connect Financial Correctness & Money Movement Audit Suite', ()
     expect(payout?.amountInCents).toBe(2500);
   });
 
-  // 17. Platform-level dispute retrieval
-  it('17. Platform-level dispute retrieval queries platform disputes without connected account header', async () => {
-    const listSpy = vi.spyOn(stripe.disputes, 'list').mockResolvedValueOnce({
+  // 17. Platform-level dispute retrieval & organizer dispute isolation
+  it('17. Platform-level dispute retrieval queries platform disputes without connected account header and isolates organizer views', async () => {
+    const ownedOrder = await prisma.order.findUniqueOrThrow({
+      where: { id: testOrderId },
+      select: { id: true, paymentReference: true },
+    });
+
+    const listSpy = vi.spyOn(stripe.disputes, 'list').mockResolvedValue({
       object: 'list',
       data: [
         {
-          id: 'dp_platform_001',
+          id: 'dp_platform_unowned_001',
+          amount: 5500,
+          currency: 'usd',
+          charge: 'ch_other_organizer_999',
+          payment_intent: 'pi_other_organizer_999',
+          status: 'needs_response',
+          reason: 'fraudulent',
+          created: Math.floor(Date.now() / 1000),
+        } as any,
+        {
+          id: 'dp_platform_owned_002',
           amount: 2394,
           currency: 'usd',
+          payment_intent: ownedOrder.paymentReference,
+          charge: 'ch_audit_owned_match',
           status: 'needs_response',
           reason: 'fraudulent',
           created: Math.floor(Date.now() / 1000),
@@ -918,15 +936,31 @@ describe('Stripe Connect Financial Correctness & Money Movement Audit Suite', ()
       has_more: false,
     } as any);
 
-    const res = await request(app)
+    // Organizer only sees disputes linked to their own transactions (excludes unowned disputes)
+    const orgRes = await request(app)
       .get('/api/organizer/finance/disputes')
       .set('Authorization', `Bearer ${organizerToken}`);
 
-    expect(res.status).toBe(200);
-    expect(res.body.data.disputes.length).toBe(1);
-    expect(res.body.data.disputes[0].id).toBe('dp_platform_001');
+    expect(orgRes.status).toBe(200);
+    expect(orgRes.body.data.disputes.map((d: any) => d.id)).toEqual(['dp_platform_owned_002']);
 
-    // Confirm that stripe.disputes.list was called WITHOUT { stripeAccount } option
+    // Platform ADMIN retrieves platform-wide disputes without { stripeAccount } option
+    const adminLogin = await request(app).post('/api/auth/login').send({
+      email: 'admin@outside.vip',
+      password: 'Outside2026!',
+    });
+    expect(adminLogin.status).toBe(200);
+
+    listSpy.mockClear();
+    const adminRes = await request(app)
+      .get('/api/organizer/finance/disputes')
+      .set('Authorization', `Bearer ${adminLogin.body.data.token}`);
+
+    expect(adminRes.status).toBe(200);
+    expect(adminRes.body.data.disputes.map((d: any) => d.id)).toEqual([
+      'dp_platform_unowned_001',
+      'dp_platform_owned_002',
+    ]);
     expect(listSpy).toHaveBeenCalledWith({ limit: 10 });
   });
 
@@ -946,6 +980,7 @@ describe('Stripe Connect Financial Correctness & Money Movement Audit Suite', ()
     await prisma.user.update({
       where: { id: cleanUserId },
       data: {
+        role: Role.ORGANIZER,
         stripeAccountId: cleanStripeAccountId,
         emailVerified: true,
         emailVerifiedAt: new Date(),

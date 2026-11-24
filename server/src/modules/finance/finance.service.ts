@@ -1,5 +1,5 @@
 import Stripe from 'stripe';
-import { LedgerEntryType } from '@prisma/client';
+import { LedgerEntryType, Role } from '@prisma/client';
 import { prisma } from '../../db/prisma.js';
 import { stripe } from '../../lib/stripe.js';
 import { env } from '../../config/env.js';
@@ -830,21 +830,216 @@ export async function getConnectedAccountPayouts(
   }
 }
 
+interface OrganizerDisputeOwnership {
+  orderIds: Set<string>;
+  disputeIds: Set<string>;
+  chargeIds: Set<string>;
+  paymentIntentIds: Set<string>;
+}
+
+function sanitizeDisputeItem(d: Stripe.Dispute): SanitizedDisputeItem {
+  return {
+    id: d.id,
+    amount: d.amount,
+    currency: d.currency.toUpperCase(),
+    status: d.status,
+    reason: d.reason,
+    created: new Date(d.created * 1000).toISOString(),
+    dueBy: d.evidence_details?.due_by
+      ? new Date(d.evidence_details.due_by * 1000).toISOString()
+      : null,
+    isChargeRefundable: Boolean(d.is_charge_refundable),
+  };
+}
+
+function addNonEmptyIdentifier(target: Set<string>, value: unknown): void {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (trimmed) {
+      target.add(trimmed);
+    }
+  }
+}
+
+async function resolveOrganizerDisputeOwnership(
+  userId: string
+): Promise<OrganizerDisputeOwnership> {
+  const [ownedOrders, organizerLedgerEntries] = await Promise.all([
+    prisma.order.findMany({
+      where: { event: { organizerId: userId } },
+      select: {
+        id: true,
+        paymentReference: true,
+        stripeSettledChargeId: true,
+        transactions: {
+          select: {
+            providerTransactionId: true,
+            rawResponse: true,
+          },
+        },
+        refunds: {
+          select: {
+            stripePaymentIntentId: true,
+            stripeChargeId: true,
+          },
+        },
+      },
+    }),
+    prisma.financialLedgerEntry.findMany({
+      where: {
+        organizerId: userId,
+        stripeReferenceId: { not: null },
+      },
+      select: {
+        type: true,
+        orderId: true,
+        stripeReferenceId: true,
+        metadata: true,
+      },
+    }),
+  ]);
+
+  const orderIds = new Set<string>();
+  const disputeIds = new Set<string>();
+  const chargeIds = new Set<string>();
+  const paymentIntentIds = new Set<string>();
+
+  for (const order of ownedOrders) {
+    addNonEmptyIdentifier(orderIds, order.id);
+    addNonEmptyIdentifier(paymentIntentIds, order.paymentReference);
+    addNonEmptyIdentifier(chargeIds, order.stripeSettledChargeId);
+
+    for (const tx of order.transactions) {
+      const ref = tx.providerTransactionId?.trim();
+      if (ref) {
+        if (ref.startsWith('ch_')) {
+          chargeIds.add(ref);
+        } else if (ref.startsWith('pi_')) {
+          paymentIntentIds.add(ref);
+        } else {
+          // Support synthetic non-prefixed transaction IDs in tests
+          chargeIds.add(ref);
+          paymentIntentIds.add(ref);
+        }
+      }
+
+      if (tx.rawResponse && typeof tx.rawResponse === 'object' && !Array.isArray(tx.rawResponse)) {
+        const latestCharge = (tx.rawResponse as Record<string, unknown>).latest_charge;
+        if (typeof latestCharge === 'string') {
+          addNonEmptyIdentifier(chargeIds, latestCharge);
+        } else if (
+          latestCharge &&
+          typeof latestCharge === 'object' &&
+          typeof (latestCharge as Record<string, unknown>).id === 'string'
+        ) {
+          addNonEmptyIdentifier(chargeIds, (latestCharge as Record<string, unknown>).id);
+        }
+      }
+    }
+
+    for (const refund of order.refunds) {
+      addNonEmptyIdentifier(paymentIntentIds, refund.stripePaymentIntentId);
+      addNonEmptyIdentifier(chargeIds, refund.stripeChargeId);
+    }
+  }
+
+  for (const entry of organizerLedgerEntries) {
+    addNonEmptyIdentifier(orderIds, entry.orderId);
+    const ref = entry.stripeReferenceId?.trim();
+
+    if (
+      entry.type === LedgerEntryType.DISPUTE_HOLD ||
+      entry.type === LedgerEntryType.DISPUTE_WON ||
+      entry.type === LedgerEntryType.DISPUTE_LOST
+    ) {
+      if (ref) {
+        disputeIds.add(ref);
+      }
+      if (entry.metadata && typeof entry.metadata === 'object' && !Array.isArray(entry.metadata)) {
+        addNonEmptyIdentifier(chargeIds, (entry.metadata as Record<string, unknown>).stripeChargeId);
+      }
+    } else if (ref) {
+      if (ref.startsWith('ch_')) {
+        chargeIds.add(ref);
+      } else if (ref.startsWith('pi_')) {
+        paymentIntentIds.add(ref);
+      }
+    }
+  }
+
+  return { orderIds, disputeIds, chargeIds, paymentIntentIds };
+}
+
+function doesDisputeBelongToOrganizer(
+  dispute: Stripe.Dispute,
+  ownership: OrganizerDisputeOwnership
+): boolean {
+  if (ownership.disputeIds.has(dispute.id)) {
+    return true;
+  }
+
+  const chargeObj =
+    typeof dispute.charge === 'object' && dispute.charge !== null
+      ? (dispute.charge as Stripe.Charge)
+      : null;
+  const chargeId =
+    typeof dispute.charge === 'string' ? dispute.charge : chargeObj?.id;
+
+  if (chargeId && ownership.chargeIds.has(chargeId)) {
+    return true;
+  }
+
+  const piFromDispute =
+    typeof dispute.payment_intent === 'string'
+      ? dispute.payment_intent
+      : (dispute.payment_intent as Stripe.PaymentIntent | null)?.id;
+  const piFromCharge = chargeObj
+    ? typeof chargeObj.payment_intent === 'string'
+      ? chargeObj.payment_intent
+      : (chargeObj.payment_intent as Stripe.PaymentIntent | null)?.id
+    : undefined;
+  const paymentIntentId = piFromDispute || piFromCharge;
+
+  if (paymentIntentId && ownership.paymentIntentIds.has(paymentIntentId)) {
+    return true;
+  }
+
+  const metaOrderId =
+    dispute.metadata?.orderId || chargeObj?.metadata?.orderId;
+  if (metaOrderId && ownership.orderIds.has(metaOrderId)) {
+    return true;
+  }
+
+  return false;
+}
+
 /**
  * Retrieves disputes associated with ticket sales from the platform Stripe account.
  * Customer charges are created on the Outside.vip platform account (merchant of record),
  * so disputes must be retrieved from the platform Stripe account, NOT the organizer's Express account.
+ * Platform ADMIN receives platform-wide disputes; ORGANIZER accounts receive only disputes
+ * matched via database ownership records and Stripe identifiers.
  */
 export async function getConnectedAccountDisputes(
   userId: string,
-  limit: number = 10
+  limit: number = 10,
+  options?: { isPlatformAdmin?: boolean }
 ): Promise<{ disputes: SanitizedDisputeItem[] }> {
   const user = await prisma.user.findUnique({
     where: { id: userId },
-    select: { stripeAccountId: true },
+    select: { stripeAccountId: true, role: true },
   });
 
-  if (!user || !user.stripeAccountId) {
+  if (!user) {
+    return { disputes: [] };
+  }
+
+  // Require both caller context (when supplied) and authoritative DB role to confirm platform ADMIN
+  const isPlatformAdmin = options
+    ? Boolean(options.isPlatformAdmin && user.role === Role.ADMIN)
+    : user.role === Role.ADMIN;
+
+  if (!isPlatformAdmin && !user.stripeAccountId) {
     return { disputes: [] };
   }
 
@@ -852,26 +1047,70 @@ export async function getConnectedAccountDisputes(
     return { disputes: [] };
   }
 
+  const boundedLimit = Number.isFinite(limit)
+    ? Math.min(Math.max(Math.trunc(limit), 1), 50)
+    : 10;
+
   try {
-    // Platform-level dispute retrieval: Query platform Stripe account without { stripeAccount } header
-    const disputes = await stripe.disputes.list({
-      limit: Math.min(Math.max(limit, 1), 50),
-    });
+    if (isPlatformAdmin) {
+      // Platform-level dispute retrieval: Query platform Stripe account without { stripeAccount } header
+      const disputes = await stripe.disputes.list({
+        limit: boundedLimit,
+      });
 
-    const sanitized: SanitizedDisputeItem[] = disputes.data.map((d) => ({
-      id: d.id,
-      amount: d.amount,
-      currency: d.currency.toUpperCase(),
-      status: d.status,
-      reason: d.reason,
-      created: new Date(d.created * 1000).toISOString(),
-      dueBy: d.evidence_details?.due_by
-        ? new Date(d.evidence_details.due_by * 1000).toISOString()
-        : null,
-      isChargeRefundable: Boolean(d.is_charge_refundable),
-    }));
+      return {
+        disputes: disputes.data.map(sanitizeDisputeItem),
+      };
+    }
 
-    return { disputes: sanitized };
+    const ownership = await resolveOrganizerDisputeOwnership(userId);
+    if (
+      ownership.disputeIds.size === 0 &&
+      ownership.chargeIds.size === 0 &&
+      ownership.paymentIntentIds.size === 0 &&
+      ownership.orderIds.size === 0
+    ) {
+      return { disputes: [] };
+    }
+
+    const matchedDisputes: Stripe.Dispute[] = [];
+    const seenDisputeIds = new Set<string>();
+    let startingAfter: string | undefined;
+    const maxPages = 10;
+    const pageLimit = 100;
+
+    for (let pageIndex = 0; pageIndex < maxPages; pageIndex++) {
+      const page = await stripe.disputes.list({
+        limit: pageLimit,
+        ...(startingAfter ? { starting_after: startingAfter } : {}),
+      });
+
+      for (const dispute of page.data) {
+        if (seenDisputeIds.has(dispute.id)) continue;
+        seenDisputeIds.add(dispute.id);
+
+        if (doesDisputeBelongToOrganizer(dispute, ownership)) {
+          matchedDisputes.push(dispute);
+          if (matchedDisputes.length >= boundedLimit) {
+            break;
+          }
+        }
+      }
+
+      if (
+        matchedDisputes.length >= boundedLimit ||
+        !page.has_more ||
+        page.data.length === 0
+      ) {
+        break;
+      }
+
+      startingAfter = page.data[page.data.length - 1].id;
+    }
+
+    return {
+      disputes: matchedDisputes.map(sanitizeDisputeItem),
+    };
   } catch (error: any) {
     logStripeDiagnostic('getConnectedAccountDisputes', error, {
       userId,
