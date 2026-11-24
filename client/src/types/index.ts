@@ -624,10 +624,15 @@ export interface OrganizerWaitlistResponse {
   }>;
 }
 
+export type PaymentProvider = 'STRIPE' | 'MPESA' | 'FREE';
+
 export interface CheckoutSessionResult {
   orderNumber: string;
   orderAccessToken: string;
-  clientSecret: string;
+  status?: OrderStatus;
+  paymentProvider?: PaymentProvider;
+  isFreeOrder?: boolean;
+  clientSecret: string | null;
   publishableKey?: string;
   totalInCents: number;
   currency: string;

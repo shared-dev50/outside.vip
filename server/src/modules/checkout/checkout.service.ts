@@ -1,13 +1,16 @@
-import { Prisma, OrderStatus, ReservationStatus, TicketTierStatus, EventStatus, WaitlistOfferStatus, WaitlistEntryStatus } from '@prisma/client';
+import crypto from 'crypto';
+import { Prisma, OrderStatus, PaymentProvider, ReservationStatus, TicketTierStatus, EventStatus, WaitlistOfferStatus, WaitlistEntryStatus } from '@prisma/client';
 import { nanoid } from 'nanoid';
 import { prisma } from '../../db/prisma.js';
 import { stripe } from '../../lib/stripe.js';
 import { env } from '../../config/env.js';
-import { BadRequestError, ConflictError, NotFoundError, ForbiddenError } from '../../utils/errors.js';
+import { BadRequestError, ConflictError, NotFoundError, ForbiddenError, TooManyRequestsError } from '../../utils/errors.js';
 import { isTicketTierHidden, isTicketTierSalesDisabled } from '../../utils/ticketTierState.js';
 import { verifyEventAccessToken } from '../events/passwordAccess.service.js';
 import { hashOfferToken, processWaitlistForTier } from '../waitlist/waitlist.service.js';
 import { isSupportedPlatformCurrency } from '../finance/stripeCountries.js';
+import { fulfillOrderCompletionInTx } from '../orders/orderFulfillment.service.js';
+import { triggerEmailOutboxDispatch } from '../notifications/emailOutboxWorker.js';
 import {
   calculateFinancialBreakdown,
   calculateCheckoutFeeBreakdown,
@@ -18,12 +21,111 @@ import { CreateCheckoutSessionInput } from './checkout.schema.js';
 export interface CheckoutResult {
   orderNumber: string;
   orderAccessToken: string;
-  clientSecret: string;
+  status: OrderStatus;
+  paymentProvider: PaymentProvider;
+  isFreeOrder: boolean;
+  clientSecret: string | null;
   publishableKey?: string;
   totalInCents: number;
   currency: string;
   expiresAt: string;
   breakdown?: CheckoutFeeBreakdown;
+}
+
+export const FREE_ORDER_BURST_WINDOW_MS = 15 * 60 * 1000;
+export const FREE_ORDER_BURST_MAX_ORDERS_PER_EMAIL = 10;
+
+function normalizeCheckoutEmail(email: string): string {
+  return email.trim().toLowerCase();
+}
+
+function deriveFreeOrderBurstAdvisoryKeys(
+  eventId: string,
+  normalizedEmail: string
+): [number, number] {
+  const digest = crypto
+    .createHash('sha256')
+    .update(`outside_free_burst_v1:${eventId}:${normalizedEmail}`)
+    .digest();
+  return [digest.readInt32BE(0), digest.readInt32BE(4)];
+}
+
+function areRequestedItemsEquivalent(
+  requestedItems: CreateCheckoutSessionInput['items'],
+  existingItems: Array<{ ticketTierId: string; quantity: number }>
+): boolean {
+  const requestedMap = new Map<string, number>();
+  for (const item of requestedItems) {
+    requestedMap.set(item.ticketTierId, (requestedMap.get(item.ticketTierId) || 0) + item.quantity);
+  }
+  const existingMap = new Map<string, number>();
+  for (const item of existingItems) {
+    existingMap.set(item.ticketTierId, (existingMap.get(item.ticketTierId) || 0) + item.quantity);
+  }
+  if (requestedMap.size !== existingMap.size) {
+    return false;
+  }
+  for (const [tierId, qty] of requestedMap.entries()) {
+    if (existingMap.get(tierId) !== qty) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function assertIdempotentOrderMatchesInput(
+  existingOrder: {
+    eventId: string;
+    customerEmail: string;
+    items: Array<{ ticketTierId: string; quantity: number }>;
+  },
+  input: CreateCheckoutSessionInput
+): void {
+  const emailMatches =
+    existingOrder.customerEmail.trim().toLowerCase() === input.customerEmail.trim().toLowerCase();
+  const itemsMatch = areRequestedItemsEquivalent(input.items, existingOrder.items);
+  if (existingOrder.eventId !== input.eventId || !emailMatches || !itemsMatch) {
+    throw new ConflictError(
+      'This idempotency key has already been used for a different checkout request.',
+      'IDEMPOTENCY_KEY_CONFLICT'
+    );
+  }
+}
+
+function buildFreeCheckoutResult(
+  order: {
+    orderNumber: string;
+    orderAccessToken: string | null;
+    status: OrderStatus;
+    paymentProvider: PaymentProvider;
+    totalInCents: number;
+    currency: string;
+    expiresAt: Date;
+    items?: Array<{ quantity: number }>;
+  },
+  breakdown?: CheckoutFeeBreakdown
+): CheckoutResult {
+  const totalQty = (order.items || []).reduce((sum, item) => sum + item.quantity, 0);
+  return {
+    orderNumber: order.orderNumber,
+    orderAccessToken: order.orderAccessToken || '',
+    status: order.status,
+    paymentProvider: order.paymentProvider,
+    isFreeOrder: true,
+    clientSecret: null,
+    totalInCents: order.totalInCents,
+    currency: order.currency,
+    expiresAt: order.expiresAt.toISOString(),
+    breakdown: breakdown || calculateCheckoutFeeBreakdown(0, totalQty),
+  };
+}
+
+function isIdempotencyUniqueViolation(error: any): boolean {
+  if (error?.code !== 'P2002') return false;
+  const target = error?.meta?.target;
+  if (Array.isArray(target)) return target.includes('idempotencyKey');
+  if (typeof target === 'string') return target.includes('idempotencyKey');
+  return String(error?.message || '').includes('idempotencyKey');
 }
 
 export const DEFAULT_RESERVATION_EXPIRY_BATCH_SIZE = 50;
@@ -292,6 +394,16 @@ export async function createCheckoutSession(
     where: { id: eventId },
     include: {
       ticketTiers: true,
+      organizer: {
+        select: {
+          name: true,
+          organizer: {
+            select: {
+              displayName: true,
+            },
+          },
+        },
+      },
     },
   });
 
@@ -316,6 +428,14 @@ export async function createCheckoutSession(
     }
   }
 
+  const finalIdempotencyKey = clientIdempotency || `idem_${nanoid(24)}`;
+  const existingOrder = clientIdempotency
+    ? await prisma.order.findUnique({
+        where: { idempotencyKey: finalIdempotencyKey },
+        include: { items: { include: { ticketTier: true } } },
+      })
+    : null;
+
   let verifiedOffer: any = null;
   if (offerToken) {
     const tokenHash = hashOfferToken(offerToken);
@@ -328,10 +448,6 @@ export async function createCheckoutSession(
       throw new BadRequestError('Invalid waitlist offer token');
     }
 
-    if (verifiedOffer.status !== WaitlistOfferStatus.PENDING || verifiedOffer.expiresAt < now) {
-      throw new BadRequestError('This waitlist offer has expired or is no longer valid');
-    }
-
     if (verifiedOffer.entry.customerEmail.toLowerCase() !== customerEmail.trim().toLowerCase()) {
       throw new BadRequestError('Customer email does not match the waitlist offer recipient');
     }
@@ -342,6 +458,27 @@ export async function createCheckoutSession(
 
     if (items[0].quantity > verifiedOffer.quantity) {
       throw new BadRequestError(`Cannot purchase more tickets than offered (${verifiedOffer.quantity})`);
+    }
+  }
+
+  // Idempotent replay for already-completed FREE orders (including waitlist free claims with same idempotencyKey)
+  if (
+    existingOrder &&
+    existingOrder.status === OrderStatus.COMPLETED &&
+    existingOrder.paymentProvider === PaymentProvider.FREE
+  ) {
+    assertIdempotentOrderMatchesInput(existingOrder, input);
+    if (offerToken) {
+      if (!verifiedOffer || verifiedOffer.orderId !== existingOrder.id) {
+        throw new BadRequestError('This waitlist offer does not belong to the replayed order');
+      }
+    }
+    return buildFreeCheckoutResult(existingOrder);
+  }
+
+  if (verifiedOffer) {
+    if (verifiedOffer.status !== WaitlistOfferStatus.PENDING || verifiedOffer.expiresAt < now) {
+      throw new BadRequestError('This waitlist offer has expired or is no longer valid');
     }
 
     if (verifiedOffer.orderId) {
@@ -362,11 +499,10 @@ export async function createCheckoutSession(
     }
   }
 
-  const finalIdempotencyKey = clientIdempotency || `idem_${nanoid(24)}`;
-  const existingOrder = await prisma.order.findUnique({
-    where: { idempotencyKey: finalIdempotencyKey },
-    include: { items: { include: { ticketTier: true } } },
-  });
+  if (existingOrder && existingOrder.status === OrderStatus.COMPLETED) {
+    assertIdempotentOrderMatchesInput(existingOrder, input);
+    throw new ConflictError('This checkout session has already been completed');
+  }
 
   if (existingOrder && existingOrder.status === OrderStatus.PENDING && existingOrder.expiresAt > now) {
     if (existingOrder.paymentReference) {
@@ -376,6 +512,9 @@ export async function createCheckoutSession(
           return {
             orderNumber: existingOrder.orderNumber,
             orderAccessToken: existingOrder.orderAccessToken || '',
+            status: existingOrder.status,
+            paymentProvider: existingOrder.paymentProvider,
+            isFreeOrder: false,
             clientSecret: paymentIntent.client_secret,
             publishableKey: env.STRIPE_PUBLISHABLE_KEY,
             totalInCents: existingOrder.totalInCents,
@@ -456,10 +595,16 @@ export async function createCheckoutSession(
   // 30m + 60s buffer absorbs clock skew.
   const reservationHoldMinutes = 30;
   const expiresAt = new Date(Date.now() + (reservationHoldMinutes * 60 + 60) * 1000);
-  const orderNumber = `OUT-${now.getFullYear()}-${Math.floor(10000 + Math.random() * 90000)}`;
+  const orderNumber = `OUT-${now.getFullYear()}-${crypto.randomInt(100_000_000, 1_000_000_000)}`;
   const orderAccessToken = `oat_${nanoid(32)}`;
 
-  let reservationResult: { order: any; feeBreakdown: CheckoutFeeBreakdown };
+  let reservationResult: {
+    mode: 'FREE' | 'FREE_REPLAY' | 'STRIPE';
+    order: any;
+    feeBreakdown: CheckoutFeeBreakdown;
+    enqueuedEmail: boolean;
+    releasedWaitlistTierIds: string[];
+  };
 
   try {
     reservationResult = await prisma.$transaction(
@@ -482,8 +627,36 @@ export async function createCheckoutSession(
           `;
           const lockedOffer = lockedOffers[0];
           const lockNow = new Date();
+          if (!lockedOffer) {
+            throw new BadRequestError('This waitlist offer has expired or is no longer valid');
+          }
           if (
-            !lockedOffer ||
+            lockedOffer.status === WaitlistOfferStatus.ACCEPTED &&
+            lockedOffer.orderId &&
+            clientIdempotency
+          ) {
+            const linkedOrder = await tx.order.findUnique({
+              where: { id: lockedOffer.orderId },
+              include: { items: { include: { ticketTier: true } } },
+            });
+            if (
+              linkedOrder &&
+              linkedOrder.status === OrderStatus.COMPLETED &&
+              linkedOrder.paymentProvider === PaymentProvider.FREE &&
+              linkedOrder.idempotencyKey === clientIdempotency
+            ) {
+              assertIdempotentOrderMatchesInput(linkedOrder, input);
+              const totalQty = linkedOrder.items.reduce((sum, item) => sum + item.quantity, 0);
+              return {
+                mode: 'FREE_REPLAY' as const,
+                order: linkedOrder,
+                feeBreakdown: calculateCheckoutFeeBreakdown(0, totalQty),
+                enqueuedEmail: false,
+                releasedWaitlistTierIds: [] as string[],
+              };
+            }
+          }
+          if (
             lockedOffer.status !== WaitlistOfferStatus.PENDING ||
             lockedOffer.expiresAt < lockNow
           ) {
@@ -531,11 +704,22 @@ export async function createCheckoutSession(
         `;
 
         const lockedMap = new Map(lockedTiers.map((t) => [t.id, t]));
+        const txNow = new Date();
 
         let ticketSubtotalInCents = 0;
         let totalTicketQuantity = 0;
-        const orderItemsData = [];
-        const reservationData = [];
+        const orderItemsData: Array<{
+          ticketTierId: string;
+          quantity: number;
+          unitPriceInCents: number;
+          subtotalInCents: number;
+        }> = [];
+        const reservationData: Array<{
+          ticketTierId: string;
+          quantity: number;
+          expiresAt: Date;
+          status: ReservationStatus;
+        }> = [];
 
         for (const item of items) {
           const locked = lockedMap.get(item.ticketTierId);
@@ -583,7 +767,157 @@ export async function createCheckoutSession(
             expiresAt,
             status: ReservationStatus.ACTIVE,
           });
+        }
 
+        const feeBreakdown = calculateCheckoutFeeBreakdown(ticketSubtotalInCents, totalTicketQuantity);
+
+        // Strictly verify the ENTIRE order qualifies as zero-payment free checkout from authoritative DB prices.
+        // Mixed free/paid carts never enter the free path.
+        const allItemsAreFree =
+          orderItemsData.length > 0 && orderItemsData.every((item) => item.unitPriceInCents === 0);
+        const isFreeOrder =
+          allItemsAreFree &&
+          ticketSubtotalInCents === 0 &&
+          feeBreakdown.buyerTotalInCents === 0 &&
+          feeBreakdown.organizerEarningsInCents === 0 &&
+          feeBreakdown.platformRevenueInCents === 0;
+
+        if (isFreeOrder) {
+          // Terminal lock in canonical hierarchy: serialize free-order burst counting across
+          // all tiers of this event (and across API instances) per normalized (eventId, email).
+          const normalizedBurstEmail = normalizeCheckoutEmail(customerEmail);
+          const [advisoryKey1, advisoryKey2] = deriveFreeOrderBurstAdvisoryKeys(
+            event.id,
+            normalizedBurstEmail
+          );
+          await tx.$executeRaw`
+            SELECT pg_advisory_xact_lock(${advisoryKey1}::int4, ${advisoryKey2}::int4)
+          `;
+
+          const burstWindowStart = new Date(txNow.getTime() - FREE_ORDER_BURST_WINDOW_MS);
+          const recentFreeOrdersCount = await tx.order.count({
+            where: {
+              eventId: event.id,
+              customerEmail: { equals: normalizedBurstEmail, mode: 'insensitive' },
+              paymentProvider: PaymentProvider.FREE,
+              status: OrderStatus.COMPLETED,
+              createdAt: { gte: burstWindowStart },
+            },
+          });
+
+          if (recentFreeOrdersCount >= FREE_ORDER_BURST_MAX_ORDERS_PER_EMAIL) {
+            throw new TooManyRequestsError(
+              'Too many free ticket claims for this event from your email address. Please wait before submitting another registration.',
+              'FREE_CHECKOUT_RATE_LIMIT'
+            );
+          }
+
+          const releasedWaitlistTierIds: string[] = [];
+          const sortedOrderItems = [...orderItemsData].sort((a, b) =>
+            a.ticketTierId.localeCompare(b.ticketTierId)
+          );
+
+          for (const item of sortedOrderItems) {
+            const locked = lockedMap.get(item.ticketTierId)!;
+            const isOfferItem = verifiedOffer && verifiedOffer.ticketTierId === item.ticketTierId;
+
+            if (isOfferItem) {
+              const releaseReservedQty = verifiedOffer.quantity;
+              if (locked.reservedQuantity < releaseReservedQty) {
+                console.warn('[InventoryUnderflow]', {
+                  context: 'createCheckoutSessionFreeWaitlist',
+                  ticketTierId: item.ticketTierId,
+                  expectedReleaseQty: releaseReservedQty,
+                  observedReservedQty: locked.reservedQuantity,
+                  clampedReservedQty: 0,
+                });
+              }
+
+              await tx.ticketTier.update({
+                where: { id: item.ticketTierId },
+                data: {
+                  reservedQuantity: Math.max(0, locked.reservedQuantity - releaseReservedQty),
+                  soldQuantity: { increment: item.quantity },
+                },
+              });
+
+              if (item.quantity < verifiedOffer.quantity) {
+                releasedWaitlistTierIds.push(item.ticketTierId);
+              }
+            } else {
+              await tx.ticketTier.update({
+                where: { id: item.ticketTierId },
+                data: {
+                  soldQuantity: { increment: item.quantity },
+                },
+              });
+            }
+          }
+
+          const freeOrder = await tx.order.create({
+            data: {
+              orderNumber,
+              userId: authenticatedUserId || null,
+              eventId: event.id,
+              status: OrderStatus.COMPLETED,
+              paymentProvider: PaymentProvider.FREE,
+              paymentReference: null,
+              customerEmail: customerEmail.trim(),
+              customerName,
+              customerPhone: customerPhone || null,
+              marketingConsent: Boolean(marketingConsent),
+              marketingConsentAt: marketingConsent ? txNow : null,
+              totalInCents: 0,
+              currency: currency.toUpperCase(),
+              platformFeeInCents: 0,
+              organizerNetInCents: 0,
+              orderAccessToken,
+              idempotencyKey: finalIdempotencyKey,
+              expiresAt: txNow,
+              items: {
+                create: orderItemsData,
+              },
+            },
+            include: {
+              items: {
+                include: { ticketTier: true },
+              },
+            },
+          });
+
+          if (verifiedOffer) {
+            await tx.ticketWaitlistOffer.update({
+              where: { id: verifiedOffer.id },
+              data: { orderId: freeOrder.id },
+            });
+          }
+
+          const fulfillment = await fulfillOrderCompletionInTx(tx, {
+            order: {
+              ...freeOrder,
+              event,
+            },
+            existingTicketCount: 0,
+            linkedOffers: verifiedOffer
+              ? [{ id: verifiedOffer.id, entryId: verifiedOffer.entryId }]
+              : [],
+            now: txNow,
+          });
+
+          return {
+            mode: 'FREE' as const,
+            order: freeOrder,
+            feeBreakdown,
+            enqueuedEmail: fulfillment.enqueuedEmail,
+            releasedWaitlistTierIds,
+          };
+        }
+
+        // Paid checkout reservation updates (in locked tier ID order)
+        for (const item of [...orderItemsData].sort((a, b) =>
+          a.ticketTierId.localeCompare(b.ticketTierId)
+        )) {
+          const isOfferItem = verifiedOffer && verifiedOffer.ticketTierId === item.ticketTierId;
           // Waitlist tickets were already held in reservedQuantity.
           // If the buyer took fewer than offered, release the difference back.
           if (isOfferItem) {
@@ -609,8 +943,6 @@ export async function createCheckoutSession(
             });
           }
         }
-
-        const feeBreakdown = calculateCheckoutFeeBreakdown(ticketSubtotalInCents, totalTicketQuantity);
 
         const order = await tx.order.create({
           data: {
@@ -651,7 +983,13 @@ export async function createCheckoutSession(
           });
         }
 
-        return { order, feeBreakdown };
+        return {
+          mode: 'STRIPE' as const,
+          order,
+          feeBreakdown,
+          enqueuedEmail: false,
+          releasedWaitlistTierIds: [] as string[],
+        };
       },
       {
         isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
@@ -659,11 +997,84 @@ export async function createCheckoutSession(
       }
     );
   } catch (error) {
-    if (error instanceof ConflictError || error instanceof BadRequestError) {
+    if (isIdempotencyUniqueViolation(error) && clientIdempotency) {
+      const concurrentOrder = await prisma.order.findUnique({
+        where: { idempotencyKey: finalIdempotencyKey },
+        include: { items: { include: { ticketTier: true } } },
+      });
+
+      if (concurrentOrder) {
+        assertIdempotentOrderMatchesInput(concurrentOrder, input);
+
+        if (
+          concurrentOrder.status === OrderStatus.COMPLETED &&
+          concurrentOrder.paymentProvider === PaymentProvider.FREE
+        ) {
+          return buildFreeCheckoutResult(concurrentOrder);
+        }
+
+        if (
+          concurrentOrder.status === OrderStatus.PENDING &&
+          concurrentOrder.paymentReference
+        ) {
+          try {
+            const paymentIntent = await stripe.paymentIntents.retrieve(
+              concurrentOrder.paymentReference
+            );
+            if (paymentIntent && paymentIntent.client_secret) {
+              return {
+                orderNumber: concurrentOrder.orderNumber,
+                orderAccessToken: concurrentOrder.orderAccessToken || '',
+                status: concurrentOrder.status,
+                paymentProvider: concurrentOrder.paymentProvider,
+                isFreeOrder: false,
+                clientSecret: paymentIntent.client_secret,
+                publishableKey: env.STRIPE_PUBLISHABLE_KEY,
+                totalInCents: concurrentOrder.totalInCents,
+                currency: concurrentOrder.currency,
+                expiresAt: concurrentOrder.expiresAt.toISOString(),
+                breakdown: calculateCheckoutFeeBreakdown(concurrentOrder.items),
+              };
+            }
+          } catch {
+            // Fall through to conflict below if intent cannot be retrieved
+          }
+        }
+
+        throw new ConflictError(
+          'A checkout request with this idempotency key is already being processed.',
+          'IDEMPOTENCY_CONFLICT'
+        );
+      }
+    }
+
+    if (
+      error instanceof ConflictError ||
+      error instanceof BadRequestError ||
+      error instanceof TooManyRequestsError ||
+      error instanceof ForbiddenError ||
+      error instanceof NotFoundError
+    ) {
       throw error;
     }
     console.error('Reservation transaction failed:', error);
     throw new BadRequestError('Could not secure ticket reservation. Please try again.');
+  }
+
+  if (reservationResult.mode === 'FREE_REPLAY') {
+    return buildFreeCheckoutResult(reservationResult.order, reservationResult.feeBreakdown);
+  }
+
+  if (reservationResult.mode === 'FREE') {
+    if (reservationResult.enqueuedEmail) {
+      triggerEmailOutboxDispatch();
+    }
+    for (const tierId of reservationResult.releasedWaitlistTierIds.sort()) {
+      processWaitlistForTier(tierId).catch((err) => {
+        console.error(`Error advancing waitlist after free waitlist partial claim for tier ${tierId}:`, err);
+      });
+    }
+    return buildFreeCheckoutResult(reservationResult.order, reservationResult.feeBreakdown);
   }
 
   const createdOrder = reservationResult.order;
@@ -707,6 +1118,9 @@ export async function createCheckoutSession(
     return {
       orderNumber: createdOrder.orderNumber,
       orderAccessToken,
+      status: createdOrder.status,
+      paymentProvider: createdOrder.paymentProvider,
+      isFreeOrder: false,
       clientSecret: paymentIntent.client_secret,
       publishableKey: env.STRIPE_PUBLISHABLE_KEY,
       totalInCents: createdOrder.totalInCents,

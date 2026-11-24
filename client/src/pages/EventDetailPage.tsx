@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import React, { useState, useEffect, useRef } from 'react';
+import { useParams, Link, useNavigate } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../lib/api';
 import { TicketTier, CheckoutSessionResult, WaitlistOfferInfo } from '../types';
@@ -30,6 +30,7 @@ import {
 
 export const EventDetailPage: React.FC = () => {
   const { slug } = useParams<{ slug: string }>();
+  const navigate = useNavigate();
   const [eventAccessToken, setEventAccessToken] = useState<string | null>(() => {
     if (typeof window !== 'undefined' && slug) {
       return sessionStorage.getItem(`outside_event_token_${slug}`);
@@ -58,6 +59,8 @@ export const EventDetailPage: React.FC = () => {
   const [isCheckoutOpen, setIsCheckoutOpen] = useState(false);
   const [paymentSession, setPaymentSession] = useState<CheckoutSessionResult | null>(null);
   const [sessionSnapshotKey, setSessionSnapshotKey] = useState<string | null>(null);
+  const submitInFlightRef = useRef(false);
+  const pendingIdempotencyRef = useRef<{ snapshotKey: string; key: string } | null>(null);
 
   const [waitlistModalTier, setWaitlistModalTier] = useState<TicketTier | null>(null);
 
@@ -221,6 +224,11 @@ export const EventDetailPage: React.FC = () => {
       quantity: selectedQuantities[tier.id],
     }));
 
+  const isFreeCheckout =
+    totalTickets > 0 &&
+    totalInCents === 0 &&
+    selectedItems.every(({ tier }) => tier.priceInCents === 0);
+
   const formatPrice = (cents?: number, currency = 'USD') => {
     if (cents === undefined || cents === 0) return 'Free';
     const hasCents = cents % 100 !== 0;
@@ -340,7 +348,7 @@ export const EventDetailPage: React.FC = () => {
       return;
     }
 
-    if (isReserving) {
+    if (submitInFlightRef.current || isReserving) {
       return;
     }
 
@@ -358,16 +366,40 @@ export const EventDetailPage: React.FC = () => {
     });
 
     const now = Date.now();
+    const hasExpiredPaymentSession = Boolean(
+      paymentSession && new Date(paymentSession.expiresAt).getTime() <= now + 15000
+    );
+    if (hasExpiredPaymentSession) {
+      setPaymentSession(null);
+      setSessionSnapshotKey(null);
+      pendingIdempotencyRef.current = null;
+    }
+
     const isSessionValid =
+      !isFreeCheckout &&
+      !hasExpiredPaymentSession &&
       paymentSession &&
-      sessionSnapshotKey === currentSnapshotKey &&
-      new Date(paymentSession.expiresAt).getTime() > now + 15000;
+      Boolean(paymentSession.clientSecret) &&
+      sessionSnapshotKey === currentSnapshotKey;
 
     if (isSessionValid) {
       setIsCheckoutOpen(true);
       return;
     }
 
+    if (
+      !pendingIdempotencyRef.current ||
+      pendingIdempotencyRef.current.snapshotKey !== currentSnapshotKey
+    ) {
+      const generatedKey =
+        typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+          ? `chk_${crypto.randomUUID()}`
+          : `chk_${Date.now()}_${Math.random().toString(36).slice(2, 12)}`;
+      pendingIdempotencyRef.current = { snapshotKey: currentSnapshotKey, key: generatedKey };
+    }
+    const idempotencyKey = pendingIdempotencyRef.current.key;
+
+    submitInFlightRef.current = true;
     setIsReserving(true);
 
     try {
@@ -389,9 +421,26 @@ export const EventDetailPage: React.FC = () => {
         customerName: trimmedName,
         customerPhone: normalizedPhone,
         marketingConsent,
+        idempotencyKey,
         eventAccessToken: activeEventToken || undefined,
         offerToken: isOfferActive ? offerInfo!.token : undefined,
       });
+
+      const isFreeResult =
+        res.isFreeOrder === true ||
+        res.paymentProvider === 'FREE' ||
+        (res.status === 'COMPLETED' && res.totalInCents === 0 && !res.clientSecret);
+
+      if (isFreeResult) {
+        pendingIdempotencyRef.current = null;
+        setPaymentSession(null);
+        setSessionSnapshotKey(null);
+        setIsCheckoutOpen(false);
+        navigate(
+          `/orders/${res.orderNumber}?token=${encodeURIComponent(res.orderAccessToken)}`
+        );
+        return;
+      }
 
       if (res.clientSecret) {
         setPaymentSession(res);
@@ -401,8 +450,13 @@ export const EventDetailPage: React.FC = () => {
         throw new Error('Unable to initialize payment session.');
       }
     } catch (err: any) {
+      const statusCode = err?.statusCode ?? err?.status;
+      if (typeof statusCode === 'number' && statusCode >= 400 && statusCode < 500) {
+        pendingIdempotencyRef.current = null;
+      }
       setCheckoutError(err.message || 'Failed to initiate checkout. Please try again.');
     } finally {
+      submitInFlightRef.current = false;
       setIsReserving(false);
     }
   };
@@ -418,11 +472,13 @@ export const EventDetailPage: React.FC = () => {
     if (paymentSession && new Date(paymentSession.expiresAt).getTime() <= Date.now()) {
       setPaymentSession(null);
       setSessionSnapshotKey(null);
+      pendingIdempotencyRef.current = null;
     }
   };
 
   const handleSessionExpired = () => {
     setSessionSnapshotKey(null);
+    pendingIdempotencyRef.current = null;
   };
 
   if (isLoading) {
@@ -1219,8 +1275,10 @@ export const EventDetailPage: React.FC = () => {
                 {isReserving ? (
                   <>
                     <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                    <span>Preparing checkout...</span>
+                    <span>{isFreeCheckout ? 'Completing registration...' : 'Preparing checkout...'}</span>
                   </>
+                ) : isFreeCheckout ? (
+                  <span>Complete free registration · Free</span>
                 ) : (
                   <span>Continue to payment · {formatPrice(totalInCents, event.currency)}</span>
                 )}
@@ -1258,7 +1316,11 @@ export const EventDetailPage: React.FC = () => {
             }}
             className="px-4 py-2 rounded-md bg-gray-900 text-white font-semibold text-xs hover:bg-black"
           >
-            {totalTickets > 0 ? `Continue · ${formatPrice(totalInCents, event.currency)}` : 'Select Tickets'}
+            {totalTickets > 0
+              ? isFreeCheckout
+                ? 'Register · Free'
+                : `Continue · ${formatPrice(totalInCents, event.currency)}`
+              : 'Select Tickets'}
           </button>
         </div>
       </div>

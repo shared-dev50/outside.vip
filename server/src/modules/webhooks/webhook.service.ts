@@ -5,11 +5,9 @@ import {
   PaymentStatus,
   OrderStatus,
   ReservationStatus,
-  TicketStatus,
   TicketTierStatus,
   EventStatus,
   WaitlistOfferStatus,
-  WaitlistEntryStatus,
   TransferStatus,
   PayoutStatus,
   LedgerEntryType,
@@ -45,7 +43,7 @@ import {
   SettlementErrorClassification,
 } from '../finance/settlementRecovery.service.js';
 import { triggerSettlementRecoveryDispatch } from '../finance/settlementRecoveryWorker.js';
-import { enqueueOrderConfirmationEmail } from '../notifications/emailOutbox.service.js';
+import { fulfillOrderCompletionInTx } from '../orders/orderFulfillment.service.js';
 import { triggerEmailOutboxDispatch } from '../notifications/emailOutboxWorker.js';
 import {
   enqueueOrderRefund,
@@ -963,26 +961,6 @@ export async function handlePaymentIntentSucceeded(
     });
   }
 
-  if (linkedOffers.length > 0) {
-    const offerIds = linkedOffers.map((o) => o.id);
-    const entryIds = Array.from(new Set(linkedOffers.map((o) => o.entryId)));
-
-    await tx.ticketWaitlistOffer.updateMany({
-      where: { id: { in: offerIds } },
-      data: {
-        status: WaitlistOfferStatus.ACCEPTED,
-        claimedAt: now,
-      },
-    });
-
-    await tx.ticketWaitlistEntry.updateMany({
-      where: { id: { in: entryIds } },
-      data: {
-        status: WaitlistEntryStatus.PURCHASED,
-      },
-    });
-  }
-
   for (const tierId of sortedTierIds) {
     const qty = tierQuantityMap.get(tierId) || 0;
     const lockedTier = lockedTierMap.get(tierId);
@@ -1015,26 +993,12 @@ export async function handlePaymentIntentSucceeded(
     });
   }
 
-  let issuedTicketCount = order.tickets.length;
-  if (order.tickets.length === 0) {
-    for (const item of order.items) {
-      for (let i = 0; i < item.quantity; i++) {
-        const ticketToken = `tkt_sec_${nanoid(24)}`;
-        await tx.ticket.create({
-          data: {
-            ticketToken,
-            orderId: order.id,
-            eventId: order.eventId,
-            ticketTierId: item.ticketTierId,
-            attendeeName: order.customerName,
-            attendeeEmail: order.customerEmail,
-            status: TicketStatus.ISSUED,
-          },
-        });
-        issuedTicketCount += 1;
-      }
-    }
-  }
+  const coreFulfillment = await fulfillOrderCompletionInTx(tx, {
+    order,
+    existingTicketCount: order.tickets.length,
+    linkedOffers,
+    now,
+  });
 
   await ensureSucceededPaymentTransaction(
     tx,
@@ -1083,15 +1047,7 @@ export async function handlePaymentIntentSucceeded(
     });
   }
 
-  // Atomically enqueue the durable buyer confirmation email inside the same transaction.
-  // Never performs external email I/O here.
-  let enqueuedEmail = false;
-  if (issuedTicketCount > 0 && order.event) {
-    const outboxResult = await enqueueOrderConfirmationEmail(tx, order);
-    enqueuedEmail = outboxResult.enqueued;
-  }
-
-  return { fulfilled: true, enqueuedEmail, enqueuedRefund: false };
+  return { fulfilled: true, enqueuedEmail: coreFulfillment.enqueuedEmail, enqueuedRefund: false };
 }
 
 export async function handlePaymentIntentFailed(

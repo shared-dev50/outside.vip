@@ -155,6 +155,11 @@ const PaymentContent: React.FC<PaymentContentProps> = ({
       return;
     }
 
+    if (!paymentSession.clientSecret) {
+      setErrorMessage('Payment session is missing a Stripe client secret. Please refresh and try again.');
+      return;
+    }
+
     setPaymentStep('processing');
     setErrorMessage(null);
 
@@ -535,6 +540,119 @@ const PaymentContent: React.FC<PaymentContentProps> = ({
   );
 };
 
+const FreeCheckoutContent: React.FC<PaymentContentProps> = ({
+  onClose,
+  event,
+  selectedItems,
+  attendeeName,
+  attendeeEmail,
+  totalInCents,
+  currency,
+  paymentSession,
+  formatPrice,
+  onBusyChange,
+}) => {
+  const navigate = useNavigate();
+  const [isNavigating, setIsNavigating] = useState(false);
+
+  const handleContinue = () => {
+    if (isNavigating) return;
+    setIsNavigating(true);
+    onBusyChange?.(true);
+    navigate(
+      `/orders/${paymentSession.orderNumber}?token=${encodeURIComponent(paymentSession.orderAccessToken)}`
+    );
+  };
+
+  return (
+    <div className="flex flex-col h-full min-h-0">
+      <div className="px-5 sm:px-6 py-3.5 sm:py-4 border-b border-gray-100 flex items-center justify-between bg-white shrink-0">
+        <div className="space-y-0.5">
+          <div className="flex items-center gap-2">
+            <h2 id="checkout-dialog-title" className="font-display font-bold text-lg text-gray-900 tracking-tight">
+              Free Registration Confirmed
+            </h2>
+            <span className="font-mono text-[11px] font-semibold text-gray-400 bg-gray-50 border border-gray-200 px-1.5 py-0.5 rounded">
+              #{paymentSession.orderNumber}
+            </span>
+          </div>
+          <p className="text-xs text-gray-500 truncate max-w-xs sm:max-w-sm">{event.title}</p>
+        </div>
+
+        <button
+          type="button"
+          onClick={onClose}
+          disabled={isNavigating}
+          aria-label="Close checkout"
+          className="p-1.5 rounded-lg text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-colors disabled:opacity-30 disabled:pointer-events-none"
+        >
+          <X className="w-5 h-5" />
+        </button>
+      </div>
+
+      <div className="px-5 sm:px-6 py-4 sm:py-5 overflow-y-auto flex-1 min-h-0 space-y-4 bg-[#FAF8F5]/40">
+        <div className="p-3 rounded-lg border bg-emerald-50 border-emerald-200 text-emerald-800 text-xs flex items-center gap-2 font-medium">
+          <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-600" />
+          <span>No payment required. Your free tickets are confirmed and ready.</span>
+        </div>
+
+        <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-3 shadow-xs">
+          <div className="text-[11px] uppercase tracking-wider font-semibold text-gray-400">
+            Order Summary
+          </div>
+          <div className="space-y-2 divide-y divide-gray-100 text-xs">
+            {selectedItems.map(({ tier, quantity }) => (
+              <div key={tier.id} className="pt-2 first:pt-0 flex items-start justify-between gap-2">
+                <div className="space-y-0.5">
+                  <div className="font-semibold text-gray-900">
+                    {quantity} × {tier.name}
+                  </div>
+                  <div className="text-gray-400 text-[11px]">Free</div>
+                </div>
+                <div className="font-semibold text-gray-900 font-mono">Free</div>
+              </div>
+            ))}
+          </div>
+          <div className="pt-2 border-t border-gray-200 flex items-center justify-between text-sm font-bold text-gray-900">
+            <span>Total</span>
+            <span className="text-base text-gray-900 font-mono">
+              {formatPrice(paymentSession.totalInCents ?? totalInCents, currency)}
+            </span>
+          </div>
+        </div>
+
+        <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-1 text-xs shadow-xs">
+          <div className="text-[11px] uppercase tracking-wider font-semibold text-gray-400">
+            Attendee
+          </div>
+          <div className="font-semibold text-gray-900">{attendeeName}</div>
+          <div className="text-gray-600">{attendeeEmail}</div>
+        </div>
+
+        <div className="space-y-2 pt-1">
+          <button
+            type="button"
+            onClick={handleContinue}
+            disabled={isNavigating}
+            className="w-full py-3 rounded-lg font-semibold text-xs transition-all flex items-center justify-center gap-2 shadow-sm min-h-[42px] bg-gray-900 hover:bg-black text-white disabled:opacity-50"
+          >
+            <span>{isNavigating ? 'Opening tickets...' : 'View & Download Tickets'}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={isNavigating}
+            className="w-full py-2 text-center text-xs text-gray-500 hover:text-gray-900 transition-colors disabled:opacity-30 disabled:pointer-events-none"
+          >
+            Close
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 export const CheckoutDialog: React.FC<CheckoutDialogProps> = ({
   isOpen,
   onClose,
@@ -579,6 +697,11 @@ export const CheckoutDialog: React.FC<CheckoutDialogProps> = ({
     return null;
   }
 
+  const isFreeSession =
+    paymentSession.isFreeOrder === true ||
+    paymentSession.paymentProvider === 'FREE' ||
+    (paymentSession.totalInCents === 0 && !paymentSession.clientSecret);
+
   return (
     <div
       role="dialog"
@@ -595,8 +718,8 @@ export const CheckoutDialog: React.FC<CheckoutDialogProps> = ({
         className="w-full max-w-lg bg-white rounded-2xl border border-gray-200/80 shadow-2xl flex flex-col max-h-[calc(100dvh-1.5rem)] sm:max-h-[min(90vh,90dvh)] min-h-0 overflow-hidden my-auto animate-in zoom-in-95 duration-200"
         onClick={(e) => e.stopPropagation()}
       >
-        <Elements stripe={getStripePromise(paymentSession.publishableKey)}>
-          <PaymentContent
+        {isFreeSession ? (
+          <FreeCheckoutContent
             onClose={onClose}
             event={event}
             selectedItems={selectedItems}
@@ -611,7 +734,25 @@ export const CheckoutDialog: React.FC<CheckoutDialogProps> = ({
             onSessionExpired={onSessionExpired}
             onBusyChange={setIsBusy}
           />
-        </Elements>
+        ) : (
+          <Elements stripe={getStripePromise(paymentSession.publishableKey)}>
+            <PaymentContent
+              onClose={onClose}
+              event={event}
+              selectedItems={selectedItems}
+              attendeeName={attendeeName}
+              attendeeEmail={attendeeEmail}
+              attendeePhone={attendeePhone}
+              onUpdateAttendee={onUpdateAttendee}
+              totalInCents={totalInCents}
+              currency={currency}
+              paymentSession={paymentSession}
+              formatPrice={formatPrice}
+              onSessionExpired={onSessionExpired}
+              onBusyChange={setIsBusy}
+            />
+          </Elements>
+        )}
       </div>
     </div>
   );
