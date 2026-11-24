@@ -1,4 +1,6 @@
-import { Prisma, LedgerEntryType, LedgerBalanceType } from '@prisma/client';
+import crypto from 'crypto';
+import { Prisma, LedgerEntryType, LedgerBalanceType, PaymentProvider, StripeSettlementStatus } from '@prisma/client';
+import type Stripe from 'stripe';
 import { prisma } from '../../db/prisma.js';
 import { calculateCheckoutFeeBreakdown } from '../checkout/checkout.financials.js';
 
@@ -7,6 +9,14 @@ export interface RecordTicketSaleParams {
   paymentIntentId?: string;
   stripeChargeId?: string;
   autoSettle?: boolean;
+}
+
+export interface SettleOrderEarningsParams {
+  orderId: string;
+  stripeChargeId?: string;
+  stripeBalanceTransactionId?: string;
+  availableOn?: Date | null;
+  fundsAvailableAt?: Date;
 }
 
 export interface RecordRefundParams {
@@ -27,31 +37,69 @@ export interface RecordDisputeParams {
 }
 
 /**
- * Retrieves or initializes the single OrganizerBalance record for a user.
- * Must be executed within a transaction to maintain consistency.
+ * Retrieves or initializes the single OrganizerBalance record for a user,
+ * acquiring an exclusive PostgreSQL row lock (FOR UPDATE) inside the caller's transaction.
  */
 export async function getOrCreateOrganizerBalance(
   tx: Prisma.TransactionClient,
   userId: string,
   currency = 'USD'
 ) {
-  let balance = await tx.organizerBalance.findUnique({
-    where: { userId },
-  });
+  await tx.$executeRaw`
+    INSERT INTO "OrganizerBalance" (
+      id,
+      "userId",
+      "pendingBalanceInCents",
+      "availableBalanceInCents",
+      "transferredBalanceInCents",
+      currency,
+      "createdAt",
+      "updatedAt"
+    )
+    VALUES (
+      ${crypto.randomUUID()},
+      ${userId},
+      0,
+      0,
+      0,
+      ${currency.toUpperCase()},
+      (NOW() AT TIME ZONE 'UTC'),
+      (NOW() AT TIME ZONE 'UTC')
+    )
+    ON CONFLICT ("userId") DO NOTHING
+  `;
 
-  if (!balance) {
-    balance = await tx.organizerBalance.create({
-      data: {
-        userId,
-        currency: currency.toUpperCase(),
-        pendingBalanceInCents: 0,
-        availableBalanceInCents: 0,
-        transferredBalanceInCents: 0,
-      },
-    });
+  const locked = await tx.$queryRaw<
+    Array<{
+      id: string;
+      userId: string;
+      pendingBalanceInCents: number;
+      availableBalanceInCents: number;
+      transferredBalanceInCents: number;
+      currency: string;
+      createdAt: Date;
+      updatedAt: Date;
+    }>
+  >`
+    SELECT
+      id,
+      "userId",
+      "pendingBalanceInCents",
+      "availableBalanceInCents",
+      "transferredBalanceInCents",
+      currency,
+      "createdAt",
+      "updatedAt"
+    FROM "OrganizerBalance"
+    WHERE "userId" = ${userId}
+    FOR UPDATE
+  `;
+
+  if (!locked[0]) {
+    throw new Error(`OrganizerBalance record missing after upsert for user ${userId}`);
   }
 
-  return balance;
+  return locked[0];
 }
 
 // Records pending earnings, platform fees, service fees, and estimated processing fees for a completed order.
@@ -60,6 +108,8 @@ export async function recordTicketSalePending(
   params: RecordTicketSaleParams
 ): Promise<void> {
   const { orderId, paymentIntentId, stripeChargeId, autoSettle = false } = params;
+
+  await tx.$queryRaw`SELECT id FROM "Order" WHERE id = ${orderId} FOR UPDATE`;
 
   const order = await tx.order.findUnique({
     where: { id: orderId },
@@ -99,6 +149,8 @@ export async function recordTicketSalePending(
   const stripeEstFee = feeBreakdown.processingFeeInCents;
 
   if (organizerEarnings > 0) {
+    await getOrCreateOrganizerBalance(tx, organizerId, order.currency);
+
     await tx.financialLedgerEntry.create({
       data: {
         type: LedgerEntryType.TICKET_SALE_PENDING,
@@ -119,13 +171,31 @@ export async function recordTicketSalePending(
       },
     });
 
-    await getOrCreateOrganizerBalance(tx, organizerId, order.currency);
     await tx.organizerBalance.update({
       where: { userId: organizerId },
       data: {
         pendingBalanceInCents: { increment: organizerEarnings },
       },
     });
+
+    if (
+      !autoSettle &&
+      order.paymentProvider === PaymentProvider.STRIPE &&
+      order.stripeSettlementStatus === null
+    ) {
+      await tx.order.update({
+        where: { id: order.id },
+        data: {
+          stripeSettlementStatus: StripeSettlementStatus.PENDING,
+          ...(stripeChargeId && !order.stripeSettledChargeId
+            ? { stripeSettledChargeId: stripeChargeId }
+            : {}),
+          ...(order.stripeSettlementNextAttemptAt
+            ? {}
+            : { stripeSettlementNextAttemptAt: order.stripeAvailableOn ?? new Date(Date.now() + 60_000) }),
+        },
+      });
+    }
   }
 
   if (platformFee > 0) {
@@ -196,12 +266,67 @@ export async function recordTicketSalePending(
   }
 }
 
-// Clears pending earnings to available balance once settled
+/**
+ * Returns true if the given order currently has an unresolved Stripe dispute hold.
+ */
+export async function hasOpenDisputeForOrder(
+  tx: Prisma.TransactionClient,
+  orderId: string,
+  charge?: Pick<Stripe.Charge, 'disputed'> | null
+): Promise<boolean> {
+  const disputeEntries = await tx.financialLedgerEntry.findMany({
+    where: {
+      orderId,
+      type: {
+        in: [
+          LedgerEntryType.DISPUTE_HOLD,
+          LedgerEntryType.DISPUTE_WON,
+          LedgerEntryType.DISPUTE_LOST,
+        ],
+      },
+    },
+    select: {
+      type: true,
+      stripeReferenceId: true,
+    },
+  });
+
+  const closedDisputeIds = new Set<string>();
+  for (const entry of disputeEntries) {
+    if (
+      (entry.type === LedgerEntryType.DISPUTE_WON ||
+        entry.type === LedgerEntryType.DISPUTE_LOST) &&
+      entry.stripeReferenceId
+    ) {
+      closedDisputeIds.add(entry.stripeReferenceId);
+    }
+  }
+
+  for (const entry of disputeEntries) {
+    if (
+      entry.type === LedgerEntryType.DISPUTE_HOLD &&
+      (!entry.stripeReferenceId || !closedDisputeIds.has(entry.stripeReferenceId))
+    ) {
+      return true;
+    }
+  }
+
+  // Out-of-order protection: Stripe reports charge.disputed=true before charge.dispute.created arrived
+  if (charge?.disputed && closedDisputeIds.size === 0) {
+    return true;
+  }
+
+  return false;
+}
+
+// Clears pending earnings to available balance once settled, reconciling pre-settlement pending refunds
 export async function settleOrderEarnings(
   tx: Prisma.TransactionClient,
-  params: { orderId: string; stripeChargeId?: string }
+  params: SettleOrderEarningsParams
 ): Promise<void> {
-  const { orderId, stripeChargeId } = params;
+  const { orderId, stripeChargeId, stripeBalanceTransactionId, availableOn, fundsAvailableAt } = params;
+
+  await tx.$queryRaw`SELECT id FROM "Order" WHERE id = ${orderId} FOR UPDATE`;
 
   const order = await tx.order.findUnique({
     where: { id: orderId },
@@ -229,6 +354,31 @@ export async function settleOrderEarnings(
   });
 
   if (existingCleared) {
+    if (
+      order.stripeSettlementStatus !== StripeSettlementStatus.SETTLED ||
+      order.stripeSettlementLockedBy !== null
+    ) {
+      await tx.order.update({
+        where: { id: order.id },
+        data: {
+          stripeSettlementStatus: StripeSettlementStatus.SETTLED,
+          stripeFundsAvailableAt: order.stripeFundsAvailableAt ?? fundsAvailableAt ?? new Date(),
+          ...(stripeChargeId && !order.stripeSettledChargeId
+            ? { stripeSettledChargeId: stripeChargeId }
+            : {}),
+          ...(stripeBalanceTransactionId && !order.stripeBalanceTransactionId
+            ? { stripeBalanceTransactionId }
+            : {}),
+          ...(availableOn && !order.stripeAvailableOn ? { stripeAvailableOn: availableOn } : {}),
+          stripeSettlementLockedBy: null,
+          stripeSettlementLockedUntil: null,
+          stripeSettlementNextAttemptAt: null,
+          stripeSettlementLastErrorCategory: null,
+          stripeSettlementLastErrorCode: null,
+          stripeSettlementLastErrorMessage: null,
+        },
+      });
+    }
     return;
   }
 
@@ -250,59 +400,123 @@ export async function settleOrderEarnings(
   }
 
   const balance = await getOrCreateOrganizerBalance(tx, organizerId, order.currency);
-  const decrementPending = Math.min(balance.pendingBalanceInCents, organizerEarnings);
 
-  await tx.organizerBalance.update({
-    where: { userId: organizerId },
-    data: {
-      pendingBalanceInCents: { decrement: decrementPending },
-      availableBalanceInCents: { increment: organizerEarnings },
+  // Sum PENDING entries for this order so any pre-settlement REFUND_PENDING deductions
+  // reduce what clears to available (preventing refunded funds from becoming withdrawable).
+  const pendingOrderEntries = await tx.financialLedgerEntry.findMany({
+    where: {
+      orderId: order.id,
+      balanceType: LedgerBalanceType.PENDING,
+    },
+    select: {
+      amountInCents: true,
     },
   });
+  const remainingOrderPendingInCents = pendingOrderEntries.reduce(
+    (sum, e) => sum + e.amountInCents,
+    0
+  );
+  const settleAmountInCents = Math.max(
+    0,
+    Math.min(organizerEarnings, remainingOrderPendingInCents)
+  );
+  const decrementPending =
+    settleAmountInCents > 0
+      ? Math.min(balance.pendingBalanceInCents, settleAmountInCents)
+      : 0;
 
-  if (decrementPending > 0) {
-    await tx.financialLedgerEntry.create({
+  if (settleAmountInCents > 0) {
+    await tx.organizerBalance.update({
+      where: { userId: organizerId },
       data: {
-        type: LedgerEntryType.ADJUSTMENT,
-        balanceType: LedgerBalanceType.PENDING,
-        amountInCents: -decrementPending,
-        currency: order.currency.toUpperCase(),
-        organizerId,
-        eventId: order.eventId,
-        orderId: order.id,
-        stripeReferenceId: stripeChargeId || null,
-        description: `Pending balance cleared to available for order #${order.orderNumber}`,
-        metadata: {
-          idempotencyKey: `order_${order.id}_settle_pending_cleared`,
-          orderNumber: order.orderNumber,
-          clearedAmountInCents: decrementPending,
-        },
+        pendingBalanceInCents: { decrement: decrementPending },
+        availableBalanceInCents: { increment: settleAmountInCents },
       },
     });
+
+    if (decrementPending > 0) {
+      await tx.financialLedgerEntry.create({
+        data: {
+          type: LedgerEntryType.ADJUSTMENT,
+          balanceType: LedgerBalanceType.PENDING,
+          amountInCents: -decrementPending,
+          currency: order.currency.toUpperCase(),
+          organizerId,
+          eventId: order.eventId,
+          orderId: order.id,
+          stripeReferenceId: stripeChargeId || null,
+          description: `Pending balance cleared to available for order #${order.orderNumber}`,
+          metadata: {
+            idempotencyKey: `order_${order.id}_settle_pending_cleared`,
+            orderNumber: order.orderNumber,
+            clearedAmountInCents: decrementPending,
+          },
+        },
+      });
+    }
   }
 
   await tx.financialLedgerEntry.create({
     data: {
       type: LedgerEntryType.TICKET_SALE_CLEARED,
       balanceType: LedgerBalanceType.AVAILABLE,
-      amountInCents: organizerEarnings,
+      amountInCents: settleAmountInCents,
       currency: order.currency.toUpperCase(),
       organizerId,
       eventId: order.eventId,
       orderId: order.id,
       stripeReferenceId: stripeChargeId || null,
-      description: `Earnings cleared and available for withdrawal for order #${order.orderNumber}`,
+      description:
+        settleAmountInCents > 0
+          ? `Earnings cleared and available for withdrawal for order #${order.orderNumber}`
+          : `Order #${order.orderNumber} finalized at $0.00 after pre-settlement refund`,
       metadata: {
         idempotencyKey: `order_${order.id}_settle_cleared`,
         orderNumber: order.orderNumber,
-        settledAmountInCents: organizerEarnings,
+        settledAmountInCents: settleAmountInCents,
+        preSettlementRefundDeductedInCents: Math.max(0, organizerEarnings - settleAmountInCents),
       },
     },
   });
+
+  await tx.order.update({
+    where: { id: order.id },
+    data: {
+      stripeSettlementStatus: StripeSettlementStatus.SETTLED,
+      stripeFundsAvailableAt: order.stripeFundsAvailableAt ?? fundsAvailableAt ?? new Date(),
+      ...(stripeChargeId && !order.stripeSettledChargeId
+        ? { stripeSettledChargeId: stripeChargeId }
+        : {}),
+      ...(stripeBalanceTransactionId && !order.stripeBalanceTransactionId
+        ? { stripeBalanceTransactionId }
+        : {}),
+      ...(availableOn && !order.stripeAvailableOn ? { stripeAvailableOn: availableOn } : {}),
+      stripeSettlementLockedBy: null,
+      stripeSettlementLockedUntil: null,
+      stripeSettlementNextAttemptAt: null,
+      stripeSettlementLastErrorCategory: null,
+      stripeSettlementLastErrorCode: null,
+      stripeSettlementLastErrorMessage: null,
+    },
+  });
+
+  // Automatically offset any outstanding RECOVERABLE liabilities from newly cleared funds
+  if (settleAmountInCents > 0) {
+    await recoverOrganizerLiabilitiesInTx(tx, {
+      organizerId,
+      orderId: order.id,
+      stripeReferenceId: stripeChargeId || undefined,
+      idempotencyKey: `order_${order.id}_recover_liability`,
+      source: 'AVAILABLE_BALANCE',
+      reason: `Recovered outstanding liability upon settlement of order #${order.orderNumber}`,
+    });
+  }
 }
 
 /**
  * Records actual Stripe processing fees upon receipt of Stripe balance transaction.
+ * Stored as LedgerBalanceType.PLATFORM_EXPENSE so buyer-collected fee estimates (PLATFORM_REVENUE)
+ * and actual Stripe costs are never double-counted as positive platform revenue.
  */
 export async function recordActualStripeFee(
   tx: Prisma.TransactionClient,
@@ -314,6 +528,17 @@ export async function recordActualStripeFee(
   }
 ): Promise<void> {
   const { stripeChargeId, actualFeeInCents, currency, orderId } = params;
+
+  const existingFeeEntries = await tx.financialLedgerEntry.findMany({
+    where: {
+      ...(orderId ? { orderId } : { stripeReferenceId: stripeChargeId }),
+      type: LedgerEntryType.STRIPE_PROCESSING_FEE,
+    },
+    select: { id: true, metadata: true },
+  });
+  if (existingFeeEntries.some((e) => (e.metadata as any)?.isActualReconciliation === true)) {
+    return;
+  }
 
   let organizerId: string | null = null;
   let eventId: string | null = null;
@@ -346,20 +571,219 @@ export async function recordActualStripeFee(
   await tx.financialLedgerEntry.create({
     data: {
       type: LedgerEntryType.STRIPE_PROCESSING_FEE,
-      balanceType: LedgerBalanceType.PLATFORM_REVENUE,
+      balanceType: LedgerBalanceType.PLATFORM_EXPENSE,
       amountInCents: actualFeeInCents,
       currency: (currency || 'USD').toUpperCase(),
       organizerId,
       eventId,
       orderId,
       stripeReferenceId: stripeChargeId,
-      description: `Reconciled Stripe processing fee of $${(actualFeeInCents / 100).toFixed(2)}`,
+      description: `Reconciled Stripe processing fee expense of $${(actualFeeInCents / 100).toFixed(2)}`,
       metadata: {
         isActualReconciliation: true,
         actualFeeInCents,
       },
     },
   });
+}
+
+/**
+ * Reconciles missed or out-of-order Stripe charge refunds into the ledger prior to settlement.
+ * Caller MUST already hold Order FOR UPDATE.
+ */
+export async function reconcileChargeRefundBeforeSettlement(
+  tx: Prisma.TransactionClient,
+  params: {
+    orderId: string;
+    paymentReference?: string | null;
+    charge: Pick<Stripe.Charge, 'id' | 'amount_refunded' | 'refunds'>;
+  }
+): Promise<void> {
+  const { orderId, paymentReference, charge } = params;
+  if (typeof charge.amount_refunded !== 'number' || charge.amount_refunded <= 0) {
+    return;
+  }
+
+  const hasLateRefund = paymentReference
+    ? await tx.orderRefund.findUnique({
+        where: { stripePaymentIntentId: paymentReference },
+        select: { id: true },
+      })
+    : null;
+
+  if (hasLateRefund) {
+    return;
+  }
+
+  const singleStripeRefundId =
+    charge.refunds?.data?.length === 1 ? charge.refunds.data[0].id : undefined;
+  await recordRefundLedger(tx, {
+    orderId,
+    amountInCents: charge.amount_refunded,
+    stripeRefundId: singleStripeRefundId,
+    stripeChargeId: charge.id,
+    reason: 'Stripe charge refund reconciled prior to settlement',
+  });
+}
+
+/**
+ * Returns the net outstanding recoverable liability in positive cents from signed RECOVERABLE entries.
+ * Debt entries carry negative amounts (-X) and recovery offsets carry positive amounts (+Y).
+ */
+export async function getOutstandingRecoverableInCents(
+  tx: Prisma.TransactionClient,
+  organizerId: string
+): Promise<number> {
+  const recoverableEntries = await tx.financialLedgerEntry.findMany({
+    where: {
+      organizerId,
+      balanceType: LedgerBalanceType.RECOVERABLE,
+    },
+    select: { amountInCents: true },
+  });
+  const signedSum = recoverableEntries.reduce((sum, e) => sum + e.amountInCents, 0);
+  return Math.max(0, -signedSum);
+}
+
+/**
+ * Applies an idempotent offset against an organizer's outstanding RECOVERABLE liability,
+ * either from their internal available balance or from an external recovery payment/adjustment.
+ */
+export async function recoverOrganizerLiabilitiesInTx(
+  tx: Prisma.TransactionClient,
+  params: {
+    organizerId: string;
+    maxAmountInCents?: number;
+    orderId?: string;
+    stripeReferenceId?: string;
+    idempotencyKey?: string;
+    source?: 'AVAILABLE_BALANCE' | 'EXTERNAL_RECOVERY';
+    reason?: string;
+  }
+): Promise<{
+  recoveredInCents: number;
+  remainingRecoverableInCents: number;
+  duplicate: boolean;
+}> {
+  const {
+    organizerId,
+    maxAmountInCents,
+    orderId,
+    stripeReferenceId,
+    idempotencyKey,
+    source = 'AVAILABLE_BALANCE',
+    reason,
+  } = params;
+
+  const balance = await getOrCreateOrganizerBalance(tx, organizerId);
+
+  if (idempotencyKey) {
+    const existingOffsets = await tx.financialLedgerEntry.findMany({
+      where: {
+        organizerId,
+        balanceType: LedgerBalanceType.RECOVERABLE,
+        type: LedgerEntryType.ADJUSTMENT,
+      },
+      select: { metadata: true },
+    });
+    if (existingOffsets.some((e) => (e.metadata as any)?.idempotencyKey === idempotencyKey)) {
+      const remainingRecoverableInCents = await getOutstandingRecoverableInCents(tx, organizerId);
+      return {
+        recoveredInCents: 0,
+        remainingRecoverableInCents,
+        duplicate: true,
+      };
+    }
+  }
+
+  const outstanding = await getOutstandingRecoverableInCents(tx, organizerId);
+  if (outstanding <= 0) {
+    return {
+      recoveredInCents: 0,
+      remainingRecoverableInCents: 0,
+      duplicate: false,
+    };
+  }
+
+  const boundedMax =
+    typeof maxAmountInCents === 'number' && maxAmountInCents >= 0
+      ? Math.min(outstanding, Math.trunc(maxAmountInCents))
+      : outstanding;
+  const recoverableCap =
+    source === 'AVAILABLE_BALANCE'
+      ? Math.min(boundedMax, Math.max(0, balance.availableBalanceInCents))
+      : boundedMax;
+
+  if (recoverableCap <= 0) {
+    return {
+      recoveredInCents: 0,
+      remainingRecoverableInCents: outstanding,
+      duplicate: false,
+    };
+  }
+
+  if (source === 'AVAILABLE_BALANCE') {
+    await tx.organizerBalance.update({
+      where: { userId: organizerId },
+      data: {
+        availableBalanceInCents: { decrement: recoverableCap },
+      },
+    });
+
+    await tx.financialLedgerEntry.create({
+      data: {
+        type: LedgerEntryType.ADJUSTMENT,
+        balanceType: LedgerBalanceType.AVAILABLE,
+        amountInCents: -recoverableCap,
+        currency: balance.currency.toUpperCase(),
+        organizerId,
+        orderId: orderId || null,
+        stripeReferenceId: stripeReferenceId || null,
+        description: reason || 'Available balance applied toward recoverable liability',
+        metadata: {
+          ...(idempotencyKey ? { idempotencyKey } : {}),
+          source,
+          recoveredAmountInCents: recoverableCap,
+        },
+      },
+    });
+  }
+
+  await tx.financialLedgerEntry.create({
+    data: {
+      type: LedgerEntryType.ADJUSTMENT,
+      balanceType: LedgerBalanceType.RECOVERABLE,
+      amountInCents: recoverableCap,
+      currency: balance.currency.toUpperCase(),
+      organizerId,
+      orderId: orderId || null,
+      stripeReferenceId: stripeReferenceId || null,
+      description: reason || 'Recoverable liability offset',
+      metadata: {
+        ...(idempotencyKey ? { idempotencyKey } : {}),
+        source,
+        recoveredAmountInCents: recoverableCap,
+      },
+    },
+  });
+
+  return {
+    recoveredInCents: recoverableCap,
+    remainingRecoverableInCents: outstanding - recoverableCap,
+    duplicate: false,
+  };
+}
+
+export async function recoverOrganizerLiabilities(params: {
+  organizerId: string;
+  maxAmountInCents?: number;
+  orderId?: string;
+  stripeReferenceId?: string;
+  idempotencyKey?: string;
+  source?: 'AVAILABLE_BALANCE' | 'EXTERNAL_RECOVERY';
+  reason?: string;
+}) {
+  return prisma.$transaction((tx) => recoverOrganizerLiabilitiesInTx(tx, params));
 }
 
 /**
@@ -374,6 +798,8 @@ export async function recordRefundLedger(
   params: RecordRefundParams
 ): Promise<void> {
   const { orderId, amountInCents, stripeRefundId, stripeChargeId, reason } = params;
+
+  await tx.$queryRaw`SELECT id FROM "Order" WHERE id = ${orderId} FOR UPDATE`;
 
   const order = await tx.order.findUnique({
     where: { id: orderId },
@@ -509,9 +935,11 @@ export async function recordRefundLedger(
         },
       },
     });
-  } else if (balance.pendingBalanceInCents >= organizerRefundPortion) {
-    // Absorbed from pending balance
-    preTransferDeducted = organizerRefundPortion;
+  } else if (balance.pendingBalanceInCents > 0) {
+    // Partially or fully absorbed from pending balance; any remainder becomes post-transfer recoverable
+    preTransferDeducted = Math.min(balance.pendingBalanceInCents, organizerRefundPortion);
+    postTransferRecoverable = organizerRefundPortion - preTransferDeducted;
+
     await tx.organizerBalance.update({
       where: { userId: organizerId },
       data: {
@@ -536,6 +964,26 @@ export async function recordRefundLedger(
         },
       },
     });
+
+    if (postTransferRecoverable > 0) {
+      await tx.financialLedgerEntry.create({
+        data: {
+          type: LedgerEntryType.REFUND_POST_TRANSFER,
+          balanceType: LedgerBalanceType.RECOVERABLE,
+          amountInCents: -postTransferRecoverable,
+          currency: order.currency.toUpperCase(),
+          organizerId,
+          eventId: order.eventId,
+          orderId: order.id,
+          stripeReferenceId: stripeRefundId || stripeChargeId || null,
+          description: `Post-transfer refund liability tracked as recoverable for order #${order.orderNumber}${reason ? `: ${reason}` : ''}`,
+          metadata: {
+            stripeRefundId,
+            recoverableInCents: postTransferRecoverable,
+          },
+        },
+      });
+    }
   } else {
     // Fully post-transfer: balance already withdrawn
     postTransferRecoverable = organizerRefundPortion;
@@ -698,7 +1146,7 @@ export async function getOrganizerFinancialSummary(userId: string) {
     where: { userId },
   });
 
-  // Calculate recoverable liabilities and lifetime earnings from ledger
+  // Calculate net recoverable liabilities using signed entries (-liability, +offset)
   const recoverableEntries = await prisma.financialLedgerEntry.findMany({
     where: {
       organizerId: userId,
@@ -706,10 +1154,11 @@ export async function getOrganizerFinancialSummary(userId: string) {
     },
   });
 
-  const totalRecoverableInCents = recoverableEntries.reduce(
-    (sum, e) => sum + Math.abs(e.amountInCents),
+  const signedRecoverableInCents = recoverableEntries.reduce(
+    (sum, e) => sum + e.amountInCents,
     0
   );
+  const totalRecoverableInCents = Math.max(0, -signedRecoverableInCents);
 
   const earningsEntries = await prisma.financialLedgerEntry.findMany({
     where: {
@@ -833,7 +1282,9 @@ export async function reconcileOrganizerFinance(userId: string) {
   let calculatedPending = 0;
   let calculatedAvailable = 0;
   let calculatedTransferred = 0;
-  let calculatedRecoverable = 0;
+  let signedRecoverable = 0;
+  let calculatedPlatformRevenue = 0;
+  let calculatedPlatformExpense = 0;
 
   for (const entry of ledgerEntries) {
     if (entry.balanceType === LedgerBalanceType.PENDING) {
@@ -843,9 +1294,14 @@ export async function reconcileOrganizerFinance(userId: string) {
     } else if (entry.balanceType === LedgerBalanceType.TRANSFERRED) {
       calculatedTransferred += entry.amountInCents;
     } else if (entry.balanceType === LedgerBalanceType.RECOVERABLE) {
-      calculatedRecoverable += Math.abs(entry.amountInCents);
+      signedRecoverable += entry.amountInCents;
+    } else if (entry.balanceType === LedgerBalanceType.PLATFORM_REVENUE) {
+      calculatedPlatformRevenue += entry.amountInCents;
+    } else if (entry.balanceType === LedgerBalanceType.PLATFORM_EXPENSE) {
+      calculatedPlatformExpense += entry.amountInCents;
     }
   }
+  const calculatedRecoverable = Math.max(0, -signedRecoverable);
 
   const discrepancies: string[] = [];
   if (balance) {
@@ -881,6 +1337,8 @@ export async function reconcileOrganizerFinance(userId: string) {
       availableInCents: calculatedAvailable,
       transferredInCents: calculatedTransferred,
       recoverableInCents: calculatedRecoverable,
+      platformRevenueInCents: calculatedPlatformRevenue,
+      platformExpenseInCents: calculatedPlatformExpense,
       totalEntries: ledgerEntries.length,
     },
   };

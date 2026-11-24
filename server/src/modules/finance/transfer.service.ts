@@ -239,14 +239,15 @@ export async function executeWithdrawal(
         throw new BadRequestError('Organizer balance record not found.', 'BALANCE_NOT_FOUND');
       }
 
-      // Check recoverable liabilities from ledger
+      // Check net recoverable liabilities from signed ledger entries (-liability, +offset)
       const recoverableEntries = await tx.financialLedgerEntry.findMany({
         where: {
           organizerId: userId,
           balanceType: LedgerBalanceType.RECOVERABLE,
         },
       });
-      const totalRecoverable = recoverableEntries.reduce((s, e) => s + Math.abs(e.amountInCents), 0);
+      const signedRecoverable = recoverableEntries.reduce((s, e) => s + e.amountInCents, 0);
+      const totalRecoverable = Math.max(0, -signedRecoverable);
 
       const netAvailable = Math.max(0, lockedBalance.availableBalanceInCents - totalRecoverable);
 
@@ -332,8 +333,12 @@ export async function executeWithdrawal(
     const failureMessage = error?.message ? String(error.message).slice(0, 500) : 'Stripe transfer failed';
     const failureCode = error?.code || 'transfer_failed';
 
-    // Atomically restore the reserved available balance and record the failed attempt
+    // Atomically lock OrganizerBalance and restore reserved available balance
     await prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`
+        SELECT id FROM "OrganizerBalance" WHERE "userId" = ${userId} FOR UPDATE
+      `;
+
       await tx.organizerTransfer.update({
         where: { id: transferRecord.id },
         data: {

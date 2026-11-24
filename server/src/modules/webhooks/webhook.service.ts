@@ -14,6 +14,7 @@ import {
   PayoutStatus,
   LedgerEntryType,
   LedgerBalanceType,
+  StripeSettlementStatus,
 } from '@prisma/client';
 import { nanoid } from 'nanoid';
 import { prisma } from '../../db/prisma.js';
@@ -21,12 +22,23 @@ import { stripe } from '../../lib/stripe.js';
 import { env } from '../../config/env.js';
 import { isTicketTierHidden, isTicketTierSalesDisabled } from '../../utils/ticketTierState.js';
 import {
+  hasOpenDisputeForOrder,
   recordTicketSalePending,
   settleOrderEarnings,
   recordActualStripeFee,
+  reconcileChargeRefundBeforeSettlement,
   recordRefundLedger,
   recordDisputeLedger,
 } from '../finance/ledger.service.js';
+import { logStripeDiagnostic } from '../finance/stripeError.js';
+import {
+  classifyStripeSettlementRetrievalError,
+  emitSettlementCriticalAlert,
+  handleBalanceAvailableWebhook,
+  sanitizeSettlementDiagnosticMessage,
+  SettlementErrorClassification,
+} from '../finance/settlementRecovery.service.js';
+import { triggerSettlementRecoveryDispatch } from '../finance/settlementRecoveryWorker.js';
 import { enqueueOrderConfirmationEmail } from '../notifications/emailOutbox.service.js';
 import { triggerEmailOutboxDispatch } from '../notifications/emailOutboxWorker.js';
 import {
@@ -44,11 +56,20 @@ export class PaymentValidationError extends Error {
   }
 }
 
+interface ChargeBalanceResolution {
+  balanceTx: Stripe.BalanceTransaction | null;
+  retrievalFailure: SettlementErrorClassification | null;
+  rawError?: any;
+}
+
 async function resolveChargeBalanceTransaction(
   charge: Stripe.Charge
-): Promise<Stripe.BalanceTransaction | null> {
+): Promise<ChargeBalanceResolution> {
   if (typeof charge.balance_transaction === 'object' && charge.balance_transaction !== null) {
-    return charge.balance_transaction as Stripe.BalanceTransaction;
+    return {
+      balanceTx: charge.balance_transaction as Stripe.BalanceTransaction,
+      retrievalFailure: null,
+    };
   }
 
   const effectiveStripeKey = process.env.STRIPE_SECRET_KEY ?? env.STRIPE_SECRET_KEY;
@@ -58,15 +79,22 @@ async function resolveChargeBalanceTransaction(
     effectiveStripeKey !== 'sk_test_placeholder'
   ) {
     try {
-      return await stripe.balanceTransactions.retrieve(charge.balance_transaction);
+      const balanceTx = await stripe.balanceTransactions.retrieve(charge.balance_transaction);
+      return { balanceTx, retrievalFailure: null };
     } catch (err: any) {
-      console.warn(
-        `[Settlement] Could not retrieve balance transaction ${charge.balance_transaction}: ${err?.message}`
-      );
+      logStripeDiagnostic('resolveChargeBalanceTransaction', err, {
+        chargeId: charge.id,
+        balanceTransactionId: charge.balance_transaction,
+      });
+      return {
+        balanceTx: null,
+        retrievalFailure: classifyStripeSettlementRetrievalError(err),
+        rawError: err,
+      };
     }
   }
 
-  return null;
+  return { balanceTx: null, retrievalFailure: null };
 }
 
 export async function processStripeWebhookEvent(
@@ -82,11 +110,22 @@ export async function processStripeWebhookEvent(
   }
 
   // Retrieve Stripe BalanceTransaction strictly OUTSIDE Prisma transactions / row locks
-  let preloadedBalanceTx: Stripe.BalanceTransaction | null = null;
+  let balanceResolution: ChargeBalanceResolution = {
+    balanceTx: null,
+    retrievalFailure: null,
+  };
   if (event.type === 'charge.updated') {
-    preloadedBalanceTx = await resolveChargeBalanceTransaction(
+    balanceResolution = await resolveChargeBalanceTransaction(
       event.data.object as Stripe.Charge
     );
+    // Transient Stripe API/network failures must NOT acknowledge the webhook as processed;
+    // throwing before ProcessedWebhookEvent write allows Stripe retries and recovery worker fallback.
+    if (balanceResolution.retrievalFailure?.disposition === 'RETRY') {
+      throw (
+        balanceResolution.rawError ??
+        new Error(balanceResolution.retrievalFailure.message)
+      );
+    }
   }
 
   let txResult: {
@@ -94,6 +133,7 @@ export async function processStripeWebhookEvent(
     duplicate?: boolean;
     shouldWakeOutbox?: boolean;
     shouldWakeRefund?: boolean;
+    shouldWakeSettlement?: boolean;
   };
 
   try {
@@ -110,11 +150,13 @@ export async function processStripeWebhookEvent(
             duplicate: true,
             shouldWakeOutbox: false,
             shouldWakeRefund: false,
+            shouldWakeSettlement: false,
           };
         }
 
         let shouldWakeOutbox = false;
         let shouldWakeRefund = false;
+        let shouldWakeSettlement = false;
 
         switch (event.type) {
           case 'payment_intent.succeeded': {
@@ -135,7 +177,18 @@ export async function processStripeWebhookEvent(
 
           case 'charge.updated': {
             const charge = event.data.object as Stripe.Charge;
-            await handleChargeUpdated(tx, charge, preloadedBalanceTx);
+            await handleChargeUpdated(tx, charge, {
+              balanceTx: balanceResolution.balanceTx,
+              permanentRetrievalFailure:
+                balanceResolution.retrievalFailure?.disposition === 'PERMANENT'
+                  ? balanceResolution.retrievalFailure
+                  : null,
+            });
+            break;
+          }
+
+          case 'balance.available': {
+            shouldWakeSettlement = await handleBalanceAvailableWebhook(tx);
             break;
           }
 
@@ -159,7 +212,8 @@ export async function processStripeWebhookEvent(
           case 'charge.dispute.updated':
           case 'charge.dispute.closed': {
             const dispute = event.data.object as Stripe.Dispute;
-            await handleDisputeEvent(tx, event.type, dispute);
+            const dispRes = await handleDisputeEvent(tx, event.type, dispute);
+            shouldWakeSettlement = shouldWakeSettlement || dispRes.shouldWakeSettlement;
             break;
           }
 
@@ -199,7 +253,7 @@ export async function processStripeWebhookEvent(
           },
         });
 
-        return { handled: true, shouldWakeOutbox, shouldWakeRefund };
+        return { handled: true, shouldWakeOutbox, shouldWakeRefund, shouldWakeSettlement };
       },
       {
         isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
@@ -226,6 +280,9 @@ export async function processStripeWebhookEvent(
   }
   if (txResult.shouldWakeRefund) {
     triggerOrderRefundDispatch();
+  }
+  if (txResult.shouldWakeSettlement) {
+    triggerSettlementRecoveryDispatch();
   }
 
   return txResult.duplicate
@@ -868,6 +925,7 @@ export async function handlePaymentIntentSucceeded(
 
   // Normal Fulfillment Path (Rule 2A or Rule 2B with genuinely unallocated capacity)
   const ensuredOrderAccessToken = order.orderAccessToken || `oat_${nanoid(32)}`;
+  const settlementChargeId = latestChargeId || order.stripeSettledChargeId || undefined;
 
   await tx.order.update({
     where: { id: order.id },
@@ -875,6 +933,9 @@ export async function handlePaymentIntentSucceeded(
       status: OrderStatus.COMPLETED,
       paymentReference: paymentIntent.id,
       ...(order.orderAccessToken ? {} : { orderAccessToken: ensuredOrderAccessToken }),
+      ...(settlementChargeId && !order.stripeSettledChargeId
+        ? { stripeSettledChargeId: settlementChargeId }
+        : {}),
     },
   });
 
@@ -967,9 +1028,14 @@ export async function handlePaymentIntentSucceeded(
   );
 
   // If charge.updated(available) arrived out-of-order BEFORE payment_intent.succeeded,
-  // settle immediately via autoSettle so settlement is never permanently lost.
-  const shouldAutoSettleFromPriorCharge = Boolean(order.stripeFundsAvailableAt);
-  const settlementChargeId = latestChargeId || order.stripeSettledChargeId || undefined;
+  // settle immediately via autoSettle (unless an open dispute already exists on the order)
+  const expandedLatestCharge =
+    typeof paymentIntent.latest_charge === 'object' && paymentIntent.latest_charge !== null
+      ? (paymentIntent.latest_charge as Stripe.Charge)
+      : null;
+  const shouldAutoSettleFromPriorCharge =
+    Boolean(order.stripeFundsAvailableAt) &&
+    !(await hasOpenDisputeForOrder(tx, order.id, expandedLatestCharge));
 
   await recordTicketSalePending(tx, {
     orderId: order.id,
@@ -1088,11 +1154,26 @@ async function lockOrderByIdentifier(
 async function handleChargeUpdated(
   tx: Prisma.TransactionClient,
   charge: Stripe.Charge,
-  preloadedBalanceTx?: Stripe.BalanceTransaction | null
+  resolution?:
+    | Stripe.BalanceTransaction
+    | null
+    | {
+        balanceTx?: Stripe.BalanceTransaction | null;
+        permanentRetrievalFailure?: SettlementErrorClassification | null;
+      }
 ): Promise<void> {
   const paymentIntentId = typeof charge.payment_intent === 'string'
     ? charge.payment_intent
     : (charge.payment_intent as Stripe.PaymentIntent)?.id;
+
+  const preloadedBalanceTx =
+    resolution && 'balanceTx' in resolution
+      ? (resolution.balanceTx ?? null)
+      : ((resolution as Stripe.BalanceTransaction | null | undefined) ?? null);
+  const permanentRetrievalFailure =
+    resolution && 'permanentRetrievalFailure' in resolution
+      ? (resolution.permanentRetrievalFailure ?? null)
+      : null;
 
   // Balance transaction was retrieved strictly outside this DB transaction / Order lock
   const balanceTx: Stripe.BalanceTransaction | null =
@@ -1101,30 +1182,20 @@ async function handleChargeUpdated(
       ? (charge.balance_transaction as Stripe.BalanceTransaction)
       : null);
 
+  const rawBalanceTxId =
+    balanceTx?.id ||
+    (typeof charge.balance_transaction === 'string' ? charge.balance_transaction : null);
+  const availableOnDate =
+    balanceTx && typeof balanceTx.available_on === 'number'
+      ? new Date(balanceTx.available_on * 1000)
+      : null;
+
   const orderId = charge.metadata?.orderId as string | undefined;
   const order = await lockOrderByIdentifier(tx, orderId, paymentIntentId);
 
   if (!order) {
     return;
   }
-
-  // Financially correct settlement detection:
-  // Only transition organizer earnings from PENDING to AVAILABLE if the underlying
-  // Stripe BalanceTransaction has actually become available in the platform Stripe balance
-  // (status === 'available').
-  const isFundsAvailable = Boolean(
-    balanceTx &&
-      balanceTx.status === 'available' &&
-      (typeof balanceTx.available_on !== 'number' || balanceTx.available_on * 1000 <= Date.now())
-  );
-
-  const existingSaleLedger = await tx.financialLedgerEntry.findFirst({
-    where: {
-      orderId: order.id,
-      type: { in: [LedgerEntryType.TICKET_SALE_PENDING, LedgerEntryType.TICKET_SALE_CLEARED] },
-    },
-    select: { id: true },
-  });
 
   // Scope OrderRefund check by PaymentIntent when available so a duplicate PI's OrderRefund
   // does not block legitimate settlement for the original PI on the same Order.
@@ -1142,57 +1213,215 @@ async function handleChargeUpdated(
         })
       );
 
-  const isDifferentPiFromCompletedOrder = Boolean(
+  const isDifferentPiFromOrder = Boolean(
     paymentIntentId &&
       order.paymentReference &&
       order.paymentReference !== paymentIntentId
   );
 
-  const isCompletedSale =
-    !hasLatePaymentRefundForPi &&
-    !isDifferentPiFromCompletedOrder &&
-    (order.status === OrderStatus.COMPLETED || Boolean(existingSaleLedger));
+  const existingSaleLedger = await tx.financialLedgerEntry.findFirst({
+    where: {
+      orderId: order.id,
+      type: { in: [LedgerEntryType.TICKET_SALE_PENDING, LedgerEntryType.TICKET_SALE_CLEARED] },
+    },
+    select: { id: true },
+  });
 
-  if (charge.status === 'succeeded' && isFundsAvailable) {
-    if (isCompletedSale) {
-      await settleOrderEarnings(tx, {
-        orderId: order.id,
-        stripeChargeId: charge.id,
-      });
-    }
-  }
+  const existingClearedLedger = await tx.financialLedgerEntry.findFirst({
+    where: {
+      orderId: order.id,
+      type: LedgerEntryType.TICKET_SALE_CLEARED,
+    },
+    select: { id: true },
+  });
 
-  const hasFeeNumber = Boolean(balanceTx && typeof balanceTx.fee === 'number');
-  if (isCompletedSale) {
-    if (hasFeeNumber && !order.stripeActualFeeRecordedAt) {
-      await recordActualStripeFee(tx, {
-        stripeChargeId: charge.id,
-        actualFeeInCents: balanceTx!.fee,
-        currency: charge.currency,
-        orderId: order.id,
-      });
+  if (permanentRetrievalFailure) {
+    if (
+      !hasLatePaymentRefundForPi &&
+      !isDifferentPiFromOrder &&
+      !existingClearedLedger &&
+      order.stripeSettlementStatus !== StripeSettlementStatus.SETTLED
+    ) {
+      const safeMsg = sanitizeSettlementDiagnosticMessage(permanentRetrievalFailure.message);
       await tx.order.update({
         where: { id: order.id },
         data: {
-          stripeActualFeeRecordedAt: new Date(),
-          stripeActualFeeInCents: null,
+          stripeSettlementStatus: StripeSettlementStatus.FAILED_PERMANENT,
+          stripeSettlementFailedAt: order.stripeSettlementFailedAt ?? new Date(),
+          stripeSettlementLockedBy: null,
+          stripeSettlementLockedUntil: null,
+          stripeSettlementNextAttemptAt: null,
+          stripeSettlementLastAttemptAt: new Date(),
+          stripeSettlementLastErrorCategory: 'PERMANENT',
+          stripeSettlementLastErrorCode: permanentRetrievalFailure.code,
+          stripeSettlementLastErrorMessage: safeMsg,
+          ...(order.stripeSettledChargeId ? {} : { stripeSettledChargeId: charge.id }),
+          ...(rawBalanceTxId && !order.stripeBalanceTransactionId
+            ? { stripeBalanceTransactionId: rawBalanceTxId }
+            : {}),
+        },
+      });
+
+      emitSettlementCriticalAlert({
+        orderId: order.id,
+        orderNumber: order.orderNumber,
+        stripeChargeId: charge.id,
+        stripeBalanceTransactionId: rawBalanceTxId,
+        code: permanentRetrievalFailure.code,
+        message: safeMsg,
+      });
+    }
+    return;
+  }
+
+  // Financially correct settlement detection:
+  // Only transition organizer earnings from PENDING to AVAILABLE if the underlying
+  // Stripe BalanceTransaction has actually become available in the platform Stripe balance
+  // (status === 'available').
+  const isFundsAvailable = Boolean(
+    balanceTx &&
+      balanceTx.status === 'available' &&
+      (typeof balanceTx.available_on !== 'number' || balanceTx.available_on * 1000 <= Date.now())
+  );
+
+  const isCompletedSale =
+    !hasLatePaymentRefundForPi &&
+    !isDifferentPiFromOrder &&
+    (order.status === OrderStatus.COMPLETED || Boolean(existingSaleLedger));
+
+  const hasFeeNumber = Boolean(balanceTx && typeof balanceTx.fee === 'number');
+  if (isCompletedSale && hasFeeNumber && !order.stripeActualFeeRecordedAt) {
+    await recordActualStripeFee(tx, {
+      stripeChargeId: charge.id,
+      actualFeeInCents: balanceTx!.fee,
+      currency: balanceTx!.currency || charge.currency || order.currency,
+      orderId: order.id,
+    });
+    await tx.order.update({
+      where: { id: order.id },
+      data: {
+        stripeActualFeeRecordedAt: new Date(),
+        stripeActualFeeInCents: null,
+      },
+    });
+  }
+
+  if (isCompletedSale) {
+    if (charge.status === 'succeeded' && isFundsAvailable) {
+      if (order.status === OrderStatus.COMPLETED) {
+        await reconcileChargeRefundBeforeSettlement(tx, {
+          orderId: order.id,
+          paymentReference: order.paymentReference,
+          charge,
+        });
+      }
+
+      if (await hasOpenDisputeForOrder(tx, order.id, charge)) {
+        await tx.order.update({
+          where: { id: order.id },
+          data: {
+            stripeSettlementStatus: StripeSettlementStatus.PENDING,
+            stripeFundsAvailableAt: order.stripeFundsAvailableAt ?? new Date(),
+            ...(order.stripeSettledChargeId ? {} : { stripeSettledChargeId: charge.id }),
+            ...(rawBalanceTxId && !order.stripeBalanceTransactionId
+              ? { stripeBalanceTransactionId: rawBalanceTxId }
+              : {}),
+            ...(availableOnDate && !order.stripeAvailableOn
+              ? { stripeAvailableOn: availableOnDate }
+              : {}),
+            stripeSettlementNextAttemptAt: new Date(Date.now() + 3_600_000),
+          },
+        });
+      } else {
+        await settleOrderEarnings(tx, {
+          orderId: order.id,
+          stripeChargeId: charge.id,
+          stripeBalanceTransactionId: balanceTx?.id,
+          availableOn: availableOnDate,
+        });
+      }
+    } else if (
+      charge.status === 'failed' &&
+      !existingClearedLedger &&
+      order.stripeSettlementStatus !== StripeSettlementStatus.SETTLED
+    ) {
+      await tx.order.update({
+        where: { id: order.id },
+        data: {
+          stripeSettlementStatus: StripeSettlementStatus.FAILED_PERMANENT,
+          stripeSettlementFailedAt: order.stripeSettlementFailedAt ?? new Date(),
+          stripeSettlementLockedBy: null,
+          stripeSettlementLockedUntil: null,
+          stripeSettlementNextAttemptAt: null,
+          stripeSettlementLastErrorCategory: 'PERMANENT',
+          stripeSettlementLastErrorCode: 'CHARGE_NOT_SUCCEEDED',
+          stripeSettlementLastErrorMessage: `Stripe charge ${charge.id} status is '${charge.status}'.`,
+          ...(order.stripeSettledChargeId ? {} : { stripeSettledChargeId: charge.id }),
+        },
+      });
+    } else if (!existingClearedLedger && order.stripeSettlementStatus !== StripeSettlementStatus.SETTLED) {
+      // Persist Stripe identifiers and expected clearing timestamp for recovery worker
+      const nowMs = Date.now();
+      const nextCheckAt =
+        availableOnDate && availableOnDate.getTime() > nowMs
+          ? new Date(Math.max(nowMs + 60_000, availableOnDate.getTime()))
+          : new Date(nowMs + 5 * 60_000);
+      await tx.order.update({
+        where: { id: order.id },
+        data: {
+          ...(order.stripeSettledChargeId ? {} : { stripeSettledChargeId: charge.id }),
+          ...(rawBalanceTxId && !order.stripeBalanceTransactionId
+            ? { stripeBalanceTransactionId: rawBalanceTxId }
+            : {}),
+          ...(availableOnDate ? { stripeAvailableOn: availableOnDate } : {}),
+          ...(order.organizerNetInCents > 0 && order.paymentProvider === PaymentProvider.STRIPE
+            ? {
+                stripeSettlementStatus: StripeSettlementStatus.PENDING,
+                stripeSettlementNextAttemptAt: nextCheckAt,
+              }
+            : {}),
         },
       });
     }
-  } else if (order.status === OrderStatus.PENDING && !hasLatePaymentRefundForPi) {
+  } else if (
+    order.status === OrderStatus.PENDING &&
+    !hasLatePaymentRefundForPi &&
+    !isDifferentPiFromOrder
+  ) {
     // Out-of-order charge.updated arrived BEFORE payment_intent.succeeded:
     // Persist funds-available + actual fee metadata on Order without crediting balances yet.
+    // Never set stripeFundsAvailableAt if the charge already shows disputed=true or an open dispute exists.
     const updateData: Prisma.OrderUpdateInput = {};
-    if (charge.status === 'succeeded' && isFundsAvailable && !order.stripeFundsAvailableAt) {
+    const disputedOutOfOrder =
+      Boolean(charge.disputed) || (await hasOpenDisputeForOrder(tx, order.id, charge));
+    if (
+      charge.status === 'succeeded' &&
+      isFundsAvailable &&
+      !disputedOutOfOrder &&
+      !order.stripeFundsAvailableAt
+    ) {
       updateData.stripeFundsAvailableAt = new Date();
       updateData.stripeSettledChargeId = charge.id;
     }
+    if (rawBalanceTxId && !order.stripeBalanceTransactionId) {
+      updateData.stripeBalanceTransactionId = rawBalanceTxId;
+    }
+    if (availableOnDate && !order.stripeAvailableOn) {
+      updateData.stripeAvailableOn = availableOnDate;
+    }
     if (hasFeeNumber && !order.stripeActualFeeRecordedAt) {
       updateData.stripeActualFeeInCents = balanceTx!.fee;
-      updateData.stripeActualFeeCurrency = (charge.currency || order.currency).toUpperCase();
+      updateData.stripeActualFeeCurrency = (
+        balanceTx!.currency ||
+        charge.currency ||
+        order.currency
+      ).toUpperCase();
       if (!updateData.stripeSettledChargeId && !order.stripeSettledChargeId) {
         updateData.stripeSettledChargeId = charge.id;
       }
+    }
+    if (!order.stripeSettledChargeId && !updateData.stripeSettledChargeId) {
+      updateData.stripeSettledChargeId = charge.id;
     }
     if (Object.keys(updateData).length > 0) {
       await tx.order.update({
@@ -1386,7 +1615,7 @@ async function handleDisputeEvent(
   tx: Prisma.TransactionClient,
   eventType: string,
   dispute: Stripe.Dispute
-): Promise<void> {
+): Promise<{ shouldWakeSettlement: boolean }> {
   const chargeId = typeof dispute.charge === 'string'
     ? dispute.charge
     : (dispute.charge as Stripe.Charge)?.id;
@@ -1394,13 +1623,19 @@ async function handleDisputeEvent(
   let order: any = null;
 
   if (chargeId) {
-    // 1. Try finding by existing financial ledger entry for this charge
+    // 1. Try finding by existing financial ledger entry or settledChargeId for this charge
     const existingLedger = await tx.financialLedgerEntry.findFirst({
       where: { stripeReferenceId: chargeId },
     });
     if (existingLedger?.orderId) {
       order = await tx.order.findUnique({
         where: { id: existingLedger.orderId },
+      });
+    }
+
+    if (!order) {
+      order = await tx.order.findFirst({
+        where: { stripeSettledChargeId: chargeId },
       });
     }
 
@@ -1437,6 +1672,11 @@ async function handleDisputeEvent(
     }
   }
 
+  if (order?.id) {
+    await tx.$queryRaw`SELECT id FROM "Order" WHERE id = ${order.id} FOR UPDATE`;
+    order = await tx.order.findUnique({ where: { id: order.id } });
+  }
+
   let status: 'needs_response' | 'under_review' | 'won' | 'lost' | 'warning_needs_response' = 'needs_response';
   if (dispute.status === 'won') {
     status = 'won';
@@ -1454,6 +1694,24 @@ async function handleDisputeEvent(
     status,
     reason: dispute.reason,
   });
+
+  // When a dispute closes as won or lost on a settlement-pending order, nudge recovery check
+  if (
+    order?.id &&
+    (status === 'won' || status === 'lost') &&
+    order.status === OrderStatus.COMPLETED &&
+    order.stripeSettlementStatus === StripeSettlementStatus.PENDING
+  ) {
+    await tx.order.update({
+      where: { id: order.id },
+      data: {
+        stripeSettlementNextAttemptAt: new Date(),
+      },
+    });
+    return { shouldWakeSettlement: true };
+  }
+
+  return { shouldWakeSettlement: false };
 }
 
 async function handleTransferEvent(
@@ -1462,11 +1720,29 @@ async function handleTransferEvent(
   transfer: Stripe.Transfer
 ): Promise<void> {
   if (eventType === 'transfer.reversed') {
-    const existing = await tx.organizerTransfer.findUnique({
-      where: { stripeTransferId: transfer.id },
-    });
+    // Lock OrganizerTransfer FOR UPDATE first before checking status, then OrganizerBalance
+    const lockedTransfers = await tx.$queryRaw<
+      Array<{
+        id: string;
+        organizerId: string;
+        status: TransferStatus;
+        amountInCents: number;
+        currency: string;
+        transferNumber: string;
+      }>
+    >`
+      SELECT id, "organizerId", status, "amountInCents", currency, "transferNumber"
+      FROM "OrganizerTransfer"
+      WHERE "stripeTransferId" = ${transfer.id}
+      FOR UPDATE
+    `;
+    const existing = lockedTransfers[0];
 
     if (existing && existing.status !== TransferStatus.REVERSED) {
+      await tx.$queryRaw`
+        SELECT id FROM "OrganizerBalance" WHERE "userId" = ${existing.organizerId} FOR UPDATE
+      `;
+
       await tx.organizerTransfer.update({
         where: { id: existing.id },
         data: { status: TransferStatus.REVERSED },

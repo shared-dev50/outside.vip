@@ -158,6 +158,7 @@ enum LedgerBalanceType {
   AVAILABLE
   TRANSFERRED
   PLATFORM_REVENUE
+  PLATFORM_EXPENSE
   RECOVERABLE
 }
 
@@ -479,11 +480,23 @@ model Order {
   idempotencyKey   String          @unique
   paymentProvider  PaymentProvider @default(STRIPE)
   paymentReference String? // e.g. Stripe Checkout Session ID or M-Pesa CheckoutRequestID
-  stripeFundsAvailableAt    DateTime?
-  stripeSettledChargeId     String?
-  stripeActualFeeInCents    Int?
-  stripeActualFeeCurrency   String?
-  stripeActualFeeRecordedAt DateTime?
+  stripeFundsAvailableAt           DateTime?
+  stripeSettledChargeId            String?
+  stripeBalanceTransactionId       String?
+  stripeAvailableOn                DateTime?
+  stripeSettlementStatus           StripeSettlementStatus?
+  stripeSettlementAttempts         Int                     @default(0)
+  stripeSettlementNextAttemptAt    DateTime?
+  stripeSettlementLockedBy         String?
+  stripeSettlementLockedUntil      DateTime?
+  stripeSettlementLastErrorCategory String?
+  stripeSettlementLastErrorCode    String?
+  stripeSettlementLastErrorMessage String?                 @db.Text
+  stripeSettlementLastAttemptAt    DateTime?
+  stripeSettlementFailedAt         DateTime?
+  stripeActualFeeInCents           Int?
+  stripeActualFeeCurrency          String?
+  stripeActualFeeRecordedAt        DateTime?
   expiresAt        DateTime // 15-minute checkout reservation hold
 
   createdAt DateTime @default(now())
@@ -504,6 +517,8 @@ model Order {
   @@index([expiresAt, status])
   @@index([orderAccessToken])
   @@index([paymentReference])
+  @@index([status, paymentProvider, stripeSettlementStatus, stripeSettlementNextAttemptAt])
+  @@index([stripeSettlementLockedUntil])
 }
 
 model OrderItem {
@@ -1050,6 +1065,12 @@ enum OrderRefundStatus {
   SUCCEEDED
   MANUAL_REVIEW_REQUIRED
   MANUALLY_RESOLVED
+}
+
+enum StripeSettlementStatus {
+  PENDING
+  SETTLED
+  FAILED_PERMANENT
 }
 
 enum EmailOutboxStatus {
