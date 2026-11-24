@@ -308,6 +308,8 @@ describe('Stripe Connect Financial Correctness & Money Movement Audit Suite', ()
   it('4. Transfer requested before funds are available is rejected', async () => {
     vi.spyOn(stripe.accounts, 'retrieve').mockResolvedValueOnce({
       id: organizerStripeAccountId,
+      country: 'US',
+      default_currency: 'usd',
       payouts_enabled: true,
       charges_enabled: true,
       details_submitted: true,
@@ -328,6 +330,8 @@ describe('Stripe Connect Financial Correctness & Money Movement Audit Suite', ()
   it('5. Connected account without active transfer capability is rejected with actionable error', async () => {
     vi.spyOn(stripe.accounts, 'retrieve').mockResolvedValueOnce({
       id: organizerStripeAccountId,
+      country: 'US',
+      default_currency: 'usd',
       payouts_enabled: false,
       charges_enabled: true,
       details_submitted: true,
@@ -347,6 +351,8 @@ describe('Stripe Connect Financial Correctness & Money Movement Audit Suite', ()
   it('6. Connected account with outstanding requirements or disabled reason is rejected', async () => {
     vi.spyOn(stripe.accounts, 'retrieve').mockResolvedValueOnce({
       id: organizerStripeAccountId,
+      country: 'US',
+      default_currency: 'usd',
       payouts_enabled: false,
       charges_enabled: false,
       details_submitted: true,
@@ -370,6 +376,8 @@ describe('Stripe Connect Financial Correctness & Money Movement Audit Suite', ()
   it('7. Insufficient platform Stripe balance safely restores organizer available balance', async () => {
     vi.spyOn(stripe.accounts, 'retrieve').mockResolvedValueOnce({
       id: organizerStripeAccountId,
+      country: 'US',
+      default_currency: 'usd',
       payouts_enabled: true,
       charges_enabled: true,
       details_submitted: true,
@@ -451,6 +459,8 @@ describe('Stripe Connect Financial Correctness & Money Movement Audit Suite', ()
 
     vi.spyOn(stripe.accounts, 'retrieve').mockResolvedValueOnce({
       id: organizerStripeAccountId,
+      country: 'US',
+      default_currency: 'usd',
       payouts_enabled: true,
       charges_enabled: true,
       details_submitted: true,
@@ -475,6 +485,8 @@ describe('Stripe Connect Financial Correctness & Money Movement Audit Suite', ()
 
     vi.spyOn(stripe.accounts, 'retrieve').mockResolvedValue({
       id: organizerStripeAccountId,
+      country: 'US',
+      default_currency: 'usd',
       payouts_enabled: true,
       charges_enabled: true,
       details_submitted: true,
@@ -520,6 +532,8 @@ describe('Stripe Connect Financial Correctness & Money Movement Audit Suite', ()
 
     vi.spyOn(stripe.accounts, 'retrieve').mockResolvedValue({
       id: organizerStripeAccountId,
+      country: 'US',
+      default_currency: 'usd',
       payouts_enabled: true,
       charges_enabled: true,
       details_submitted: true,
@@ -1082,6 +1096,8 @@ describe('Stripe Connect Financial Correctness & Money Movement Audit Suite', ()
     // 3. Withdrawal of 1000 cents
     vi.spyOn(stripe.accounts, 'retrieve').mockResolvedValueOnce({
       id: cleanStripeAccountId,
+      country: 'US',
+      default_currency: 'usd',
       payouts_enabled: true,
       charges_enabled: true,
       details_submitted: true,

@@ -27,11 +27,6 @@ export interface StripeOnboardingGateModalProps {
 
 const DEFAULT_FALLBACK_COUNTRIES: StripeConnectCountry[] = [
   { code: 'US', name: 'United States' },
-  { code: 'CA', name: 'Canada' },
-  { code: 'GB', name: 'United Kingdom' },
-  { code: 'KE', name: 'Kenya' },
-  { code: 'NG', name: 'Nigeria' },
-  { code: 'ZA', name: 'South Africa' },
 ];
 
 export const StripeOnboardingGateModal: React.FC<StripeOnboardingGateModalProps> = ({

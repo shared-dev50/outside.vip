@@ -192,8 +192,22 @@ model User {
   emailVerified        Boolean       @default(false)
   emailVerifiedAt      DateTime?
   avatarUrl            String?
-  stripeAccountId      String?       @unique
-  stripeAccountCountry String?
+  stripeAccountId                  String?       @unique
+  stripeAccountCountry             String?
+  stripeAccountDefaultCurrency     String?
+  stripeAccountDetailsSubmitted    Boolean       @default(false)
+  stripeAccountChargesEnabled      Boolean       @default(false)
+  stripeAccountPayoutsEnabled      Boolean       @default(false)
+  stripeAccountTransfersCapability String?
+  stripeAccountDisabledReason      String?
+  stripeAccountCapabilities        Json?
+  stripeAccountRequirements        Json?
+  stripeAccountEventCreatedAt      Int?
+  stripeAccountSyncedAt            DateTime?
+  stripeAccountCreationKey         String?
+  stripeAccountCreationLockedBy    String?
+  stripeAccountCreationLockedUntil DateTime?
+  stripeAccountCreationStartedAt   DateTime?
   createdAt            DateTime      @default(now())
   updatedAt            DateTime      @updatedAt
 
@@ -740,10 +754,23 @@ model OrganizerTransfer {
   organizer       User   @relation("OrganizerTransfers", fields: [organizerId], references: [id], onDelete: Restrict)
   stripeAccountId String
 
-  amountInCents    Int
-  currency         String         @default("USD")
-  status           TransferStatus @default(PENDING)
-  stripeTransferId String?        @unique // tr_...
+  amountInCents        Int
+  reversedAmountInCents Int            @default(0)
+  currency             String         @default("USD")
+  status               TransferStatus @default(PENDING)
+  stripeTransferId     String?        @unique // tr_...
+
+  reconciliationRequired         Boolean   @default(false)
+  reconciliationAttempts         Int       @default(0)
+  reconciliationNextAttemptAt    DateTime?
+  reconciliationLockedBy         String?
+  reconciliationLockedUntil      DateTime?
+  reconciliationLastAttemptAt    DateTime?
+  reconciliationLastErrorCode    String?
+  reconciliationLastErrorMessage String?   @db.Text
+  lastCreateAttemptAt            DateTime?
+  succeededAt                    DateTime?
+  failedAt                       DateTime?
 
   sourceType        TransferSourceType @default(MANUAL_ORGANIZER_REQUEST)
   initiatedByUserId String
@@ -760,6 +787,8 @@ model OrganizerTransfer {
 
   @@index([organizerId, createdAt])
   @@index([status])
+  @@index([status, reconciliationNextAttemptAt])
+  @@index([status, reconciliationLockedUntil])
   @@index([stripeTransferId])
   @@index([transferNumber])
 }

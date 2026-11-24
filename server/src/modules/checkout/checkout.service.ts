@@ -7,6 +7,7 @@ import { BadRequestError, ConflictError, NotFoundError, ForbiddenError } from '.
 import { isTicketTierHidden, isTicketTierSalesDisabled } from '../../utils/ticketTierState.js';
 import { verifyEventAccessToken } from '../events/passwordAccess.service.js';
 import { hashOfferToken, processWaitlistForTier } from '../waitlist/waitlist.service.js';
+import { isSupportedPlatformCurrency } from '../finance/stripeCountries.js';
 import {
   calculateFinancialBreakdown,
   calculateCheckoutFeeBreakdown,
@@ -440,9 +441,15 @@ export async function createCheckoutSession(
     }
   }
 
-  const currency = foundTiers[0].currency;
-  if (!foundTiers.every((t) => t.currency.toUpperCase() === currency.toUpperCase())) {
+  const currency = foundTiers[0].currency.toUpperCase();
+  if (!foundTiers.every((t) => t.currency.toUpperCase() === currency)) {
     throw new BadRequestError('All ticket tiers in a single checkout must share the same currency');
+  }
+  if (!isSupportedPlatformCurrency(currency)) {
+    throw new BadRequestError(
+      `Unsupported ticket currency '${currency}'. Only USD purchases are currently supported.`,
+      'UNSUPPORTED_CURRENCY'
+    );
   }
 
   // Stripe requires session expiry to be at least 30 minutes in the future.

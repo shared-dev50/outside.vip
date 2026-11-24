@@ -5,13 +5,13 @@ import { prisma } from '../db/prisma.js';
 import { stripe } from '../lib/stripe.js';
 import { STRIPE_EXPRESS_SUPPORTED_COUNTRIES } from '../modules/finance/stripeCountries.js';
 
-describe('Stripe Connect Express Country Selection & Validation', () => {
+describe('Stripe Connect Express Country Selection & Validation (US Launch)', () => {
   let organizerToken: string;
   let organizerUserId: string;
   let attendeeToken: string;
+  const originalConfiguredCountries = process.env.STRIPE_CONNECT_SUPPORTED_COUNTRIES;
 
   beforeAll(async () => {
-    // Authenticate seeded organizer
     const organizerLogin = await request(app).post('/api/auth/login').send({
       email: 'sol@outside.vip',
       password: 'Outside2026!',
@@ -20,7 +20,6 @@ describe('Stripe Connect Express Country Selection & Validation', () => {
     organizerToken = organizerLogin.body.data.token;
     organizerUserId = organizerLogin.body.data.user.id;
 
-    // Authenticate seeded attendee
     const attendeeLogin = await request(app).post('/api/auth/login').send({
       email: 'alex@outside.vip',
       password: 'Outside2026!',
@@ -30,33 +29,47 @@ describe('Stripe Connect Express Country Selection & Validation', () => {
   });
 
   beforeEach(async () => {
-    // Reset test organizer's stripeAccountId and stripeAccountCountry before each test
+    if (originalConfiguredCountries === undefined) {
+      delete process.env.STRIPE_CONNECT_SUPPORTED_COUNTRIES;
+    } else {
+      process.env.STRIPE_CONNECT_SUPPORTED_COUNTRIES = originalConfiguredCountries;
+    }
     await prisma.user.update({
       where: { id: organizerUserId },
       data: {
         stripeAccountId: null,
         stripeAccountCountry: null,
+        stripeAccountCreationKey: null,
+        stripeAccountCreationLockedBy: null,
+        stripeAccountCreationLockedUntil: null,
       },
     });
   });
 
   afterEach(() => {
+    if (originalConfiguredCountries === undefined) {
+      delete process.env.STRIPE_CONNECT_SUPPORTED_COUNTRIES;
+    } else {
+      process.env.STRIPE_CONNECT_SUPPORTED_COUNTRIES = originalConfiguredCountries;
+    }
     vi.restoreAllMocks();
   });
 
   afterAll(async () => {
-    // Clean up test state
     await prisma.user.update({
       where: { id: organizerUserId },
       data: {
         stripeAccountId: null,
         stripeAccountCountry: null,
+        stripeAccountCreationKey: null,
+        stripeAccountCreationLockedBy: null,
+        stripeAccountCreationLockedUntil: null,
       },
     });
   });
 
   describe('1. Supported Countries API (GET /api/organizer/finance/countries)', () => {
-    it('returns allowlisted supported countries and default US for authenticated organizers', async () => {
+    it('returns strictly US and default US for authenticated organizers under initial US/USD launch', async () => {
       const res = await request(app)
         .get('/api/organizer/finance/countries')
         .set('Authorization', `Bearer ${organizerToken}`);
@@ -64,53 +77,43 @@ describe('Stripe Connect Express Country Selection & Validation', () => {
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
       expect(res.body.data.defaultCountry).toBe('US');
-      expect(Array.isArray(res.body.data.countries)).toBe(true);
-
-      const countryCodes = res.body.data.countries.map((c: { code: string }) => c.code);
-      expect(countryCodes).toContain('US');
-      expect(countryCodes).toContain('CA');
-      expect(countryCodes).toContain('GB');
-      expect(countryCodes).toContain('AU');
-      expect(countryCodes).toContain('FR');
-      expect(countryCodes).toContain('DE');
-      expect(countryCodes).toContain('JP');
-      // Verify non-cross-border or unsupported country is not present
-      expect(countryCodes).not.toContain('KE');
-      expect(countryCodes).not.toContain('BR');
-      expect(countryCodes).not.toContain('IN');
-
-      // Check ISO alpha-2 uppercase formatting
-      for (const item of res.body.data.countries) {
-        expect(item.code).toMatch(/^[A-Z]{2}$/);
-        expect(typeof item.name).toBe('string');
-        expect(item.name.length).toBeGreaterThan(1);
-      }
+      expect(res.body.data.countries).toEqual([{ code: 'US', name: 'United States' }]);
+      expect(STRIPE_EXPRESS_SUPPORTED_COUNTRIES).toEqual([{ code: 'US', name: 'United States' }]);
     });
 
-    it('rejects unauthenticated requests with 401', async () => {
-      const res = await request(app).get('/api/organizer/finance/countries');
-      expect(res.status).toBe(401);
-    });
-
-    it('rejects attendee requests with 403 Forbidden', async () => {
+    it('allows configuration-driven country expansion when STRIPE_CONNECT_SUPPORTED_COUNTRIES is configured', async () => {
+      process.env.STRIPE_CONNECT_SUPPORTED_COUNTRIES = 'US,CA';
       const res = await request(app)
         .get('/api/organizer/finance/countries')
+        .set('Authorization', `Bearer ${organizerToken}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.data.countries.map((c: { code: string }) => c.code)).toEqual(['US', 'CA']);
+    });
+
+    it('rejects unauthenticated requests with 401 and attendee requests with 403', async () => {
+      const unauth = await request(app).get('/api/organizer/finance/countries');
+      expect(unauth.status).toBe(401);
+
+      const attendee = await request(app)
+        .get('/api/organizer/finance/countries')
         .set('Authorization', `Bearer ${attendeeToken}`);
-      expect(res.status).toBe(403);
+      expect(attendee.status).toBe(403);
     });
   });
 
   describe('2. Country Validation on Onboarding Link Generation (POST /api/organizer/finance/onboarding-link)', () => {
-    it('rejects unsupported arbitrary country code with 400 UNSUPPORTED_COUNTRY', async () => {
-      const res = await request(app)
-        .post('/api/organizer/finance/onboarding-link')
-        .set('Authorization', `Bearer ${organizerToken}`)
-        .send({ country: 'XX' });
+    it('rejects non-US country codes (CA, GB, DE, KE) and unknown codes with 400 UNSUPPORTED_COUNTRY', async () => {
+      for (const code of ['XX', 'CA', 'GB', 'DE', 'KE']) {
+        const res = await request(app)
+          .post('/api/organizer/finance/onboarding-link')
+          .set('Authorization', `Bearer ${organizerToken}`)
+          .send({ country: code });
 
-      expect(res.status).toBe(400);
-      expect(res.body.success).toBe(false);
-      expect(res.body.error.code).toBe('UNSUPPORTED_COUNTRY');
-      expect(res.body.error.message).toContain('XX');
+        expect(res.status).toBe(400);
+        expect(res.body.success).toBe(false);
+        expect(res.body.error.code).toBe('UNSUPPORTED_COUNTRY');
+      }
     });
 
     it('rejects invalid country string formats with 400 validation error', async () => {
@@ -123,14 +126,15 @@ describe('Stripe Connect Express Country Selection & Validation', () => {
       expect(res.body.success).toBe(false);
     });
 
-    it('accepts lowercase supported country code and normalizes to uppercase', async () => {
+    it('accepts lowercase us and normalizes to uppercase US', async () => {
       const createAccountSpy = vi.spyOn(stripe.accounts, 'create').mockResolvedValueOnce({
-        id: 'acct_test_ca_norm',
-        country: 'CA',
+        id: 'acct_test_us_norm',
+        country: 'US',
+        default_currency: 'usd',
       } as any);
 
-      const createLinkSpy = vi.spyOn(stripe.accountLinks, 'create').mockResolvedValueOnce({
-        url: 'https://connect.stripe.com/setup/s/norm_ca_test',
+      vi.spyOn(stripe.accountLinks, 'create').mockResolvedValueOnce({
+        url: 'https://connect.stripe.com/setup/s/norm_us_test',
         created: Math.floor(Date.now() / 1000),
         expires_at: Math.floor(Date.now() / 1000) + 300,
         object: 'account_link',
@@ -139,72 +143,32 @@ describe('Stripe Connect Express Country Selection & Validation', () => {
       const res = await request(app)
         .post('/api/organizer/finance/onboarding-link')
         .set('Authorization', `Bearer ${organizerToken}`)
-        .send({ country: 'ca' });
+        .send({ country: 'us' });
 
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
       expect(createAccountSpy).toHaveBeenCalledWith(
         expect.objectContaining({
           type: 'express',
-          country: 'CA',
+          country: 'US',
+        }),
+        expect.objectContaining({
+          idempotencyKey: expect.stringMatching(/^acct_create_/),
         })
       );
 
-      // Verify persisted in DB as uppercase CA
       const user = await prisma.user.findUnique({ where: { id: organizerUserId } });
-      expect(user?.stripeAccountId).toBe('acct_test_ca_norm');
-      expect(user?.stripeAccountCountry).toBe('CA');
+      expect(user?.stripeAccountId).toBe('acct_test_us_norm');
+      expect(user?.stripeAccountCountry).toBe('US');
     });
   });
 
-  describe('3. Account Creation & Country Persistence in Database', () => {
-    it('creates an Express account with specified country and persists stripeAccountCountry', async () => {
-      const createAccountSpy = vi.spyOn(stripe.accounts, 'create').mockResolvedValueOnce({
-        id: 'acct_test_gb_123',
-        country: 'GB',
-      } as any);
-
-      const createLinkSpy = vi.spyOn(stripe.accountLinks, 'create').mockResolvedValueOnce({
-        url: 'https://connect.stripe.com/setup/s/gb_link_123',
-        created: Math.floor(Date.now() / 1000),
-        expires_at: Math.floor(Date.now() / 1000) + 300,
-        object: 'account_link',
-      } as any);
-
-      const res = await request(app)
-        .post('/api/organizer/finance/onboarding-link')
-        .set('Authorization', `Bearer ${organizerToken}`)
-        .send({ country: 'GB' });
-
-      expect(res.status).toBe(200);
-      expect(res.body.success).toBe(true);
-      expect(res.body.data.url).toBe('https://connect.stripe.com/setup/s/gb_link_123');
-
-      expect(createAccountSpy).toHaveBeenCalledWith({
-        type: 'express',
-        country: 'GB',
-        email: 'sol@outside.vip',
-        capabilities: {
-          card_payments: { requested: true },
-          transfers: { requested: true },
-        },
-        business_type: 'individual',
-        metadata: {
-          userId: organizerUserId,
-          platform: 'outside.vip',
-        },
-      });
-
-      // Verify persistence in Postgres database
-      const user = await prisma.user.findUnique({ where: { id: organizerUserId } });
-      expect(user?.stripeAccountId).toBe('acct_test_gb_123');
-      expect(user?.stripeAccountCountry).toBe('GB');
-    });
-
+  describe('3. Account Creation, Reuse & Guarded Reconnect', () => {
     it('defaults to US when no country is provided during initial account creation', async () => {
       const createAccountSpy = vi.spyOn(stripe.accounts, 'create').mockResolvedValueOnce({
         id: 'acct_test_us_default',
         country: 'US',
+        default_currency: 'usd',
       } as any);
 
       vi.spyOn(stripe.accountLinks, 'create').mockResolvedValueOnce({
@@ -223,23 +187,21 @@ describe('Stripe Connect Express Country Selection & Validation', () => {
       expect(createAccountSpy).toHaveBeenCalledWith(
         expect.objectContaining({
           country: 'US',
-        })
+        }),
+        expect.anything()
       );
 
       const user = await prisma.user.findUnique({ where: { id: organizerUserId } });
       expect(user?.stripeAccountId).toBe('acct_test_us_default');
       expect(user?.stripeAccountCountry).toBe('US');
     });
-  });
 
-  describe('4. Reuse of Existing Connected Accounts and Country Retention', () => {
-    it('reuses existing account and retains its original country on subsequent onboarding attempts', async () => {
-      // Setup user with existing account and country CA
+    it('reuses existing US account on subsequent onboarding attempts', async () => {
       await prisma.user.update({
         where: { id: organizerUserId },
         data: {
-          stripeAccountId: 'acct_existing_ca_456',
-          stripeAccountCountry: 'CA',
+          stripeAccountId: 'acct_existing_us_456',
+          stripeAccountCountry: 'US',
         },
       });
 
@@ -251,42 +213,40 @@ describe('Stripe Connect Express Country Selection & Validation', () => {
         object: 'account_link',
       } as any);
 
-      // Subsequent onboarding attempt passes a different country "AU", but account already exists!
       const res = await request(app)
         .post('/api/organizer/finance/onboarding-link')
         .set('Authorization', `Bearer ${organizerToken}`)
-        .send({ country: 'AU' });
+        .send({});
 
       expect(res.status).toBe(200);
-      expect(res.body.success).toBe(true);
-
-      // Must NOT recreate account
       expect(createAccountSpy).not.toHaveBeenCalled();
       expect(createLinkSpy).toHaveBeenCalledWith(
         expect.objectContaining({
-          account: 'acct_existing_ca_456',
+          account: 'acct_existing_us_456',
         })
       );
-
-      // Country in DB must retain CA
-      const user = await prisma.user.findUnique({ where: { id: organizerUserId } });
-      expect(user?.stripeAccountId).toBe('acct_existing_ca_456');
-      expect(user?.stripeAccountCountry).toBe('CA');
     });
 
-    it('reconnect: true creates a new account with the requested country', async () => {
-      // Existing account with CA
+    it('allows reconnect: true only when existing account is confirmed invalid/inaccessible in Stripe', async () => {
       await prisma.user.update({
         where: { id: organizerUserId },
         data: {
-          stripeAccountId: 'acct_old_ca',
-          stripeAccountCountry: 'CA',
+          stripeAccountId: 'acct_old_broken_us',
+          stripeAccountCountry: 'US',
         },
       });
 
+      vi.spyOn(stripe.accounts, 'retrieve').mockRejectedValueOnce({
+        type: 'StripeInvalidRequestError',
+        code: 'resource_missing',
+        message: 'No such account: acct_old_broken_us',
+        statusCode: 404,
+      });
+
       const createAccountSpy = vi.spyOn(stripe.accounts, 'create').mockResolvedValueOnce({
-        id: 'acct_new_de_789',
-        country: 'DE',
+        id: 'acct_new_us_789',
+        country: 'US',
+        default_currency: 'usd',
       } as any);
 
       vi.spyOn(stripe.accountLinks, 'create').mockResolvedValueOnce({
@@ -299,85 +259,45 @@ describe('Stripe Connect Express Country Selection & Validation', () => {
       const res = await request(app)
         .post('/api/organizer/finance/onboarding-link')
         .set('Authorization', `Bearer ${organizerToken}`)
-        .send({ reconnect: true, country: 'DE' });
-
-      expect(res.status).toBe(200);
-      expect(createAccountSpy).toHaveBeenCalledWith(
-        expect.objectContaining({
-          country: 'DE',
-        })
-      );
-
-      const user = await prisma.user.findUnique({ where: { id: organizerUserId } });
-      expect(user?.stripeAccountId).toBe('acct_new_de_789');
-      expect(user?.stripeAccountCountry).toBe('DE');
-    });
-
-    it('reconnect: true without country falls back to original persisted country', async () => {
-      await prisma.user.update({
-        where: { id: organizerUserId },
-        data: {
-          stripeAccountId: 'acct_old_nz',
-          stripeAccountCountry: 'NZ',
-        },
-      });
-
-      const createAccountSpy = vi.spyOn(stripe.accounts, 'create').mockResolvedValueOnce({
-        id: 'acct_new_nz_999',
-        country: 'NZ',
-      } as any);
-
-      vi.spyOn(stripe.accountLinks, 'create').mockResolvedValueOnce({
-        url: 'https://connect.stripe.com/setup/s/reconnect_nz',
-        created: Math.floor(Date.now() / 1000),
-        expires_at: Math.floor(Date.now() / 1000) + 300,
-        object: 'account_link',
-      } as any);
-
-      const res = await request(app)
-        .post('/api/organizer/finance/onboarding-link')
-        .set('Authorization', `Bearer ${organizerToken}`)
         .send({ reconnect: true });
 
       expect(res.status).toBe(200);
       expect(createAccountSpy).toHaveBeenCalledWith(
-        expect.objectContaining({
-          country: 'NZ',
-        })
+        expect.objectContaining({ country: 'US' }),
+        expect.anything()
       );
 
       const user = await prisma.user.findUnique({ where: { id: organizerUserId } });
-      expect(user?.stripeAccountId).toBe('acct_new_nz_999');
-      expect(user?.stripeAccountCountry).toBe('NZ');
+      expect(user?.stripeAccountId).toBe('acct_new_us_789');
+      expect(user?.stripeAccountCountry).toBe('US');
     });
   });
 
-  describe('5. Status Endpoint Country Reporting (GET /api/organizer/finance/account)', () => {
-    it('returns the connected account country and supported countries list', async () => {
+  describe('4. Status Endpoint & Stripe Country Rejection Handling', () => {
+    it('returns US country and US-only supportedCountries in /api/organizer/finance/account', async () => {
       await prisma.user.update({
         where: { id: organizerUserId },
         data: {
-          stripeAccountId: 'acct_verified_au',
-          stripeAccountCountry: 'AU',
+          stripeAccountId: 'acct_verified_us',
+          stripeAccountCountry: 'US',
         },
       });
 
       vi.spyOn(stripe.accounts, 'retrieve').mockResolvedValueOnce({
-        id: 'acct_verified_au',
+        id: 'acct_verified_us',
         charges_enabled: true,
         payouts_enabled: true,
         details_submitted: true,
-        country: 'AU',
-        default_currency: 'aud',
+        country: 'US',
+        default_currency: 'usd',
+        capabilities: { card_payments: 'active', transfers: 'active' },
         requirements: {
           currently_due: [],
           eventually_due: [],
           past_due: [],
           disabled_reason: null,
         },
-        external_accounts: {
-          data: [],
-        },
+        external_accounts: { data: [] },
       } as any);
 
       const res = await request(app)
@@ -385,35 +305,13 @@ describe('Stripe Connect Express Country Selection & Validation', () => {
         .set('Authorization', `Bearer ${organizerToken}`);
 
       expect(res.status).toBe(200);
-      expect(res.body.success).toBe(true);
       expect(res.body.data.connected).toBe(true);
-      expect(res.body.data.country).toBe('AU');
-      expect(Array.isArray(res.body.data.supportedCountries)).toBe(true);
-      expect(res.body.data.supportedCountries.length).toBe(STRIPE_EXPRESS_SUPPORTED_COUNTRIES.length);
+      expect(res.body.data.country).toBe('US');
+      expect(res.body.data.supportedCountries).toEqual([{ code: 'US', name: 'United States' }]);
     });
 
-    it('returns persisted country in disconnected status when account was reset', async () => {
-      await prisma.user.update({
-        where: { id: organizerUserId },
-        data: {
-          stripeAccountId: null,
-          stripeAccountCountry: 'FR',
-        },
-      });
-
-      const res = await request(app)
-        .get('/api/organizer/finance/account')
-        .set('Authorization', `Bearer ${organizerToken}`);
-
-      expect(res.status).toBe(200);
-      expect(res.body.data.connected).toBe(false);
-      expect(res.body.data.country).toBe('FR');
-      expect(Array.isArray(res.body.data.supportedCountries)).toBe(true);
-    });
-  });
-
-  describe('6. Error Handling for Stripe Country Rejections', () => {
-    it('gracefully handles Stripe country_unsupported rejection', async () => {
+    it('gracefully handles Stripe country_unsupported rejection when expanded via config', async () => {
+      process.env.STRIPE_CONNECT_SUPPORTED_COUNTRIES = 'US,CH';
       const stripeErr: any = new Error(
         'The country is not supported for Express accounts on this platform.'
       );

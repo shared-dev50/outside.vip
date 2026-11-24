@@ -29,50 +29,116 @@ export async function handleStripeWebhook(req: Request, res: Response): Promise<
     return;
   }
 
-  let event: Stripe.Event;
+  const platformSecret = (process.env.STRIPE_WEBHOOK_SECRET ?? env.STRIPE_WEBHOOK_SECRET ?? '').trim();
+  const rawConnectSecret = (
+    process.env.STRIPE_CONNECT_WEBHOOK_SECRET ??
+    env.STRIPE_CONNECT_WEBHOOK_SECRET ??
+    ''
+  ).trim();
+  const connectSecret =
+    rawConnectSecret && rawConnectSecret !== platformSecret ? rawConnectSecret : '';
 
+  let parsedEnvelope: { account?: unknown } | null = null;
   try {
-    event = stripe.webhooks.constructEvent(
-      req.rawBody,
-      signature,
-      env.STRIPE_WEBHOOK_SECRET
-    );
-  } catch (err: any) {
-    const connectSecret = process.env.STRIPE_CONNECT_WEBHOOK_SECRET;
-    if (connectSecret) {
-      try {
-        event = stripe.webhooks.constructEvent(
-          req.rawBody,
-          signature,
-          connectSecret
-        );
-      } catch (connectErr: any) {
-        res.status(400).json({
-          success: false,
-          error: {
-            message: `Webhook signature verification failed: ${err.message}`,
-            statusCode: 400,
-          },
-        });
-        return;
-      }
-    } else {
-      if (env.STRIPE_WEBHOOK_SECRET === 'whsec_placeholder') {
-        console.warn(
-          'Webhook signature verification failed: STRIPE_WEBHOOK_SECRET is set to placeholder "whsec_placeholder". Update STRIPE_WEBHOOK_SECRET in server/.env with the signing secret from "stripe listen" or Stripe Dashboard.'
-        );
-      } else {
-        console.error('Webhook signature verification failed:', err.message);
-      }
+    const rawText = Buffer.isBuffer(req.rawBody)
+      ? req.rawBody.toString('utf8')
+      : String(req.rawBody);
+    parsedEnvelope = JSON.parse(rawText) as { account?: unknown };
+  } catch {
+    res.status(400).json({
+      success: false,
+      error: {
+        message: 'Invalid webhook payload JSON',
+        statusCode: 400,
+      },
+    });
+    return;
+  }
+
+  const envelopeAccount =
+    typeof parsedEnvelope?.account === 'string' ? parsedEnvelope.account.trim() : '';
+  const isConnectScopedEvent = envelopeAccount.length > 0;
+
+  let event: Stripe.Event | null = null;
+  let lastErrorMessage = 'Invalid signature';
+
+  if (isConnectScopedEvent) {
+    // Connected-account events MUST ONLY be verified using an independent STRIPE_CONNECT_WEBHOOK_SECRET.
+    if (!connectSecret || connectSecret === 'whsec_placeholder') {
+      console.error(
+        'Webhook signature verification failed: connected-account event received without independent STRIPE_CONNECT_WEBHOOK_SECRET.'
+      );
       res.status(400).json({
         success: false,
         error: {
-          message: `Webhook signature verification failed: ${err.message}`,
+          message:
+            'Webhook signature verification failed: connected-account webhook signing secret is not configured independently',
           statusCode: 400,
         },
       });
       return;
     }
+
+    try {
+      event = stripe.webhooks.constructEvent(req.rawBody, signature, connectSecret);
+    } catch (connectErr: any) {
+      lastErrorMessage = connectErr?.message || 'Signature verification failed';
+    }
+  } else {
+    // Platform events (!event.account) MUST ONLY be verified using STRIPE_WEBHOOK_SECRET.
+    const canVerifyPlatformInCurrentEnv =
+      Boolean(platformSecret) &&
+      (platformSecret !== 'whsec_placeholder' || process.env.NODE_ENV === 'test');
+
+    if (!canVerifyPlatformInCurrentEnv) {
+      console.warn(
+        'Webhook signature verification failed: STRIPE_WEBHOOK_SECRET is unset or set to placeholder.'
+      );
+      res.status(400).json({
+        success: false,
+        error: {
+          message: 'Webhook signature verification failed: platform webhook signing secret is unavailable',
+          statusCode: 400,
+        },
+      });
+      return;
+    }
+
+    try {
+      event = stripe.webhooks.constructEvent(req.rawBody, signature, platformSecret);
+    } catch (err: any) {
+      lastErrorMessage = err?.message || 'Signature verification failed';
+    }
+  }
+
+  if (!event) {
+    console.error(
+      `Webhook signature verification failed for ${isConnectScopedEvent ? 'connect' : 'platform'} event.`
+    );
+
+    res.status(400).json({
+      success: false,
+      error: {
+        message: `Webhook signature verification failed: ${lastErrorMessage}`,
+        statusCode: 400,
+      },
+    });
+    return;
+  }
+
+  const verifiedAccount =
+    typeof (event as any).account === 'string' ? (event as any).account.trim() : '';
+  const verifiedIsConnectEvent = verifiedAccount.length > 0;
+  if (verifiedIsConnectEvent !== isConnectScopedEvent) {
+    console.error('Webhook scope verification mismatch between payload envelope and verified Stripe event.');
+    res.status(400).json({
+      success: false,
+      error: {
+        message: 'Webhook signature verification failed: event scope mismatch',
+        statusCode: 400,
+      },
+    });
+    return;
   }
 
   try {

@@ -302,7 +302,7 @@ export interface StripeConnectedAccountStatus {
     monthlyAnchor: number | null;
   } | null;
   externalAccounts: SanitizedExternalAccount[];
-  defaultCurrency: string;
+  defaultCurrency: string | null;
   country: string | null;
   supportedCountries?: StripeConnectCountry[];
 }
@@ -335,8 +335,10 @@ export interface OrganizerTransferItem {
   transferNumber: string;
   stripeTransferId: string | null;
   amountInCents: number;
+  reversedAmountInCents?: number;
   currency: string;
   status: 'PENDING' | 'SUCCEEDED' | 'FAILED' | 'REVERSED';
+  reconciliationRequired?: boolean;
   sourceType: 'MANUAL_ORGANIZER_REQUEST' | 'ADMIN_INITIATED' | 'AUTOMATIC_SCHEDULED';
   failureCode: string | null;
   failureMessage: string | null;
@@ -373,8 +375,13 @@ export interface WithdrawalResponse {
   transferNumber: string;
   stripeTransferId: string | null;
   amountInCents: number;
+  reversedAmountInCents?: number;
   currency: string;
   status: string;
+  reconciliationRequired?: boolean;
+  retryable?: boolean;
+  idempotencyKey?: string;
+  message?: string;
   sourceType: string;
   remainingAvailableInCents: number;
   transferredInCents: number;

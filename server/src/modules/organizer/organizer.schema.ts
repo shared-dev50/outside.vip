@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { EventCategory, EventStatus, TicketTierStatus, RecurrenceFrequency, EventFeatureType, OrderStatus } from '@prisma/client';
 import { extractYouTubeVideoId } from '../../utils/youtube.js';
 import { calculateGrossPriceFromDisplay } from '../checkout/checkout.financials.js';
+import { isSupportedPlatformCurrency } from '../finance/stripeCountries.js';
 
 export const galleryImageInputSchema = z.object({
   id: z.string().optional(),
@@ -42,7 +43,13 @@ export const ticketTierInputSchema = z
     description: z.string().optional().nullable(),
     priceInCents: z.number().int().min(0, 'Price must be 0 or greater').optional(),
     displayPriceInCents: z.number().int().min(0, 'Display price must be 0 or greater').optional().nullable(),
-    currency: z.string().default('USD'),
+    currency: z
+      .string()
+      .default('USD')
+      .transform((v) => v.trim().toUpperCase())
+      .refine((v) => isSupportedPlatformCurrency(v), {
+        message: 'Only USD currency is currently supported for ticket tiers.',
+      }),
     totalCapacity: z.number().int().min(1, 'Capacity must be at least 1'),
     minPerOrder: z.number().int().min(1, 'Min per order must be at least 1').default(1),
     maxPerOrder: z.number().int().min(1, 'Max per order must be at least 1').default(10),

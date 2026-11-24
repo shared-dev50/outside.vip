@@ -35,3 +35,14 @@ export const adminWithdrawFundsSchema = z.object({
   idempotencyKey: z.string().min(1).max(100).optional(),
   notes: z.string().max(255).optional(),
 });
+
+export const adminReplaceConnectedAccountSchema = z.object({
+  organizerId: z.string().uuid('Valid organizer user ID is required.'),
+  country: z
+    .string()
+    .trim()
+    .toUpperCase()
+    .length(2, 'Country must be a 2-letter ISO 3166-1 alpha-2 code.')
+    .optional(),
+  reason: z.string().trim().min(5, 'An audit reason (minimum 5 characters) is required.').max(500),
+});

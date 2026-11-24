@@ -899,6 +899,8 @@ describe('Stage 2: Stripe Settlement Reliability, Pre-Settlement Refunds, Lockin
 
       vi.spyOn(stripe.accounts, 'retrieve').mockResolvedValue({
         id: organizer.stripeAccountId,
+        country: 'US',
+        default_currency: 'usd',
         payouts_enabled: true,
         charges_enabled: true,
         details_submitted: true,
@@ -1722,6 +1724,8 @@ describe('Stage 2: Stripe Settlement Reliability, Pre-Settlement Refunds, Lockin
 
       vi.spyOn(stripe.accounts, 'retrieve').mockResolvedValue({
         id: organizer.stripeAccountId,
+        country: 'US',
+        default_currency: 'usd',
         payouts_enabled: true,
         charges_enabled: true,
         details_submitted: true,
@@ -1880,6 +1884,8 @@ describe('Stage 2: Stripe Settlement Reliability, Pre-Settlement Refunds, Lockin
       await settlePendingOrder(o1.id, `ch_rl_1_${nanoid(6)}`);
       vi.spyOn(stripe.accounts, 'retrieve').mockResolvedValue({
         id: organizer.stripeAccountId,
+        country: 'US',
+        default_currency: 'usd',
         payouts_enabled: true,
         charges_enabled: true,
         details_submitted: true,

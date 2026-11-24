@@ -3,6 +3,8 @@ import { Prisma, LedgerEntryType, LedgerBalanceType, PaymentProvider, StripeSett
 import type Stripe from 'stripe';
 import { prisma } from '../../db/prisma.js';
 import { calculateCheckoutFeeBreakdown } from '../checkout/checkout.financials.js';
+import { BadRequestError } from '../../utils/errors.js';
+import { isSupportedPlatformCurrency } from './stripeCountries.js';
 
 export interface RecordTicketSaleParams {
   orderId: string;
@@ -45,6 +47,14 @@ export async function getOrCreateOrganizerBalance(
   userId: string,
   currency = 'USD'
 ) {
+  const normalizedCurrency = currency.trim().toUpperCase();
+  if (!isSupportedPlatformCurrency(normalizedCurrency)) {
+    throw new BadRequestError(
+      `Unsupported organizer balance currency '${normalizedCurrency}'. Only USD is currently supported.`,
+      'UNSUPPORTED_CURRENCY'
+    );
+  }
+
   await tx.$executeRaw`
     INSERT INTO "OrganizerBalance" (
       id,
@@ -62,7 +72,7 @@ export async function getOrCreateOrganizerBalance(
       0,
       0,
       0,
-      ${currency.toUpperCase()},
+      ${normalizedCurrency},
       (NOW() AT TIME ZONE 'UTC'),
       (NOW() AT TIME ZONE 'UTC')
     )
@@ -99,6 +109,13 @@ export async function getOrCreateOrganizerBalance(
     throw new Error(`OrganizerBalance record missing after upsert for user ${userId}`);
   }
 
+  if (locked[0].currency.toUpperCase() !== normalizedCurrency) {
+    throw new BadRequestError(
+      `Currency mismatch on organizer balance: expected ${locked[0].currency.toUpperCase()}, got ${normalizedCurrency}.`,
+      'CURRENCY_MISMATCH'
+    );
+  }
+
   return locked[0];
 }
 
@@ -121,6 +138,13 @@ export async function recordTicketSalePending(
 
   if (!order) {
     throw new Error(`Order ${orderId} not found for ledger recording.`);
+  }
+
+  if (!isSupportedPlatformCurrency(order.currency)) {
+    throw new BadRequestError(
+      `Unsupported order currency '${order.currency}' for organizer ledger. Only USD is supported.`,
+      'UNSUPPORTED_CURRENCY'
+    );
   }
 
   const organizerId = order.event.organizerId;

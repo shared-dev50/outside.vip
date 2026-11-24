@@ -183,6 +183,9 @@ describe('Outside.vip Stripe Connect Finance & Account Dashboard API', () => {
             card_payments: { requested: true },
             transfers: { requested: true },
           },
+        }),
+        expect.objectContaining({
+          idempotencyKey: expect.stringMatching(/^acct_create_/),
         })
       );
       expect(createLinkSpy).toHaveBeenCalledWith(
@@ -351,6 +354,8 @@ describe('Outside.vip Stripe Connect Finance & Account Dashboard API', () => {
       vi.spyOn(stripe.accounts, 'retrieve').mockResolvedValueOnce({
         id: mockAcctId,
         object: 'account',
+        country: 'US',
+        default_currency: 'usd',
         details_submitted: false,
         charges_enabled: false,
         payouts_enabled: false,
@@ -625,6 +630,8 @@ describe('Outside.vip Stripe Connect Finance & Account Dashboard API', () => {
       const retrieveSpy = vi.spyOn(stripe.accounts, 'retrieve').mockResolvedValue({
         id: org2Acct,
         object: 'account',
+        country: 'US',
+        default_currency: 'usd',
         capabilities: { card_payments: 'active', transfers: 'active' },
         charges_enabled: true,
         payouts_enabled: true,
@@ -866,6 +873,9 @@ describe('Outside.vip Stripe Connect Finance & Account Dashboard API', () => {
         expect.objectContaining({
           type: 'express',
           metadata: expect.objectContaining({ userId: organizerUserId }),
+        }),
+        expect.objectContaining({
+          idempotencyKey: expect.stringMatching(/^acct_create_/),
         })
       );
       expect(createLinkSpy).toHaveBeenCalledWith(

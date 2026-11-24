@@ -280,7 +280,7 @@ describe('Stripe Readiness Stage 1: Finance Authorization, Dispute Isolation & T
     });
     orderB1Id = oB1.id;
     createdOrderIds.push(orderB1Id);
-  });
+  }, 30000);
 
   afterEach(() => {
     vi.restoreAllMocks();

@@ -22,6 +22,7 @@ import { stripe } from '../../lib/stripe.js';
 import { env } from '../../config/env.js';
 import { isTicketTierHidden, isTicketTierSalesDisabled } from '../../utils/ticketTierState.js';
 import {
+  getOrCreateOrganizerBalance,
   hasOpenDisputeForOrder,
   recordTicketSalePending,
   settleOrderEarnings,
@@ -30,6 +31,11 @@ import {
   recordRefundLedger,
   recordDisputeLedger,
 } from '../finance/ledger.service.js';
+import {
+  emitTransferCriticalAlert,
+  finalizeTransferSucceededInTx,
+  sanitizeTransferDiagnosticMessage,
+} from '../finance/transferReconciliation.service.js';
 import { logStripeDiagnostic } from '../finance/stripeError.js';
 import {
   classifyStripeSettlementRetrievalError,
@@ -227,7 +233,18 @@ export async function processStripeWebhookEvent(
 
           case 'account.updated': {
             const account = event.data.object as Stripe.Account;
-            await handleAccountUpdated(tx, account);
+            await handleAccountUpdated(tx, account, event.created);
+            break;
+          }
+
+          case 'capability.updated': {
+            const capability = event.data.object as Stripe.Capability;
+            const stripeAccountId =
+              ((event as any).account as string | undefined) ||
+              (typeof capability.account === 'string'
+                ? capability.account
+                : capability.account?.id);
+            await handleCapabilityUpdated(tx, capability, stripeAccountId, event.created);
             break;
           }
 
@@ -1719,81 +1736,214 @@ async function handleTransferEvent(
   eventType: string,
   transfer: Stripe.Transfer
 ): Promise<void> {
-  if (eventType === 'transfer.reversed') {
-    // Lock OrganizerTransfer FOR UPDATE first before checking status, then OrganizerBalance
-    const lockedTransfers = await tx.$queryRaw<
+  const destId =
+    typeof transfer.destination === 'string'
+      ? transfer.destination
+      : (transfer.destination as Stripe.Account | null)?.id || null;
+  const metaTransferId = transfer.metadata?.transferId || null;
+  const transferGroup = transfer.transfer_group || transfer.metadata?.transferNumber || null;
+
+  // Lock OrganizerTransfer FOR UPDATE first: lookup by stripeTransferId, then durable metadata/transfer_group fallback
+  let lockedTransfers = await tx.$queryRaw<
+    Array<{
+      id: string;
+      organizerId: string;
+      stripeAccountId: string;
+      status: TransferStatus;
+      amountInCents: number;
+      reversedAmountInCents: number;
+      currency: string;
+      transferNumber: string;
+      stripeTransferId: string | null;
+    }>
+  >`
+    SELECT id, "organizerId", "stripeAccountId", status, "amountInCents", "reversedAmountInCents", currency, "transferNumber", "stripeTransferId"
+    FROM "OrganizerTransfer"
+    WHERE "stripeTransferId" = ${transfer.id}
+    FOR UPDATE
+  `;
+
+  if (!lockedTransfers[0] && (metaTransferId || transferGroup)) {
+    lockedTransfers = await tx.$queryRaw<
       Array<{
         id: string;
         organizerId: string;
+        stripeAccountId: string;
         status: TransferStatus;
         amountInCents: number;
+        reversedAmountInCents: number;
         currency: string;
         transferNumber: string;
+        stripeTransferId: string | null;
       }>
     >`
-      SELECT id, "organizerId", status, "amountInCents", currency, "transferNumber"
+      SELECT id, "organizerId", "stripeAccountId", status, "amountInCents", "reversedAmountInCents", currency, "transferNumber", "stripeTransferId"
       FROM "OrganizerTransfer"
-      WHERE "stripeTransferId" = ${transfer.id}
+      WHERE (
+        (${metaTransferId}::text IS NOT NULL AND id = ${metaTransferId})
+        OR (${metaTransferId}::text IS NULL AND ${transferGroup}::text IS NOT NULL AND "transferNumber" = ${transferGroup})
+      )
+      AND "amountInCents" = ${transfer.amount}
+      AND UPPER(currency) = ${String(transfer.currency || 'USD').toUpperCase()}
+      ${destId ? Prisma.sql`AND "stripeAccountId" = ${destId}` : Prisma.empty}
       FOR UPDATE
     `;
-    const existing = lockedTransfers[0];
-
-    if (existing && existing.status !== TransferStatus.REVERSED) {
-      await tx.$queryRaw`
-        SELECT id FROM "OrganizerBalance" WHERE "userId" = ${existing.organizerId} FOR UPDATE
-      `;
-
-      await tx.organizerTransfer.update({
-        where: { id: existing.id },
-        data: { status: TransferStatus.REVERSED },
-      });
-
-      // Restore organizer balance: decrement transferred balance, increment available balance
-      await tx.organizerBalance.update({
-        where: { userId: existing.organizerId },
-        data: {
-          transferredBalanceInCents: { decrement: existing.amountInCents },
-          availableBalanceInCents: { increment: existing.amountInCents },
-        },
-      });
-
-      await tx.financialLedgerEntry.create({
-        data: {
-          type: LedgerEntryType.ADJUSTMENT,
-          balanceType: LedgerBalanceType.TRANSFERRED,
-          amountInCents: -existing.amountInCents,
-          currency: existing.currency.toUpperCase(),
-          organizerId: existing.organizerId,
-          transferId: existing.id,
-          stripeReferenceId: transfer.id,
-          description: `Stripe transfer reversed for transfer #${existing.transferNumber}`,
-          metadata: {
-            transferId: existing.id,
-            transferNumber: existing.transferNumber,
-            stripeTransferId: transfer.id,
-          },
-        },
-      });
-
-      await tx.financialLedgerEntry.create({
-        data: {
-          type: LedgerEntryType.ADJUSTMENT,
-          balanceType: LedgerBalanceType.AVAILABLE,
-          amountInCents: existing.amountInCents,
-          currency: existing.currency.toUpperCase(),
-          organizerId: existing.organizerId,
-          transferId: existing.id,
-          stripeReferenceId: transfer.id,
-          description: `Restored available balance for reversed transfer #${existing.transferNumber}`,
-          metadata: {
-            transferId: existing.id,
-            transferNumber: existing.transferNumber,
-            stripeTransferId: transfer.id,
-          },
-        },
-      });
-    }
   }
+
+  let existing = lockedTransfers[0];
+  if (!existing) {
+    return;
+  }
+
+  const webhookAmount = transfer.amount;
+  const webhookCurrency = String(transfer.currency || '').trim().toUpperCase();
+  const existingCurrency = existing.currency.trim().toUpperCase();
+  if (
+    typeof webhookAmount !== 'number' ||
+    webhookAmount !== existing.amountInCents ||
+    !webhookCurrency ||
+    webhookCurrency !== existingCurrency
+  ) {
+    emitTransferCriticalAlert({
+      transferId: existing.id,
+      transferNumber: existing.transferNumber,
+      organizerId: existing.organizerId,
+      stripeTransferId: transfer.id,
+      code: 'TRANSFER_AMOUNT_CURRENCY_MISMATCH',
+      message: `Webhook ${eventType} amount/currency (${String(webhookAmount)} ${webhookCurrency || 'UNKNOWN'}) mismatches local transfer #${existing.transferNumber} (${existing.amountInCents} ${existingCurrency}).`,
+    });
+    return;
+  }
+
+  // Reconcile pending/ambiguous transfers when transfer.created arrives (or if transfer.updated/reversed beats API commit)
+  if (existing.status === TransferStatus.PENDING) {
+    const finalized = await finalizeTransferSucceededInTx(tx, {
+      transferId: existing.id,
+      stripeTransfer: transfer,
+    });
+    if (
+      finalized.outcome === 'conflictAfterFailure' ||
+      finalized.outcome === 'amountCurrencyMismatch' ||
+      !finalized.transfer
+    ) {
+      return;
+    }
+    existing = {
+      ...existing,
+      status: finalized.transfer.status,
+      stripeTransferId: finalized.transfer.stripeTransferId,
+      reversedAmountInCents: finalized.transfer.reversedAmountInCents ?? 0,
+    };
+  }
+
+  if (existing.status === TransferStatus.FAILED) {
+    return;
+  }
+
+  // Reversal handling for both transfer.reversed and transfer.updated
+  const rawAmountReversed = (transfer as any).amount_reversed;
+  const hasNumericAmountReversed =
+    typeof rawAmountReversed === 'number' && Number.isFinite(rawAmountReversed);
+
+  let authoritativeCumulativeReversed: number;
+  if (hasNumericAmountReversed) {
+    authoritativeCumulativeReversed = Math.max(
+      0,
+      Math.min(existing.amountInCents, Math.trunc(rawAmountReversed))
+    );
+  } else if (eventType === 'transfer.reversed') {
+    // Explicit legacy fixture compatibility: older tests send { id, amount, currency } without amount_reversed
+    authoritativeCumulativeReversed =
+      (transfer as any).reversed === false ? 0 : existing.amountInCents;
+  } else if (eventType === 'transfer.updated' && (transfer as any).reversed === true) {
+    authoritativeCumulativeReversed = existing.amountInCents;
+  } else {
+    return;
+  }
+
+  const prevReversed = Math.max(0, existing.reversedAmountInCents ?? 0);
+  const delta = Math.min(
+    authoritativeCumulativeReversed - prevReversed,
+    existing.amountInCents - prevReversed
+  );
+
+  // Ignore duplicates, zero-delta updates, and out-of-order stale smaller cumulative events
+  if (delta <= 0) {
+    return;
+  }
+
+  const newCumulativeReversed = prevReversed + delta;
+  const reversalStepKey = `tr_rev_${existing.id}_${prevReversed}_${newCumulativeReversed}`;
+
+  // Canonical lock order preserved: OrganizerTransfer was locked above; now lock OrganizerBalance FOR UPDATE
+  await getOrCreateOrganizerBalance(tx, existing.organizerId, existing.currency);
+
+  await tx.organizerTransfer.update({
+    where: { id: existing.id },
+    data: {
+      reversedAmountInCents: newCumulativeReversed,
+      status:
+        newCumulativeReversed >= existing.amountInCents
+          ? TransferStatus.REVERSED
+          : TransferStatus.SUCCEEDED,
+    },
+  });
+
+  // Restore exact reversal delta: decrement transferred balance, increment available balance
+  await tx.organizerBalance.update({
+    where: { userId: existing.organizerId },
+    data: {
+      transferredBalanceInCents: { decrement: delta },
+      availableBalanceInCents: { increment: delta },
+    },
+  });
+
+  const isPartial = newCumulativeReversed < existing.amountInCents;
+  const revLabel = isPartial ? 'partially reversed' : 'reversed';
+
+  await tx.financialLedgerEntry.create({
+    data: {
+      type: LedgerEntryType.ADJUSTMENT,
+      balanceType: LedgerBalanceType.TRANSFERRED,
+      amountInCents: -delta,
+      currency: existing.currency.toUpperCase(),
+      organizerId: existing.organizerId,
+      transferId: existing.id,
+      stripeReferenceId: transfer.id,
+      description: `Stripe transfer ${revLabel} ($${(delta / 100).toFixed(2)}, cumulative $${(newCumulativeReversed / 100).toFixed(2)}) for transfer #${existing.transferNumber}`,
+      metadata: {
+        transferId: existing.id,
+        transferNumber: existing.transferNumber,
+        stripeTransferId: transfer.id,
+        reversalStepKey,
+        previousReversedAmountInCents: prevReversed,
+        cumulativeReversedAmountInCents: newCumulativeReversed,
+        deltaInCents: delta,
+      },
+    },
+  });
+
+  await tx.financialLedgerEntry.create({
+    data: {
+      type: LedgerEntryType.ADJUSTMENT,
+      balanceType: LedgerBalanceType.AVAILABLE,
+      amountInCents: delta,
+      currency: existing.currency.toUpperCase(),
+      organizerId: existing.organizerId,
+      transferId: existing.id,
+      stripeReferenceId: transfer.id,
+      description: `Restored available balance ($${(delta / 100).toFixed(2)}) for ${revLabel} transfer #${existing.transferNumber}`,
+      metadata: {
+        transferId: existing.id,
+        transferNumber: existing.transferNumber,
+        stripeTransferId: transfer.id,
+        reversalStepKey,
+        previousReversedAmountInCents: prevReversed,
+        cumulativeReversedAmountInCents: newCumulativeReversed,
+        deltaInCents: delta,
+      },
+    },
+  });
 }
 
 async function handlePayoutEvent(
@@ -1858,14 +2008,78 @@ async function handlePayoutEvent(
 
 async function handleAccountUpdated(
   tx: Prisma.TransactionClient,
-  account: Stripe.Account
+  account: Stripe.Account,
+  eventCreated?: number
 ): Promise<void> {
-  const user = await tx.user.findUnique({
-    where: { stripeAccountId: account.id },
-  });
+  const lockedUsers = await tx.$queryRaw<
+    Array<{
+      id: string;
+      stripeAccountCountry: string | null;
+      stripeAccountEventCreatedAt: number | null;
+      stripeAccountCapabilities: Prisma.JsonValue | null;
+    }>
+  >`
+    SELECT id, "stripeAccountCountry", "stripeAccountEventCreatedAt", "stripeAccountCapabilities"
+    FROM "User"
+    WHERE "stripeAccountId" = ${account.id}
+    FOR UPDATE
+  `;
+  const user = lockedUsers[0];
 
   if (!user) {
     return;
+  }
+
+  // Prevent stale out-of-order webhooks from overwriting newer capability or restriction state
+  const isStaleEvent =
+    typeof eventCreated === 'number' &&
+    typeof user.stripeAccountEventCreatedAt === 'number' &&
+    eventCreated < user.stripeAccountEventCreatedAt;
+
+  if (!isStaleEvent) {
+    const existingCaps =
+      user.stripeAccountCapabilities && typeof user.stripeAccountCapabilities === 'object'
+        ? (user.stripeAccountCapabilities as Record<string, string>)
+        : {};
+    const incomingCaps = account.capabilities
+      ? {
+          ...existingCaps,
+          ...(account.capabilities.transfers ? { transfers: account.capabilities.transfers } : {}),
+          ...(account.capabilities.card_payments
+            ? { card_payments: account.capabilities.card_payments }
+            : {}),
+        }
+      : existingCaps;
+
+    const transfersCap =
+      account.capabilities?.transfers ??
+      (incomingCaps.transfers || null);
+
+    await tx.user.update({
+      where: { id: user.id },
+      data: {
+        ...(account.country ? { stripeAccountCountry: account.country.toUpperCase() } : {}),
+        ...(account.default_currency
+          ? { stripeAccountDefaultCurrency: account.default_currency.toUpperCase() }
+          : {}),
+        stripeAccountDetailsSubmitted: Boolean(account.details_submitted),
+        stripeAccountChargesEnabled: Boolean(account.charges_enabled),
+        stripeAccountPayoutsEnabled: Boolean(account.payouts_enabled),
+        stripeAccountTransfersCapability: transfersCap,
+        stripeAccountDisabledReason: account.requirements?.disabled_reason || null,
+        stripeAccountCapabilities: incomingCaps,
+        stripeAccountRequirements: {
+          currentlyDue: account.requirements?.currently_due || [],
+          pastDue: account.requirements?.past_due || [],
+          eventuallyDue: account.requirements?.eventually_due || [],
+          pendingVerification: account.requirements?.pending_verification || [],
+          disabledReason: account.requirements?.disabled_reason || null,
+        },
+        stripeAccountEventCreatedAt:
+          typeof eventCreated === 'number' ? eventCreated : user.stripeAccountEventCreatedAt,
+        stripeAccountSyncedAt: new Date(),
+      },
+    });
   }
 
   // If Stripe account has bank account, reflect safe masked details in OrganizerPayoutDetails
@@ -1873,7 +2087,7 @@ async function handleAccountUpdated(
     (e) => e.object === 'bank_account'
   ) as Stripe.BankAccount[];
 
-  if (bankAccounts.length > 0) {
+  if (bankAccounts.length > 0 && !isStaleEvent) {
     const defaultBank =
       bankAccounts.find((b) => (b as any).default_for_currency) || bankAccounts[0];
 
@@ -1902,5 +2116,92 @@ async function handleAccountUpdated(
         },
       });
     }
+  }
+}
+
+async function handleCapabilityUpdated(
+  tx: Prisma.TransactionClient,
+  capability: Stripe.Capability,
+  stripeAccountId?: string,
+  eventCreated?: number
+): Promise<void> {
+  if (!stripeAccountId) {
+    return;
+  }
+
+  const lockedUsers = await tx.$queryRaw<
+    Array<{
+      id: string;
+      stripeAccountEventCreatedAt: number | null;
+      stripeAccountCapabilities: Prisma.JsonValue | null;
+      stripeAccountDisabledReason: string | null;
+      stripeAccountRequirements: Prisma.JsonValue | null;
+    }>
+  >`
+    SELECT id, "stripeAccountEventCreatedAt", "stripeAccountCapabilities", "stripeAccountDisabledReason", "stripeAccountRequirements"
+    FROM "User"
+    WHERE "stripeAccountId" = ${stripeAccountId}
+    FOR UPDATE
+  `;
+  const user = lockedUsers[0];
+  if (!user) {
+    return;
+  }
+
+  if (
+    typeof eventCreated === 'number' &&
+    typeof user.stripeAccountEventCreatedAt === 'number' &&
+    eventCreated < user.stripeAccountEventCreatedAt
+  ) {
+    return;
+  }
+
+  const existingCaps =
+    user.stripeAccountCapabilities && typeof user.stripeAccountCapabilities === 'object'
+      ? { ...(user.stripeAccountCapabilities as Record<string, string>) }
+      : {};
+  existingCaps[capability.id] = capability.status;
+
+  const capReqs = capability.requirements;
+  const existingReqs =
+    user.stripeAccountRequirements && typeof user.stripeAccountRequirements === 'object'
+      ? { ...(user.stripeAccountRequirements as Record<string, any>) }
+      : {};
+
+  if (capReqs) {
+    existingReqs.currentlyDue = capReqs.currently_due || existingReqs.currentlyDue || [];
+    existingReqs.pastDue = capReqs.past_due || existingReqs.pastDue || [];
+    existingReqs.eventuallyDue = capReqs.eventually_due || existingReqs.eventuallyDue || [];
+    existingReqs.pendingVerification =
+      capReqs.pending_verification || existingReqs.pendingVerification || [];
+    existingReqs.disabledReason = capReqs.disabled_reason ?? null;
+  }
+
+  await tx.user.update({
+    where: { id: user.id },
+    data: {
+      stripeAccountCapabilities: existingCaps,
+      ...(capability.id === 'transfers'
+        ? { stripeAccountTransfersCapability: capability.status }
+        : {}),
+      ...(capReqs
+        ? {
+            stripeAccountDisabledReason: capReqs.disabled_reason ?? null,
+            stripeAccountRequirements: existingReqs,
+          }
+        : {}),
+      stripeAccountEventCreatedAt:
+        typeof eventCreated === 'number' ? eventCreated : user.stripeAccountEventCreatedAt,
+      stripeAccountSyncedAt: new Date(),
+    },
+  });
+
+  if (capability.id === 'transfers' && capability.status !== 'active') {
+    console.warn('[StripeConnect][CapabilityRestricted]', {
+      userId: user.id,
+      capability: capability.id,
+      status: capability.status,
+      disabledReason: sanitizeTransferDiagnosticMessage(capReqs?.disabled_reason || 'none'),
+    });
   }
 }

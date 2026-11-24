@@ -17,6 +17,11 @@ import {
   startSettlementRecoveryWorker,
   stopSettlementRecoveryWorker,
 } from './modules/finance/settlementRecoveryWorker.js';
+import {
+  TRANSFER_RECONCILIATION_POLL_INTERVAL_MS,
+  startTransferReconciliationWorker,
+  stopTransferReconciliationWorker,
+} from './modules/finance/transferReconciliationWorker.js';
 
 async function startServer() {
   try {
@@ -27,6 +32,7 @@ async function startServer() {
     startEmailOutboxWorker(EMAIL_OUTBOX_POLL_INTERVAL_MS);
     startOrderRefundWorker(ORDER_REFUND_POLL_INTERVAL_MS);
     startSettlementRecoveryWorker(SETTLEMENT_RECOVERY_POLL_INTERVAL_MS);
+    startTransferReconciliationWorker(TRANSFER_RECONCILIATION_POLL_INTERVAL_MS);
 
     const server = app.listen(env.PORT, () => {
       console.log(`🚀 Outside.vip API server listening on http://localhost:${env.PORT}`);
@@ -42,6 +48,7 @@ async function startServer() {
       await stopEmailOutboxWorker();
       await stopOrderRefundWorker();
       await stopSettlementRecoveryWorker();
+      await stopTransferReconciliationWorker();
       server.close(async () => {
         await prisma.$disconnect();
         console.log('✅ PostgreSQL disconnected. Process exited.');

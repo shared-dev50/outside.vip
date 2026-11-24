@@ -4,11 +4,17 @@ import { FormTicketTier } from './ticketCreation';
 export function isStripeReadyForPaidPublishing(
   status: StripeConnectedAccountStatus | null | undefined
 ): boolean {
+  const countryOk = Boolean(status?.country) && status!.country!.toUpperCase() === 'US';
+  const currencyOk =
+    Boolean(status?.defaultCurrency) && status!.defaultCurrency!.toUpperCase() === 'USD';
   return Boolean(
     status &&
-    status.connected &&
-    status.detailsSubmitted &&
-    status.transferBalance?.enabled
+      status.connected &&
+      status.detailsSubmitted &&
+      status.payoutsEnabled &&
+      status.transferBalance?.enabled &&
+      countryOk &&
+      currencyOk
   );
 }
 

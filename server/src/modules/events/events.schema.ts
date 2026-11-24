@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { EventCategory, EventStatus, TicketTierStatus } from '@prisma/client';
 import { calculateGrossPriceFromDisplay } from '../checkout/checkout.financials.js';
+import { isSupportedPlatformCurrency } from '../finance/stripeCountries.js';
 
 export const listEventsQuerySchema = z.object({
   search: z.string().optional(),
@@ -19,7 +20,13 @@ export const createTicketTierBaseSchema = z.object({
   description: z.string().optional(),
   priceInCents: z.number().int().min(0, 'Price must be 0 or positive').optional(),
   displayPriceInCents: z.number().int().min(0, 'Display price must be 0 or positive').optional().nullable(),
-  currency: z.string().default('USD'),
+  currency: z
+    .string()
+    .default('USD')
+    .transform((v) => v.trim().toUpperCase())
+    .refine((v) => isSupportedPlatformCurrency(v), {
+      message: 'Only USD currency is currently supported for ticket tiers.',
+    }),
   totalCapacity: z.number().int().min(1, 'Capacity must be at least 1'),
   minPerOrder: z.number().int().min(1).default(1),
   maxPerOrder: z.number().int().min(1).default(10),

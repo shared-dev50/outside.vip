@@ -508,7 +508,25 @@ describe('Stripe Onboarding Gate — Publish Flow UX Refinement', () => {
     expect(
       isStripeReadyForPaidPublishing({
         ...readyStripeStatus,
+        payoutsEnabled: false,
+      })
+    ).toBe(false);
+    expect(
+      isStripeReadyForPaidPublishing({
+        ...readyStripeStatus,
         transferBalance: { enabled: false, status: 'action_required', message: 'Pending' },
+      })
+    ).toBe(false);
+    expect(
+      isStripeReadyForPaidPublishing({
+        ...readyStripeStatus,
+        defaultCurrency: null,
+      })
+    ).toBe(false);
+    expect(
+      isStripeReadyForPaidPublishing({
+        ...readyStripeStatus,
+        country: null,
       })
     ).toBe(false);
 

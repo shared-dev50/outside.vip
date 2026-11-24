@@ -14,6 +14,7 @@ import {
   handleGetBalance,
   handleExecuteWithdrawal,
   handleAdminWithdrawal,
+  handleAdminReplaceConnectedAccount,
   handleGetTransfers,
   handleGetLedger,
   handleGetPayouts,
@@ -51,7 +52,18 @@ financeRouter.post(
   requireOrganizerOrAdmin,
   handleExecuteWithdrawal
 );
-financeRouter.post('/admin/withdraw', requireAdmin, handleAdminWithdrawal);
+financeRouter.post(
+  '/admin/withdraw',
+  requireFreshUserVerification,
+  requireAdmin,
+  handleAdminWithdrawal
+);
+financeRouter.post(
+  '/admin/replace-account',
+  requireFreshUserVerification,
+  requireAdmin,
+  handleAdminReplaceConnectedAccount
+);
 financeRouter.get('/transfers', requireOrganizerOrAdmin, handleGetTransfers);
 financeRouter.get('/ledger', requireOrganizerOrAdmin, handleGetLedger);
 financeRouter.get('/payouts', requireOrganizerOrAdmin, handleGetPayouts);

@@ -1,6 +1,7 @@
 import dotenv from 'dotenv';
 import path from 'path';
 import { z } from 'zod';
+import { validatePlatformCurrencyConfig } from '../modules/finance/stripeCountries.js';
 
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
@@ -32,6 +33,9 @@ const envSchema = z.object({
   STRIPE_SECRET_KEY: z.string().default('sk_test_placeholder'),
   STRIPE_PUBLISHABLE_KEY: z.string().default(''),
   STRIPE_WEBHOOK_SECRET: z.string().default('whsec_placeholder'),
+  STRIPE_CONNECT_WEBHOOK_SECRET: z.string().default(''),
+  STRIPE_CONNECT_SUPPORTED_COUNTRIES: z.string().default('US'),
+  PLATFORM_SUPPORTED_CURRENCIES: z.string().default('USD'),
   PLATFORM_COMMISSION_PERCENT: z
     .string()
     .default('5')
@@ -59,6 +63,39 @@ if (!parsed.success) {
   throw new Error('Environment variable validation failed');
 }
 
+validatePlatformCurrencyConfig(parsed.data.PLATFORM_SUPPORTED_CURRENCIES);
+
+export function validateStripeWebhookProductionConfig(config: {
+  NODE_ENV?: string;
+  STRIPE_WEBHOOK_SECRET?: string;
+  STRIPE_CONNECT_WEBHOOK_SECRET?: string;
+}): void {
+  if (config.NODE_ENV !== 'production') {
+    return;
+  }
+
+  const platformSecret = (config.STRIPE_WEBHOOK_SECRET || '').trim();
+  const connectSecret = (config.STRIPE_CONNECT_WEBHOOK_SECRET || '').trim();
+
+  if (!platformSecret || platformSecret === 'whsec_placeholder') {
+    throw new Error(
+      'FATAL: STRIPE_WEBHOOK_SECRET must be configured with a non-placeholder signing secret in production.'
+    );
+  }
+
+  if (!connectSecret || connectSecret === 'whsec_placeholder') {
+    throw new Error(
+      'FATAL: STRIPE_CONNECT_WEBHOOK_SECRET must be independently configured with a non-placeholder signing secret in production.'
+    );
+  }
+
+  if (connectSecret === platformSecret) {
+    throw new Error(
+      'FATAL: STRIPE_CONNECT_WEBHOOK_SECRET must be independently configured and distinct from STRIPE_WEBHOOK_SECRET in production.'
+    );
+  }
+}
+
 if (parsed.data.NODE_ENV === 'production') {
   if (
     !parsed.data.PROMOTION_ATTRIBUTION_HMAC_KEY ||
@@ -67,6 +104,7 @@ if (parsed.data.NODE_ENV === 'production') {
   ) {
     throw new Error('FATAL: PROMOTION_ATTRIBUTION_HMAC_KEY is required and must be at least 32 characters in production');
   }
+  validateStripeWebhookProductionConfig(parsed.data);
 }
 
 export const env = parsed.data;
