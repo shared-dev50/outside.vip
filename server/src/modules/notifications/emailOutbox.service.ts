@@ -12,6 +12,9 @@ import { prisma } from '../../db/prisma.js';
 import { normalizeEmail } from '../../config/env.js';
 import {
   buildOrderTicketAccessUrl,
+  BUYER_REFUND_TEMPLATE_VERSION,
+  BuyerRefundContentSnapshot,
+  BuyerRefundNotificationKind,
   EmailDeliveryError,
   LATE_PAYMENT_REFUND_TEMPLATE_VERSION,
   LatePaymentRefundContentSnapshot,
@@ -23,6 +26,7 @@ import {
   OrderConfirmationSnapshotItem,
   resolveEmailFrom,
   sanitizeEmailLogMessage,
+  sendBuyerRefundEmail,
   sendLatePaymentRefundEmail,
   sendOrderConfirmationEmail,
 } from '../../lib/email.service.js';
@@ -166,6 +170,89 @@ export async function enqueueLatePaymentRefundEmail(
     currency: params.snapshot.currency.toUpperCase(),
     buyerName: params.snapshot.buyerName,
     eventTitle: params.snapshot.eventTitle,
+    stripeRefundId: params.snapshot.stripeRefundId ?? null,
+    confirmedAtIso: params.snapshot.confirmedAtIso ?? null,
+    reasonSummary: params.snapshot.reasonSummary,
+  };
+
+  const result = await tx.emailOutbox.createMany({
+    data: [
+      {
+        dedupeKey,
+        type,
+        status: EmailOutboxStatus.PENDING,
+        orderId: params.orderId,
+        recipientEmail: normalizeEmail(params.recipientEmail),
+        idempotencyKey,
+        templateVersion: fullSnapshot.templateVersion,
+        contentSnapshot: fullSnapshot as unknown as Prisma.InputJsonValue,
+        attempts: 0,
+        maxAttempts: EMAIL_OUTBOX_MAX_ATTEMPTS,
+        nextAttemptAt: new Date(),
+      },
+    ],
+    skipDuplicates: true,
+  });
+
+    return {
+      enqueued: result.count > 0,
+      dedupeKey,
+      idempotencyKey,
+    };
+}
+
+export function buildBuyerRefundConfirmedDedupeKey(orderRefundId: string): string {
+  return `buyer_refund_confirmed:${orderRefundId}`;
+}
+
+export function buildBuyerRefundConfirmedIdempotencyKey(orderRefundId: string): string {
+  return `buyer-refund-confirmed:${orderRefundId}`;
+}
+
+export function buildBuyerRefundManualReviewDedupeKey(orderRefundId: string): string {
+  return `buyer_refund_manual_review:${orderRefundId}`;
+}
+
+export function buildBuyerRefundManualReviewIdempotencyKey(orderRefundId: string): string {
+  return `buyer-refund-manual-review:${orderRefundId}`;
+}
+
+export async function enqueueBuyerRefundEmail(
+  tx: Prisma.TransactionClient,
+  params: {
+    kind: BuyerRefundNotificationKind;
+    orderRefundId: string;
+    orderId: string | null;
+    recipientEmail: string;
+    snapshot: Omit<BuyerRefundContentSnapshot, 'templateVersion' | 'fromEmail'> & {
+      fromEmail?: string;
+    };
+  }
+): Promise<{ enqueued: boolean; dedupeKey: string; idempotencyKey: string }> {
+  const dedupeKey =
+    params.kind === 'CONFIRMED'
+      ? buildBuyerRefundConfirmedDedupeKey(params.orderRefundId)
+      : buildBuyerRefundManualReviewDedupeKey(params.orderRefundId);
+  const idempotencyKey =
+    params.kind === 'CONFIRMED'
+      ? buildBuyerRefundConfirmedIdempotencyKey(params.orderRefundId)
+      : buildBuyerRefundManualReviewIdempotencyKey(params.orderRefundId);
+  const type =
+    params.kind === 'CONFIRMED'
+      ? EmailOutboxType.BUYER_REFUND_CONFIRMED
+      : EmailOutboxType.BUYER_REFUND_MANUAL_REVIEW;
+
+  const fullSnapshot: BuyerRefundContentSnapshot = {
+    templateVersion: BUYER_REFUND_TEMPLATE_VERSION,
+    orderRefundId: params.snapshot.orderRefundId,
+    fromEmail: params.snapshot.fromEmail || resolveEmailFrom(),
+    orderNumber: params.snapshot.orderNumber,
+    refundAmountInCents: params.snapshot.refundAmountInCents,
+    currency: params.snapshot.currency.toUpperCase(),
+    buyerName: params.snapshot.buyerName,
+    eventTitle: params.snapshot.eventTitle,
+    ticketCount: params.snapshot.ticketCount,
+    isPartialRefund: Boolean(params.snapshot.isPartialRefund),
     stripeRefundId: params.snapshot.stripeRefundId ?? null,
     confirmedAtIso: params.snapshot.confirmedAtIso ?? null,
     reasonSummary: params.snapshot.reasonSummary,
@@ -400,11 +487,11 @@ export async function enqueueOrderConfirmationEmail(
     skipDuplicates: true,
   });
 
-  return {
-    enqueued: result.count > 0,
-    dedupeKey,
-    idempotencyKey,
-  };
+    return {
+      enqueued: result.count > 0,
+      dedupeKey,
+      idempotencyKey,
+    };
 }
 
 function isValidOrderConfirmationSnapshot(
@@ -453,6 +540,28 @@ function isValidLatePaymentRefundSnapshot(
     typeof candidate.currency === 'string' &&
     typeof candidate.buyerName === 'string' &&
     typeof candidate.eventTitle === 'string' &&
+    typeof candidate.reasonSummary === 'string'
+  );
+}
+
+function isValidBuyerRefundSnapshot(
+  raw: unknown
+): raw is BuyerRefundContentSnapshot {
+  if (!raw || typeof raw !== 'object') return false;
+  const candidate = raw as Record<string, unknown>;
+  return (
+    candidate.templateVersion === BUYER_REFUND_TEMPLATE_VERSION &&
+    typeof candidate.orderRefundId === 'string' &&
+    candidate.orderRefundId.length > 0 &&
+    typeof candidate.fromEmail === 'string' &&
+    candidate.fromEmail.trim().length > 0 &&
+    typeof candidate.orderNumber === 'string' &&
+    candidate.orderNumber.length > 0 &&
+    typeof candidate.refundAmountInCents === 'number' &&
+    typeof candidate.currency === 'string' &&
+    typeof candidate.buyerName === 'string' &&
+    typeof candidate.eventTitle === 'string' &&
+    typeof candidate.ticketCount === 'number' &&
     typeof candidate.reasonSummary === 'string'
   );
 }
@@ -819,6 +928,167 @@ export async function processClaimedEmailOutboxItem(
         console.warn(
           `[EmailOutbox] Lease lost before scheduling retry for refund outbox=${item.id} (worker=${workerId})`
         );
+        return 'leaseLost';
+      }
+
+      return 'retried';
+    }
+  }
+
+  if (
+    item.type === EmailOutboxType.BUYER_REFUND_CONFIRMED ||
+    item.type === EmailOutboxType.BUYER_REFUND_MANUAL_REVIEW
+  ) {
+    const kind: BuyerRefundNotificationKind =
+      item.type === EmailOutboxType.BUYER_REFUND_CONFIRMED ? 'CONFIRMED' : 'MANUAL_REVIEW';
+
+    if (!isValidBuyerRefundSnapshot(item.contentSnapshot)) {
+      return markPermanentGuarded(
+        'INVALID_CONTENT_SNAPSHOT',
+        'Stored buyer refund email content snapshot is invalid.',
+        'CRITICAL',
+        'SNAPSHOT_CORRUPT'
+      );
+    }
+
+    const snapshot = item.contentSnapshot;
+    const refundRecord = await prisma.orderRefund.findUnique({
+      where: { id: snapshot.orderRefundId },
+      select: {
+        id: true,
+        status: true,
+        requiresManualResolution: true,
+        stripeRefundId: true,
+      },
+    });
+
+    if (!refundRecord) {
+      return markPermanentGuarded(
+        'ORDER_REFUND_MISSING',
+        'Associated OrderRefund record could not be found during buyer notification dispatch.',
+        'ERROR',
+        'REFUND_STATE_MISMATCH'
+      );
+    }
+
+    if (kind === 'CONFIRMED' && refundRecord.status !== OrderRefundStatus.SUCCEEDED) {
+      return markPermanentGuarded(
+        'REFUND_NOT_CONFIRMED',
+        `Buyer refund confirmation email blocked because OrderRefund status is ${refundRecord.status}, not SUCCEEDED.`,
+        'CRITICAL',
+        'REFUND_STATE_MISMATCH'
+      );
+    }
+
+    if (
+      kind === 'MANUAL_REVIEW' &&
+      (refundRecord.status === OrderRefundStatus.MANUALLY_RESOLVED ||
+        refundRecord.status === OrderRefundStatus.SUCCEEDED ||
+        refundRecord.status === OrderRefundStatus.CANCELLED)
+    ) {
+      return markCancelledGuarded(
+        'REFUND_ALREADY_RESOLVED',
+        `Superseded stale manual-review buyer notification because OrderRefund is ${refundRecord.status}.`
+      );
+    }
+
+    if (
+      kind === 'MANUAL_REVIEW' &&
+      refundRecord.status !== OrderRefundStatus.MANUAL_REVIEW_REQUIRED &&
+      !refundRecord.requiresManualResolution
+    ) {
+      return markPermanentGuarded(
+        'REFUND_NOT_MANUAL_REVIEW',
+        `Manual-review buyer refund email blocked because OrderRefund status is ${refundRecord.status}.`,
+        'ERROR',
+        'REFUND_STATE_MISMATCH'
+      );
+    }
+
+    try {
+      const result = await sendBuyerRefundEmail({
+        kind,
+        to: item.recipientEmail,
+        snapshot,
+        idempotencyKey: item.idempotencyKey,
+      });
+
+      const updated = await prisma.emailOutbox.updateMany({
+        where: {
+          id: item.id,
+          status: EmailOutboxStatus.PROCESSING,
+          lockedBy: workerId,
+        },
+        data: {
+          status: EmailOutboxStatus.SENT,
+          provider: result.provider,
+          providerMessageId: result.messageId,
+          sentAt: result.sentAt,
+          lockedBy: null,
+          lockedUntil: null,
+          lastErrorCode: null,
+          lastErrorMessage: null,
+        },
+      });
+
+      if (updated.count === 0) {
+        console.warn(
+          `[EmailOutbox] Lease lost before marking SENT for buyer refund outbox=${item.id} (worker=${workerId})`
+        );
+        return 'leaseLost';
+      }
+
+      return 'accepted';
+    } catch (err) {
+      const classification = classifyOutboxFailure(err);
+
+      if (classification.disposition === 'CONFIG_FAILURE') {
+        return markPermanentGuarded(
+          classification.code,
+          classification.message,
+          'CRITICAL',
+          'EMAIL_CONFIG_FAILURE'
+        );
+      }
+
+      if (classification.disposition === 'PAYLOAD_CONFLICT') {
+        return markPermanentGuarded(
+          classification.code,
+          classification.message,
+          'CRITICAL',
+          'RESEND_IDEMPOTENCY_PAYLOAD_CONFLICT'
+        );
+      }
+
+      if (classification.disposition === 'PERMANENT' || item.attempts >= item.maxAttempts) {
+        return markPermanentGuarded(
+          classification.code,
+          classification.message,
+          'ERROR',
+          item.attempts >= item.maxAttempts ? 'RETRIES_EXHAUSTED' : 'PERMANENT_DELIVERY_FAILURE'
+        );
+      }
+
+      const delayMs = computeNextRetryDelayMs(item.attempts, options?.randomFn);
+      const nextAttemptAt = new Date(Date.now() + delayMs);
+
+      const updated = await prisma.emailOutbox.updateMany({
+        where: {
+          id: item.id,
+          status: EmailOutboxStatus.PROCESSING,
+          lockedBy: workerId,
+        },
+        data: {
+          status: EmailOutboxStatus.PENDING,
+          nextAttemptAt,
+          lockedBy: null,
+          lockedUntil: null,
+          lastErrorCode: classification.code,
+          lastErrorMessage: classification.message,
+        },
+      });
+
+      if (updated.count === 0) {
         return 'leaseLost';
       }
 

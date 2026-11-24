@@ -1,6 +1,31 @@
 import PDFDocument from 'pdfkit';
 import QRCode from 'qrcode';
 import sharp from 'sharp';
+import { TicketStatus } from '@prisma/client';
+
+export const INELIGIBLE_ADMISSION_TICKET_STATUSES: ReadonlySet<string> = new Set([
+  TicketStatus.REFUND_PENDING,
+  TicketStatus.REFUNDED,
+  TicketStatus.CANCELLED,
+]);
+
+export function isTicketAdmissionEligible(status?: TicketStatus | string | null): boolean {
+  if (!status) return true; // Backward compatibility for unit fixtures omitting status
+  return !INELIGIBLE_ADMISSION_TICKET_STATUSES.has(status);
+}
+
+export function filterEligiblePdfTickets<
+  T extends { id: string; status?: TicketStatus | string | null }
+>(tickets: T[], specificTicketId?: string): T[] {
+  if (specificTicketId) {
+    const match = tickets.find((t) => t.id === specificTicketId);
+    if (!match || !isTicketAdmissionEligible(match.status)) {
+      return [];
+    }
+    return [match];
+  }
+  return tickets.filter((t) => isTicketAdmissionEligible(t.status));
+}
 
 
 interface TicketPdfEvent {
@@ -28,6 +53,7 @@ interface TicketPdfEvent {
 interface TicketPdfItem {
   id: string;
   ticketToken: string;
+  status?: TicketStatus | string | null;
   attendeeName?: string | null;
   attendeeEmail?: string | null;
   ticketTier?: {
@@ -277,12 +303,10 @@ export async function generateTicketsPdf(
   order: TicketPdfOrder,
   specificTicketId?: string
 ): Promise<Buffer> {
-  const ticketsToRender = specificTicketId
-    ? order.tickets.filter((t) => t.id === specificTicketId)
-    : order.tickets;
+  const ticketsToRender = filterEligiblePdfTickets(order.tickets, specificTicketId);
 
   if (ticketsToRender.length === 0) {
-    throw new Error('No tickets found for this order.');
+    throw new Error('No eligible admission tickets found for this order.');
   }
 
   // Pre-fetch cover image buffer once for all pages

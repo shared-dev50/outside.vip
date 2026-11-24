@@ -3,6 +3,7 @@ import request from 'supertest';
 import { app } from '../app.js';
 import { prisma } from '../db/prisma.js';
 import { stripe } from '../lib/stripe.js';
+import { buildLatePaymentRefundIdempotencyKey } from '../modules/refunds/refundAllocation.domain.js';
 import {
   calculateFinancialBreakdown,
   calculateCheckoutFeeBreakdown,
@@ -627,7 +628,7 @@ describe('Outside.vip Checkout, Atomic Reservations & Payments API', () => {
       expect(checkOrder?.status).toBe(OrderStatus.PENDING);
 
       const manualRefund = await prisma.orderRefund.findUnique({
-        where: { stripePaymentIntentId: mockEvent.data.object.id },
+        where: { idempotencyKey: buildLatePaymentRefundIdempotencyKey(mockEvent.data.object.id) },
       });
       expect(manualRefund?.status).toBe('MANUAL_REVIEW_REQUIRED');
       expect(manualRefund?.requiresManualResolution).toBe(true);

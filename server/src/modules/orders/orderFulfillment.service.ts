@@ -9,6 +9,11 @@ import {
   enqueueOrderConfirmationEmail,
   OrderSnapshotSource,
 } from '../notifications/emailOutbox.service.js';
+import { calculateCheckoutFeeBreakdown } from '../checkout/checkout.financials.js';
+import {
+  allocateOrderTicketPayments,
+  PersistedTicketPaymentAllocation,
+} from '../refunds/refundAllocation.domain.js';
 
 export interface FulfillOrderCompletionInput {
   order: OrderSnapshotSource & {
@@ -75,22 +80,62 @@ export async function fulfillOrderCompletionInTx(
       : await tx.ticket.count({ where: { orderId: order.id } });
 
   if (issuedTicketCount === 0) {
+    const ticketInputs: Array<{ ticketId: string; ticketTierId: string; grossPriceInCents: number }> = [];
+    const generatedTokens: string[] = [];
+
     for (const item of order.items) {
+      const unitGross =
+        typeof (item as any).unitPriceInCents === 'number'
+          ? Math.max(0, Math.round((item as any).unitPriceInCents))
+          : 0;
       for (let i = 0; i < item.quantity; i++) {
-        const ticketToken = `tkt_sec_${nanoid(24)}`;
-        await tx.ticket.create({
-          data: {
-            ticketToken,
-            orderId: order.id,
-            eventId: order.eventId,
-            ticketTierId: item.ticketTierId,
-            attendeeName: order.customerName,
-            attendeeEmail: order.customerEmail,
-            status: TicketStatus.ISSUED,
-          },
+        const idx = ticketInputs.length;
+        ticketInputs.push({
+          ticketId: `pending_${idx}`,
+          ticketTierId: item.ticketTierId,
+          grossPriceInCents: unitGross,
         });
-        issuedTicketCount += 1;
+        generatedTokens.push(`tkt_sec_${nanoid(24)}`);
       }
+    }
+
+    let allocations: PersistedTicketPaymentAllocation[] | null = null;
+    if (ticketInputs.length > 0 && typeof order.totalInCents === 'number') {
+      const canonical = calculateCheckoutFeeBreakdown(
+        ticketInputs.map((t) => ({ priceInCents: t.grossPriceInCents, quantity: 1 }))
+      );
+      if (order.totalInCents === canonical.buyerTotalInCents) {
+        allocations = allocateOrderTicketPayments(
+          { buyerTotalInCents: order.totalInCents },
+          ticketInputs
+        ).tickets;
+      }
+    }
+
+    for (let i = 0; i < ticketInputs.length; i++) {
+      const ticketInput = ticketInputs[i];
+      const alloc = allocations ? allocations[i] : null;
+      await tx.ticket.create({
+        data: {
+          ticketToken: generatedTokens[i],
+          orderId: order.id,
+          eventId: order.eventId,
+          ticketTierId: ticketInput.ticketTierId,
+          attendeeName: order.customerName,
+          attendeeEmail: order.customerEmail,
+          status: TicketStatus.ISSUED,
+          ...(alloc
+            ? {
+                allocatedGrossInCents: alloc.allocatedGrossInCents,
+                allocatedPlatformFeeInCents: alloc.allocatedPlatformFeeInCents,
+                allocatedServiceFeeInCents: alloc.allocatedServiceFeeInCents,
+                allocatedProcessingFeeInCents: alloc.allocatedProcessingFeeInCents,
+                allocatedBuyerTotalInCents: alloc.allocatedBuyerTotalInCents,
+              }
+            : {}),
+        },
+      });
+      issuedTicketCount += 1;
     }
   }
 

@@ -2467,6 +2467,139 @@ export async function checkInTicket(req: Request, res: Response, next: NextFunct
       redisClient = getRedisClient();
       idemRedisKey = `checkin_idem:${scannerUserId}:${idempotencyKey}`;
 
+      const verifyCachedReplayEligibility = async (cachedRecord: any): Promise<boolean> => {
+        const isCachedSuccess =
+          cachedRecord?.responseStatus === 200 && cachedRecord?.responseBody?.data?.result === 'SUCCESS';
+        const cachedTicketId = cachedRecord?.ticketId || cachedRecord?.responseBody?.data?.ticket?.id;
+        if (!isCachedSuccess || !cachedTicketId) {
+          res.status(cachedRecord.responseStatus).json(cachedRecord.responseBody);
+          return true;
+        }
+
+        const freshTicket = await prisma.ticket.findUnique({
+          where: { id: cachedTicketId },
+          select: {
+            id: true,
+            eventId: true,
+            ticketToken: true,
+            status: true,
+            order: { select: { status: true } },
+          },
+        });
+
+        if (!freshTicket) {
+          await redisClient?.del(idemRedisKey!).catch(() => {});
+          return false;
+        }
+
+        const maskTok =
+          freshTicket.ticketToken.length > 10
+            ? `${freshTicket.ticketToken.slice(0, 7)}...${freshTicket.ticketToken.slice(-4)}`
+            : '***';
+
+        if (freshTicket.status === 'REFUND_PENDING') {
+          await redisClient?.del(idemRedisKey!).catch(() => {});
+          console.warn(
+            `[CheckIn] Blocked stale Redis replay for REFUND_PENDING ticket: token=${maskTok}`
+          );
+          await prisma.checkInLog.create({
+            data: {
+              ticketId: freshTicket.id,
+              eventId: freshTicket.eventId,
+              scannedToken: freshTicket.ticketToken,
+              scannedByUserId: scannerUserId,
+              result: 'REFUND_PENDING_TICKET',
+              notes: 'Stale idempotency replay rejected: ticket has a pending refund.',
+            },
+          });
+          res.status(400).json({
+            success: false,
+            error: {
+              message: 'This ticket has a refund pending and is not valid for entry.',
+              statusCode: 400,
+              code: 'REFUND_PENDING_TICKET',
+            },
+            data: {
+              result: 'REFUND_PENDING_TICKET',
+              message: 'This ticket has a refund pending and is not valid for entry.',
+            },
+          });
+          return true;
+        }
+
+        if (freshTicket.status === 'REFUNDED') {
+          await redisClient?.del(idemRedisKey!).catch(() => {});
+          console.warn(
+            `[CheckIn] Blocked stale Redis replay for REFUNDED ticket: token=${maskTok}`
+          );
+          await prisma.checkInLog.create({
+            data: {
+              ticketId: freshTicket.id,
+              eventId: freshTicket.eventId,
+              scannedToken: freshTicket.ticketToken,
+              scannedByUserId: scannerUserId,
+              result: 'REFUNDED_TICKET',
+              notes: 'Stale idempotency replay rejected: ticket has been refunded.',
+            },
+          });
+          res.status(400).json({
+            success: false,
+            error: {
+              message: 'This ticket has been refunded and is not valid for entry.',
+              statusCode: 400,
+              code: 'REFUNDED_TICKET',
+            },
+            data: {
+              result: 'REFUNDED_TICKET',
+              message: 'This ticket has been refunded and is not valid for entry.',
+            },
+          });
+          return true;
+        }
+
+        if (
+          freshTicket.status === 'CANCELLED' ||
+          freshTicket.order.status === 'CANCELLED' ||
+          freshTicket.order.status === 'REFUNDED'
+        ) {
+          await redisClient?.del(idemRedisKey!).catch(() => {});
+          console.warn(
+            `[CheckIn] Blocked stale Redis replay for CANCELLED ticket/order: token=${maskTok}`
+          );
+          await prisma.checkInLog.create({
+            data: {
+              ticketId: freshTicket.id,
+              eventId: freshTicket.eventId,
+              scannedToken: freshTicket.ticketToken,
+              scannedByUserId: scannerUserId,
+              result: 'CANCELLED_TICKET',
+              notes: 'Stale idempotency replay rejected: ticket or parent order was cancelled/refunded.',
+            },
+          });
+          res.status(400).json({
+            success: false,
+            error: {
+              message: 'This ticket has been cancelled or refunded and is not valid for entry.',
+              statusCode: 400,
+              code: 'CANCELLED_TICKET',
+            },
+            data: {
+              result: 'CANCELLED_TICKET',
+              message: 'This ticket has been cancelled or refunded and is not valid for entry.',
+            },
+          });
+          return true;
+        }
+
+        if (freshTicket.status !== 'CHECKED_IN' || freshTicket.order.status !== 'COMPLETED') {
+          await redisClient?.del(idemRedisKey!).catch(() => {});
+          return false;
+        }
+
+        res.status(cachedRecord.responseStatus).json(cachedRecord.responseBody);
+        return true;
+      };
+
       const existingRaw = await redisClient.get(idemRedisKey);
       if (existingRaw) {
         const record = JSON.parse(existingRaw);
@@ -2496,8 +2629,10 @@ export async function checkInTicket(req: Request, res: Response, next: NextFunct
 
         if (record.status === 'COMPLETED') {
           await assertIdempotencyReplayAuthorized(record);
-          res.status(record.responseStatus).json(record.responseBody);
-          return;
+          const handled = await verifyCachedReplayEligibility(record);
+          if (handled) {
+            return;
+          }
         }
 
         if (record.status === 'PENDING') {
@@ -2509,8 +2644,11 @@ export async function checkInTicket(req: Request, res: Response, next: NextFunct
               const pollRecord = JSON.parse(pollRaw);
               if (pollRecord.status === 'COMPLETED') {
                 await assertIdempotencyReplayAuthorized(pollRecord);
-                res.status(pollRecord.responseStatus).json(pollRecord.responseBody);
-                return;
+                const handled = await verifyCachedReplayEligibility(pollRecord);
+                if (handled) {
+                  return;
+                }
+                break;
               }
             } else {
               break;
@@ -2548,8 +2686,11 @@ export async function checkInTicket(req: Request, res: Response, next: NextFunct
             const pollRecord = JSON.parse(pollRaw);
             if (pollRecord.status === 'COMPLETED') {
               await assertIdempotencyReplayAuthorized(pollRecord);
-              res.status(pollRecord.responseStatus).json(pollRecord.responseBody);
-              return;
+              const handled = await verifyCachedReplayEligibility(pollRecord);
+              if (handled) {
+                return;
+              }
+              break;
             }
           }
           waitCount++;
@@ -2787,6 +2928,72 @@ export async function checkInTicket(req: Request, res: Response, next: NextFunct
         });
         return;
       }
+    }
+
+    if (ticket.status === 'REFUND_PENDING') {
+      if (idemRedisKey && redisClient) {
+        await redisClient.delLockIfMatches(idemRedisKey, lockId).catch(() => {});
+      }
+      console.warn(
+        `[CheckIn] Rejected REFUND_PENDING_TICKET: token=${maskedToken}, ticketStatus=${ticket.status}, orderStatus=${ticket.order.status}`
+      );
+      await prisma.checkInLog.create({
+        data: {
+          ticketId: ticket.id,
+          eventId: ticket.eventId,
+          scannedToken: ticket.ticketToken,
+          scannedByUserId: scannerUserId,
+          result: 'REFUND_PENDING_TICKET',
+          notes: 'Ticket has a pending refund and is not valid for entry.',
+        },
+      });
+
+      res.status(400).json({
+        success: false,
+        error: {
+          message: 'This ticket has a refund pending and is not valid for entry.',
+          statusCode: 400,
+          code: 'REFUND_PENDING_TICKET',
+        },
+        data: {
+          result: 'REFUND_PENDING_TICKET',
+          message: 'This ticket has a refund pending and is not valid for entry.',
+        },
+      });
+      return;
+    }
+
+    if (ticket.status === 'REFUNDED') {
+      if (idemRedisKey && redisClient) {
+        await redisClient.delLockIfMatches(idemRedisKey, lockId).catch(() => {});
+      }
+      console.warn(
+        `[CheckIn] Rejected REFUNDED_TICKET: token=${maskedToken}, ticketStatus=${ticket.status}, orderStatus=${ticket.order.status}`
+      );
+      await prisma.checkInLog.create({
+        data: {
+          ticketId: ticket.id,
+          eventId: ticket.eventId,
+          scannedToken: ticket.ticketToken,
+          scannedByUserId: scannerUserId,
+          result: 'REFUNDED_TICKET',
+          notes: 'Ticket has been refunded and is not valid for entry.',
+        },
+      });
+
+      res.status(400).json({
+        success: false,
+        error: {
+          message: 'This ticket has been refunded and is not valid for entry.',
+          statusCode: 400,
+          code: 'REFUNDED_TICKET',
+        },
+        data: {
+          result: 'REFUNDED_TICKET',
+          message: 'This ticket has been refunded and is not valid for entry.',
+        },
+      });
+      return;
     }
 
     if (ticket.status === 'CANCELLED' || ticket.order.status === 'CANCELLED' || ticket.order.status === 'REFUNDED') {
@@ -3052,12 +3259,26 @@ export async function checkInTicket(req: Request, res: Response, next: NextFunct
       return;
     }
 
-    // 8. Atomic Check-in with race condition protection & staff row lock
+    // 8. Serialized atomic check-in protecting against concurrent refunds and duplicate scans.
+    // Canonical lock order matches refund orchestration: Order (FOR SHARE) -> EventStaff (FOR SHARE) -> Ticket (FOR UPDATE).
     let checkInTime = new Date();
-    let updateResult: { count: number };
+    type AtomicCheckInOutcome =
+      | { kind: 'SUCCESS'; checkInTime: Date }
+      | { kind: 'RECOVERED_IDEMPOTENCY_SUCCESS'; checkInTime: Date }
+      | { kind: 'REFUND_PENDING_TICKET' }
+      | { kind: 'REFUNDED_TICKET' }
+      | { kind: 'CANCELLED_TICKET' }
+      | { kind: 'UNPAID_ORDER' }
+      | { kind: 'ALREADY_CHECKED_IN'; checkedInAt: Date | null };
 
-    if (isStaff) {
-      updateResult = await prisma.$transaction(async (tx) => {
+    const txOutcome: AtomicCheckInOutcome = await prisma.$transaction(async (tx) => {
+      const orderRows = await tx.$queryRaw<Array<{ status: string }>>`
+        SELECT status FROM "Order"
+        WHERE id = ${ticket.orderId}
+        FOR SHARE
+      `;
+
+      if (isStaff) {
         const staffRows = await tx.$queryRaw<Array<{ status: string }>>`
           SELECT status FROM "EventStaff"
           WHERE "eventId" = ${ticket.eventId} AND "userId" = ${scannerUserId}
@@ -3069,79 +3290,209 @@ export async function checkInTicket(req: Request, res: Response, next: NextFunct
             'Your staff scanning access for this event has been revoked or is inactive.'
           );
         }
+      }
 
-        checkInTime = new Date();
-        const res = await tx.ticket.updateMany({
-          where: {
-            id: ticket.id,
-            status: 'ISSUED',
-          },
-          data: {
-            status: 'CHECKED_IN',
-            checkedInAt: checkInTime,
-            checkedInByUserId: scannerUserId,
-          },
-        });
+      const lockedTickets = await tx.$queryRaw<
+        Array<{
+          id: string;
+          status: string;
+          checkedInAt: Date | null;
+          checkedInByUserId: string | null;
+        }>
+      >`
+        SELECT id, status, "checkedInAt", "checkedInByUserId"
+        FROM "Ticket"
+        WHERE id = ${ticket.id}
+        FOR UPDATE
+      `;
 
-        if (res.count > 0) {
-          await tx.checkInLog.create({
-            data: {
-              ticketId: ticket.id,
-              eventId: ticket.eventId,
-              scannedToken: ticket.ticketToken,
-              scannedByUserId: scannerUserId,
-              result: 'SUCCESS',
-              notes: idempotencyKey ? `idem:${idempotencyKey}` : undefined,
-            },
-          });
-        }
+      const lockedTicket = lockedTickets[0];
+      const currentOrderStatus = orderRows[0]?.status ?? ticket.order.status;
+      const currentTicketStatus = lockedTicket?.status ?? ticket.status;
 
-        return res;
-      });
-    } else {
-      checkInTime = new Date();
-      updateResult = await prisma.ticket.updateMany({
-        where: {
-          id: ticket.id,
-          status: 'ISSUED',
-        },
-        data: {
-          status: 'CHECKED_IN',
-          checkedInAt: checkInTime,
-          checkedInByUserId: scannerUserId,
-        },
-      });
-
-      if (updateResult.count > 0) {
-        await prisma.checkInLog.create({
+      if (currentTicketStatus === 'REFUND_PENDING') {
+        await tx.checkInLog.create({
           data: {
             ticketId: ticket.id,
             eventId: ticket.eventId,
             scannedToken: ticket.ticketToken,
             scannedByUserId: scannerUserId,
-            result: 'SUCCESS',
-            notes: idempotencyKey ? `idem:${idempotencyKey}` : undefined,
+            result: 'REFUND_PENDING_TICKET',
+            notes: 'Ticket transitioned to REFUND_PENDING before check-in committed.',
           },
         });
+        return { kind: 'REFUND_PENDING_TICKET' };
       }
-    }
 
-    if (updateResult.count === 0) {
-      if (idemRedisKey && redisClient) {
-        await redisClient.delLockIfMatches(idemRedisKey, lockId).catch(() => {});
+      if (currentTicketStatus === 'REFUNDED') {
+        await tx.checkInLog.create({
+          data: {
+            ticketId: ticket.id,
+            eventId: ticket.eventId,
+            scannedToken: ticket.ticketToken,
+            scannedByUserId: scannerUserId,
+            result: 'REFUNDED_TICKET',
+            notes: 'Ticket transitioned to REFUNDED before check-in committed.',
+          },
+        });
+        return { kind: 'REFUNDED_TICKET' };
       }
-      console.warn(`[CheckIn] Concurrent duplicate check-in prevented: token=${maskedToken}`);
-      await prisma.checkInLog.create({
+
+      if (
+        currentTicketStatus === 'CANCELLED' ||
+        currentOrderStatus === 'CANCELLED' ||
+        currentOrderStatus === 'REFUNDED'
+      ) {
+        await tx.checkInLog.create({
+          data: {
+            ticketId: ticket.id,
+            eventId: ticket.eventId,
+            scannedToken: ticket.ticketToken,
+            scannedByUserId: scannerUserId,
+            result: 'CANCELLED_TICKET',
+            notes: 'Ticket or parent order was cancelled/refunded before check-in committed.',
+          },
+        });
+        return { kind: 'CANCELLED_TICKET' };
+      }
+
+      if (currentOrderStatus !== 'COMPLETED') {
+        return { kind: 'UNPAID_ORDER' };
+      }
+
+      if (currentTicketStatus === 'CHECKED_IN') {
+        if (idempotencyKey && lockedTicket?.checkedInByUserId === scannerUserId) {
+          const matchingSuccessLog = await tx.checkInLog.findFirst({
+            where: {
+              ticketId: ticket.id,
+              scannedByUserId: scannerUserId,
+              result: 'SUCCESS',
+              notes: `idem:${idempotencyKey}`,
+            },
+            orderBy: { createdAt: 'desc' },
+          });
+          if (matchingSuccessLog) {
+            return {
+              kind: 'RECOVERED_IDEMPOTENCY_SUCCESS',
+              checkInTime: lockedTicket.checkedInAt || matchingSuccessLog.createdAt,
+            };
+          }
+        }
+
+        await tx.checkInLog.create({
+          data: {
+            ticketId: ticket.id,
+            eventId: ticket.eventId,
+            scannedToken: ticket.ticketToken,
+            scannedByUserId: scannerUserId,
+            result: 'ALREADY_CHECKED_IN',
+            notes: 'Attempted concurrent re-entry. Ticket was already checked in.',
+          },
+        });
+        return {
+          kind: 'ALREADY_CHECKED_IN',
+          checkedInAt: lockedTicket?.checkedInAt ?? ticket.checkedInAt,
+        };
+      }
+
+      if (currentTicketStatus !== 'ISSUED') {
+        return { kind: 'CANCELLED_TICKET' };
+      }
+
+      const nowCheckIn = new Date();
+      await tx.ticket.update({
+        where: { id: ticket.id },
+        data: {
+          status: 'CHECKED_IN',
+          checkedInAt: nowCheckIn,
+          checkedInByUserId: scannerUserId,
+        },
+      });
+
+      await tx.checkInLog.create({
         data: {
           ticketId: ticket.id,
           eventId: ticket.eventId,
           scannedToken: ticket.ticketToken,
           scannedByUserId: scannerUserId,
-          result: 'ALREADY_CHECKED_IN',
-          notes: 'Attempted concurrent re-entry. Ticket was already checked in.',
+          result: 'SUCCESS',
+          notes: idempotencyKey ? `idem:${idempotencyKey}` : undefined,
         },
       });
 
+      return { kind: 'SUCCESS', checkInTime: nowCheckIn };
+    });
+
+    if (txOutcome.kind !== 'SUCCESS' && txOutcome.kind !== 'RECOVERED_IDEMPOTENCY_SUCCESS') {
+      if (idemRedisKey && redisClient) {
+        await redisClient.delLockIfMatches(idemRedisKey, lockId).catch(() => {});
+      }
+
+      if (txOutcome.kind === 'REFUND_PENDING_TICKET') {
+        res.status(400).json({
+          success: false,
+          error: {
+            message: 'This ticket has a refund pending and is not valid for entry.',
+            statusCode: 400,
+            code: 'REFUND_PENDING_TICKET',
+          },
+          data: {
+            result: 'REFUND_PENDING_TICKET',
+            message: 'This ticket has a refund pending and is not valid for entry.',
+          },
+        });
+        return;
+      }
+
+      if (txOutcome.kind === 'REFUNDED_TICKET') {
+        res.status(400).json({
+          success: false,
+          error: {
+            message: 'This ticket has been refunded and is not valid for entry.',
+            statusCode: 400,
+            code: 'REFUNDED_TICKET',
+          },
+          data: {
+            result: 'REFUNDED_TICKET',
+            message: 'This ticket has been refunded and is not valid for entry.',
+          },
+        });
+        return;
+      }
+
+      if (txOutcome.kind === 'CANCELLED_TICKET') {
+        res.status(400).json({
+          success: false,
+          error: {
+            message: 'This ticket has been cancelled or refunded and is not valid for entry.',
+            statusCode: 400,
+            code: 'CANCELLED_TICKET',
+          },
+          data: {
+            result: 'CANCELLED_TICKET',
+            message: 'This ticket has been cancelled or refunded and is not valid for entry.',
+          },
+        });
+        return;
+      }
+
+      if (txOutcome.kind === 'UNPAID_ORDER') {
+        res.status(400).json({
+          success: false,
+          error: {
+            message: 'Order is not completed or paid. Admission denied.',
+            statusCode: 400,
+            code: 'UNPAID_ORDER',
+          },
+          data: {
+            result: 'UNPAID_ORDER',
+            message: 'Order is not completed or paid. Admission denied.',
+          },
+        });
+        return;
+      }
+
+      console.warn(`[CheckIn] Concurrent duplicate check-in prevented: token=${maskedToken}`);
       res.status(409).json({
         success: false,
         error: {
@@ -3157,11 +3508,14 @@ export async function checkInTicket(req: Request, res: Response, next: NextFunct
             attendeeName: ticket.attendeeName,
             tierName: ticket.ticketTier.name,
             orderNumber: ticket.order.orderNumber,
+            checkedInAt: txOutcome.checkedInAt,
           },
         },
       });
       return;
     }
+
+    checkInTime = txOutcome.checkInTime;
 
     const totalCheckedIn = await prisma.ticket.count({
       where: {
@@ -3387,6 +3741,8 @@ export async function getOrganizerOrders(
           customerEmail: true,
           customerPhone: true,
           totalInCents: true,
+          refundedAmountInCents: true,
+          pendingRefundAmountInCents: true,
           currency: true,
           platformFeeInCents: true,
           organizerNetInCents: true,
@@ -3398,6 +3754,7 @@ export async function getOrganizerOrders(
           event: {
             select: {
               id: true,
+              organizerId: true,
               title: true,
               slug: true,
               startAt: true,
@@ -3432,6 +3789,8 @@ export async function getOrganizerOrders(
     const formattedOrders = orders.map((order) => {
       const ticketQuantity = order.items.reduce((sum, item) => sum + item.quantity, 0);
       const paymentStatus = order.status === OrderStatus.COMPLETED ? 'PAID' : order.status;
+      const canManageRefunds =
+        isAdmin || (isOrganizerRole && order.event.organizerId === organizerId);
 
       return {
         id: order.id,
@@ -3442,6 +3801,9 @@ export async function getOrganizerOrders(
         customerEmail: order.customerEmail,
         customerPhone: order.customerPhone,
         totalInCents: order.totalInCents,
+        refundedAmountInCents: order.refundedAmountInCents,
+        pendingRefundAmountInCents: order.pendingRefundAmountInCents,
+        canManageRefunds,
         currency: order.currency,
         platformFeeInCents: order.platformFeeInCents,
         organizerNetInCents: order.organizerNetInCents,

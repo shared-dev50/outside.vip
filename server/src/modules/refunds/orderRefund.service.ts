@@ -4,6 +4,7 @@ import Stripe from 'stripe';
 import {
   EmailOutboxStatus,
   OrderRefund,
+  OrderRefundKind,
   OrderRefundStatus,
   OrderStatus,
   PaymentStatus,
@@ -14,12 +15,25 @@ import { normalizeEmail } from '../../config/env.js';
 import { stripe } from '../../lib/stripe.js';
 import { redactSensitiveData } from '../finance/stripeError.js';
 import {
+  buildBuyerRefundManualReviewDedupeKey,
   buildLatePaymentRefundManualReviewDedupeKey,
+  enqueueBuyerRefundEmail,
   enqueueLatePaymentRefundEmail,
   EMAIL_OUTBOX_MAX_ATTEMPTS,
 } from '../notifications/emailOutbox.service.js';
 import { triggerEmailOutboxDispatch } from '../notifications/emailOutboxWorker.js';
 import { BadRequestError, ConflictError, NotFoundError } from '../../utils/errors.js';
+
+import {
+  buildLatePaymentRefundIdempotencyKey,
+  LATE_PAYMENT_REFUND_IDEMPOTENCY_PREFIX,
+} from './refundAllocation.domain.js';
+import {
+  confirmTicketRefundSucceededInTx,
+  triggerPostCommitWaitlistAdvancement,
+} from './refundAdmissionState.service.js';
+
+export { buildLatePaymentRefundIdempotencyKey, LATE_PAYMENT_REFUND_IDEMPOTENCY_PREFIX };
 
 export const ORDER_REFUND_MAX_ATTEMPTS = EMAIL_OUTBOX_MAX_ATTEMPTS; // 8
 export const ORDER_REFUND_LEASE_MS = 90_000;
@@ -87,10 +101,6 @@ export type ManualResolutionAction =
   | 'CONFIRMED_ALREADY_REFUNDED'
   | 'FULFILLED_MANUALLY'
   | 'NO_REFUND_NEEDED';
-
-export function buildLatePaymentRefundIdempotencyKey(paymentIntentId: string): string {
-  return `late-refund:${paymentIntentId}`;
-}
 
 export function generateOrderRefundWorkerId(): string {
   const host = os.hostname().replace(/[^a-zA-Z0-9._-]/g, '').slice(0, 32) || 'host';
@@ -304,7 +314,7 @@ export async function enqueueOrderRefund(
   });
 
   const orderRefund = await tx.orderRefund.findUniqueOrThrow({
-    where: { stripePaymentIntentId: params.stripePaymentIntentId },
+    where: { idempotencyKey },
   });
 
   const created = insertResult.count > 0;
@@ -387,14 +397,38 @@ async function listAllStripeRefundsForPaymentIntent(
   return { refunds: allRefunds, incomplete: false };
 }
 
-function evaluateExistingStripeRefunds(
+export interface SiblingStripeRefundExclusion {
+  orderRefundIds: ReadonlySet<string>;
+  stripeRefundIds: ReadonlySet<string>;
+}
+
+export function evaluateExistingStripeRefunds(
   refunds: Stripe.Refund[],
   expectedAmountInCents: number,
   expectedCurrency: string,
   orderRefundId: string,
-  persistedStripeRefundId?: string | null
+  persistedStripeRefundId?: string | null,
+  siblingExclusions?: SiblingStripeRefundExclusion
 ): StripeReconcileOutcome {
-  if (refunds.length === 0) {
+  // Exclude Stripe refunds explicitly owned by distinct non-late-payment OrderRefund rows
+  // (e.g. partial organizer/admin ticket refunds on the same PaymentIntent).
+  const candidateRefunds = siblingExclusions
+    ? refunds.filter((r) => {
+        const ownedBySiblingMetadata = Boolean(
+          r.metadata?.orderRefundId &&
+            r.metadata.orderRefundId !== orderRefundId &&
+            siblingExclusions.orderRefundIds.has(r.metadata.orderRefundId)
+        );
+        const ownedBySiblingStripeId = Boolean(
+          r.id &&
+            r.id !== persistedStripeRefundId &&
+            siblingExclusions.stripeRefundIds.has(r.id)
+        );
+        return !ownedBySiblingMetadata && !ownedBySiblingStripeId;
+      })
+    : refunds;
+
+  if (candidateRefunds.length === 0) {
     return { kind: 'NONE' };
   }
 
@@ -403,7 +437,7 @@ function evaluateExistingStripeRefunds(
   const failedRefunds: Stripe.Refund[] = [];
   const unknownStatusRefunds: Stripe.Refund[] = [];
 
-  for (const r of refunds) {
+  for (const r of candidateRefunds) {
     if (r.status === 'succeeded' || r.status === 'pending' || r.status === 'requires_action') {
       activeRefunds.push(r);
     } else if (r.status === 'failed' || r.status === 'canceled') {
@@ -424,7 +458,7 @@ function evaluateExistingStripeRefunds(
     };
   }
 
-  const currencyMismatch = refunds.find(
+  const currencyMismatch = candidateRefunds.find(
     (r) => r.currency && r.currency.toUpperCase() !== normalizedExpectedCurrency
   );
   if (currencyMismatch) {
@@ -546,6 +580,40 @@ function evaluateExistingStripeRefunds(
   return { kind: 'RECONCILED_PENDING', refund: single };
 }
 
+function isBuyerTicketRefundKind(kind: OrderRefundKind | null | undefined): boolean {
+  return (
+    kind === OrderRefundKind.ORGANIZER_TICKET_REFUND ||
+    kind === OrderRefundKind.ADMIN_TICKET_REFUND ||
+    kind === OrderRefundKind.EVENT_CANCELLATION
+  );
+}
+
+function isWorkerClaimableRefundKind(kind: OrderRefundKind | null | undefined): boolean {
+  return (
+    kind === OrderRefundKind.LATE_PAYMENT ||
+    kind === OrderRefundKind.ORGANIZER_TICKET_REFUND ||
+    kind === OrderRefundKind.ADMIN_TICKET_REFUND
+  );
+}
+
+async function loadBuyerRefundEmailStats(
+  db: Prisma.TransactionClient | typeof prisma,
+  orderRefundId: string,
+  orderId: string | null
+): Promise<{ ticketCount: number; isPartialRefund: boolean }> {
+  const refundTicketCount = await db.orderRefundTicket.count({
+    where: { orderRefundId },
+  });
+  const totalOrderTickets = orderId
+    ? await db.ticket.count({
+        where: { orderId },
+      })
+    : 0;
+  const ticketCount = Math.max(1, refundTicketCount);
+  const isPartialRefund = totalOrderTickets > 0 && refundTicketCount < totalOrderTickets;
+  return { ticketCount, isPartialRefund };
+}
+
 /**
  * Transitions expired PROCESSING leases whose attempts >= maxAttempts to MANUAL_REVIEW_REQUIRED.
  */
@@ -565,7 +633,12 @@ export async function reapExpiredExhaustedRefundLeases(): Promise<number> {
         'Worker lease expired after reaching maximum refund attempts'
       ),
       "updatedAt" = NOW()
-    WHERE status = 'PROCESSING'::"OrderRefundStatus"
+    WHERE "refundKind" IN (
+        'LATE_PAYMENT'::"OrderRefundKind",
+        'ORGANIZER_TICKET_REFUND'::"OrderRefundKind",
+        'ADMIN_TICKET_REFUND'::"OrderRefundKind"
+      )
+      AND status = 'PROCESSING'::"OrderRefundStatus"
       AND "lockedUntil" IS NOT NULL
       AND "lockedUntil" < NOW()
       AND attempts >= "maxAttempts"
@@ -599,25 +672,51 @@ export async function reapExpiredExhaustedRefundLeases(): Promise<number> {
         },
       });
       if (order?.customerEmail) {
-        const res = await enqueueLatePaymentRefundEmail(prisma, {
-          kind: 'MANUAL_REVIEW',
-          orderRefundId: row.id,
-          orderId: order.id,
-          recipientEmail: order.customerEmail,
-          snapshot: {
+        if (isBuyerTicketRefundKind(row.refundKind)) {
+          const stats = await loadBuyerRefundEmailStats(prisma, row.id, order.id);
+          const res = await enqueueBuyerRefundEmail(prisma, {
+            kind: 'MANUAL_REVIEW',
             orderRefundId: row.id,
-            orderNumber: order.orderNumber,
-            refundAmountInCents: row.amountInCents,
-            currency: row.currency,
-            buyerName: order.customerName,
-            eventTitle: order.event?.title || 'Outside.vip Event',
-            stripeRefundId: row.stripeRefundId,
-            confirmedAtIso: null,
-            reasonSummary: describeLatePaymentReason(row.reason),
-          },
-        });
-        if (res.enqueued) {
-          enqueuedAnyEmail = true;
+            orderId: order.id,
+            recipientEmail: order.customerEmail,
+            snapshot: {
+              orderRefundId: row.id,
+              orderNumber: order.orderNumber,
+              refundAmountInCents: row.amountInCents,
+              currency: row.currency,
+              buyerName: order.customerName,
+              eventTitle: order.event?.title || 'Outside.vip Event',
+              ticketCount: stats.ticketCount,
+              isPartialRefund: stats.isPartialRefund,
+              stripeRefundId: row.stripeRefundId,
+              confirmedAtIso: null,
+              reasonSummary: row.reason || 'Organizer-initiated ticket refund',
+            },
+          });
+          if (res.enqueued) {
+            enqueuedAnyEmail = true;
+          }
+        } else {
+          const res = await enqueueLatePaymentRefundEmail(prisma, {
+            kind: 'MANUAL_REVIEW',
+            orderRefundId: row.id,
+            orderId: order.id,
+            recipientEmail: order.customerEmail,
+            snapshot: {
+              orderRefundId: row.id,
+              orderNumber: order.orderNumber,
+              refundAmountInCents: row.amountInCents,
+              currency: row.currency,
+              buyerName: order.customerName,
+              eventTitle: order.event?.title || 'Outside.vip Event',
+              stripeRefundId: row.stripeRefundId,
+              confirmedAtIso: null,
+              reasonSummary: describeLatePaymentReason(row.reason),
+            },
+          });
+          if (res.enqueued) {
+            enqueuedAnyEmail = true;
+          }
         }
       }
     }
@@ -649,16 +748,23 @@ export async function claimPendingOrderRefundBatch(options?: {
     WITH claimable AS (
       SELECT id
       FROM "OrderRefund"
-      WHERE (
-        status = 'PENDING'::"OrderRefundStatus"
-        AND "nextAttemptAt" <= NOW()
-        AND attempts < "maxAttempts"
-      ) OR (
-        status = 'PROCESSING'::"OrderRefundStatus"
-        AND "lockedUntil" IS NOT NULL
-        AND "lockedUntil" < NOW()
-        AND attempts < "maxAttempts"
-      )
+      WHERE "refundKind" IN (
+          'LATE_PAYMENT'::"OrderRefundKind",
+          'ORGANIZER_TICKET_REFUND'::"OrderRefundKind",
+          'ADMIN_TICKET_REFUND'::"OrderRefundKind"
+        )
+        AND (
+          (
+            status = 'PENDING'::"OrderRefundStatus"
+            AND "nextAttemptAt" <= NOW()
+            AND attempts < "maxAttempts"
+          ) OR (
+            status = 'PROCESSING'::"OrderRefundStatus"
+            AND "lockedUntil" IS NOT NULL
+            AND "lockedUntil" < NOW()
+            AND attempts < "maxAttempts"
+          )
+        )
       ORDER BY "nextAttemptAt" ASC, "createdAt" ASC
       LIMIT ${batchSize}
       FOR UPDATE SKIP LOCKED
@@ -734,6 +840,7 @@ async function finalizeRefundSucceededInTx(params: {
       const updated = await tx.orderRefund.updateMany({
         where: {
           id: item.id,
+          refundKind: OrderRefundKind.LATE_PAYMENT,
           status: OrderRefundStatus.PROCESSING,
           lockedBy: workerId,
         },
@@ -805,6 +912,88 @@ async function finalizeRefundSucceededInTx(params: {
   );
 }
 
+async function finalizeBuyerRefundSucceededInTx(params: {
+  item: OrderRefund;
+  workerId: string;
+  stripeRefundId: string;
+  stripeChargeId?: string | null;
+  succeededAt: Date;
+}): Promise<{
+  outcome: 'succeeded' | 'leaseLost';
+  enqueuedEmail: boolean;
+  tiersToAdvanceWaitlist: string[];
+}> {
+  const { item, workerId, stripeRefundId, stripeChargeId, succeededAt } = params;
+
+  return await prisma.$transaction(
+    async (tx) => {
+      const fin = await confirmTicketRefundSucceededInTx(tx, {
+        orderRefundId: item.id,
+        stripeRefundId,
+        stripeChargeId: stripeChargeId ?? item.stripeChargeId,
+        confirmedByUserId: item.initiatedByUserId,
+        succeededAt,
+        expectedLockedBy: workerId,
+      });
+
+      if (fin.leaseLost) {
+        return {
+          outcome: 'leaseLost',
+          enqueuedEmail: false,
+          tiersToAdvanceWaitlist: [],
+        };
+      }
+
+      let enqueuedEmail = false;
+      if (!fin.alreadyFinalized && fin.orderRefund.orderId) {
+        const order = await tx.order.findUnique({
+          where: { id: fin.orderRefund.orderId },
+          select: {
+            id: true,
+            orderNumber: true,
+            customerEmail: true,
+            customerName: true,
+            event: { select: { title: true } },
+          },
+        });
+        if (order?.customerEmail) {
+          const stats = await loadBuyerRefundEmailStats(tx, fin.orderRefund.id, order.id);
+          const emailRes = await enqueueBuyerRefundEmail(tx, {
+            kind: 'CONFIRMED',
+            orderRefundId: fin.orderRefund.id,
+            orderId: order.id,
+            recipientEmail: order.customerEmail,
+            snapshot: {
+              orderRefundId: fin.orderRefund.id,
+              orderNumber: order.orderNumber,
+              refundAmountInCents: fin.orderRefund.amountInCents,
+              currency: fin.orderRefund.currency,
+              buyerName: order.customerName,
+              eventTitle: order.event?.title || 'Outside.vip Event',
+              ticketCount: stats.ticketCount,
+              isPartialRefund: stats.isPartialRefund,
+              stripeRefundId: fin.orderRefund.stripeRefundId || stripeRefundId,
+              confirmedAtIso: (fin.orderRefund.succeededAt || succeededAt).toISOString(),
+              reasonSummary: fin.orderRefund.reason || 'Organizer-initiated ticket refund',
+            },
+          });
+          enqueuedEmail = emailRes.enqueued;
+        }
+      }
+
+      return {
+        outcome: 'succeeded',
+        enqueuedEmail,
+        tiersToAdvanceWaitlist: fin.tiersToAdvanceWaitlist,
+      };
+    },
+    {
+      isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
+      timeout: 10000,
+    }
+  );
+}
+
 async function finalizeRefundManualReviewInTx(params: {
   item: OrderRefund;
   workerId: string;
@@ -863,6 +1052,7 @@ async function finalizeRefundManualReviewInTx(params: {
       const updated = await tx.orderRefund.updateMany({
         where: {
           id: item.id,
+          refundKind: item.refundKind,
           status: OrderRefundStatus.PROCESSING,
           lockedBy: workerId,
         },
@@ -889,24 +1079,48 @@ async function finalizeRefundManualReviewInTx(params: {
 
       let enqueuedEmail = false;
       if (lockedOrder?.customerEmail) {
-        const res = await enqueueLatePaymentRefundEmail(tx, {
-          kind: 'MANUAL_REVIEW',
-          orderRefundId: item.id,
-          orderId: lockedOrder.id,
-          recipientEmail: lockedOrder.customerEmail,
-          snapshot: {
+        if (isBuyerTicketRefundKind(item.refundKind)) {
+          const stats = await loadBuyerRefundEmailStats(tx, item.id, lockedOrder.id);
+          const res = await enqueueBuyerRefundEmail(tx, {
+            kind: 'MANUAL_REVIEW',
             orderRefundId: item.id,
-            orderNumber: lockedOrder.orderNumber,
-            refundAmountInCents: item.amountInCents,
-            currency: item.currency,
-            buyerName: lockedOrder.customerName,
-            eventTitle: lockedOrder.eventTitle,
-            stripeRefundId: stripeRefundId || item.stripeRefundId,
-            confirmedAtIso: null,
-            reasonSummary: describeLatePaymentReason(item.reason),
-          },
-        });
-        enqueuedEmail = res.enqueued;
+            orderId: lockedOrder.id,
+            recipientEmail: lockedOrder.customerEmail,
+            snapshot: {
+              orderRefundId: item.id,
+              orderNumber: lockedOrder.orderNumber,
+              refundAmountInCents: item.amountInCents,
+              currency: item.currency,
+              buyerName: lockedOrder.customerName,
+              eventTitle: lockedOrder.eventTitle,
+              ticketCount: stats.ticketCount,
+              isPartialRefund: stats.isPartialRefund,
+              stripeRefundId: stripeRefundId || item.stripeRefundId,
+              confirmedAtIso: null,
+              reasonSummary: item.reason || 'Organizer-initiated ticket refund',
+            },
+          });
+          enqueuedEmail = res.enqueued;
+        } else {
+          const res = await enqueueLatePaymentRefundEmail(tx, {
+            kind: 'MANUAL_REVIEW',
+            orderRefundId: item.id,
+            orderId: lockedOrder.id,
+            recipientEmail: lockedOrder.customerEmail,
+            snapshot: {
+              orderRefundId: item.id,
+              orderNumber: lockedOrder.orderNumber,
+              refundAmountInCents: item.amountInCents,
+              currency: item.currency,
+              buyerName: lockedOrder.customerName,
+              eventTitle: lockedOrder.eventTitle,
+              stripeRefundId: stripeRefundId || item.stripeRefundId,
+              confirmedAtIso: null,
+              reasonSummary: describeLatePaymentReason(item.reason),
+            },
+          });
+          enqueuedEmail = res.enqueued;
+        }
       }
 
       return { outcome: 'manualReview' as const, enqueuedEmail };
@@ -942,6 +1156,10 @@ export async function processClaimedOrderRefundItem(
   workerId: string,
   options?: { randomFn?: () => number }
 ): Promise<'succeeded' | 'stripePending' | 'retried' | 'manualReview' | 'leaseLost'> {
+  if (!isWorkerClaimableRefundKind(item.refundKind)) {
+    return 'leaseLost';
+  }
+
   if (item.amountInCents <= 0) {
     const res = await finalizeRefundManualReviewInTx({
       item,
@@ -955,6 +1173,7 @@ export async function processClaimedOrderRefundItem(
   }
 
   let postCommitWakeEmail = false;
+  let postCommitWaitlistTiers: string[] = [];
 
   try {
     // 1. Reconcile existing Stripe refunds on the PaymentIntent before issuing another refund
@@ -976,12 +1195,33 @@ export async function processClaimedOrderRefundItem(
       return res.outcome;
     }
 
+    const siblingOrderRefunds = await prisma.orderRefund.findMany({
+      where: {
+        stripePaymentIntentId: item.stripePaymentIntentId,
+        id: { not: item.id },
+      },
+      select: { id: true, stripeRefundId: true },
+    });
+
+    const siblingExclusions: SiblingStripeRefundExclusion | undefined =
+      siblingOrderRefunds.length > 0
+        ? {
+            orderRefundIds: new Set(siblingOrderRefunds.map((s) => s.id)),
+            stripeRefundIds: new Set(
+              siblingOrderRefunds
+                .map((s) => s.stripeRefundId)
+                .filter((id): id is string => typeof id === 'string' && id.length > 0)
+            ),
+          }
+        : undefined;
+
     const reconcile = evaluateExistingStripeRefunds(
       existingRefunds,
       item.amountInCents,
       item.currency,
       item.id,
-      item.stripeRefundId
+      item.stripeRefundId,
+      siblingExclusions
     );
 
     if (reconcile.kind === 'AMBIGUOUS_ESCALATE') {
@@ -1001,15 +1241,18 @@ export async function processClaimedOrderRefundItem(
     if (reconcile.kind === 'RECONCILED_SUCCEEDED' || reconcile.kind === 'RECONCILED_PENDING') {
       stripeRefund = reconcile.refund;
     } else {
-      // 2. Create full refund with deterministic idempotencyKey (never pass custom text to Stripe top-level `reason`)
+      // 2. Create refund with deterministic idempotencyKey (never pass custom text to Stripe top-level `reason`)
       stripeRefund = await stripe.refunds.create(
         {
           payment_intent: item.stripePaymentIntentId,
           amount: item.amountInCents,
           metadata: {
             orderRefundId: item.id,
+            refundKind: item.refundKind,
             ...(item.orderId ? { orderId: item.orderId } : {}),
-            latePaymentReason: item.reason,
+            ...(item.refundKind === OrderRefundKind.LATE_PAYMENT
+              ? { latePaymentReason: item.reason }
+              : {}),
           },
         },
         {
@@ -1037,6 +1280,28 @@ export async function processClaimedOrderRefundItem(
     }
 
     if (stripeRefund.status === 'succeeded') {
+      if (isBuyerTicketRefundKind(item.refundKind)) {
+        const fin = await finalizeBuyerRefundSucceededInTx({
+          item,
+          workerId,
+          stripeRefundId: stripeRefund.id,
+          stripeChargeId:
+            typeof stripeRefund.charge === 'string'
+              ? stripeRefund.charge
+              : stripeRefund.charge?.id ?? item.stripeChargeId,
+          succeededAt: new Date(),
+        });
+        postCommitWakeEmail = fin.enqueuedEmail;
+        postCommitWaitlistTiers = fin.tiersToAdvanceWaitlist;
+        if (postCommitWakeEmail) {
+          triggerEmailOutboxDispatch();
+        }
+        if (postCommitWaitlistTiers.length > 0) {
+          await triggerPostCommitWaitlistAdvancement(postCommitWaitlistTiers);
+        }
+        return fin.outcome;
+      }
+
       const fin = await finalizeRefundSucceededInTx({
         item,
         workerId,
@@ -1054,6 +1319,7 @@ export async function processClaimedOrderRefundItem(
       const updated = await prisma.orderRefund.updateMany({
         where: {
           id: item.id,
+          refundKind: item.refundKind,
           status: OrderRefundStatus.PROCESSING,
           lockedBy: workerId,
         },
@@ -1108,6 +1374,7 @@ export async function processClaimedOrderRefundItem(
     const updated = await prisma.orderRefund.updateMany({
       where: {
         id: item.id,
+        refundKind: item.refundKind,
         status: OrderRefundStatus.PROCESSING,
         lockedBy: workerId,
       },
@@ -1171,7 +1438,7 @@ export async function runOrderRefundPass(options?: {
  * Webhook reconciliation helper called inside an existing webhook transaction.
  * Caller MUST lock Order (FOR UPDATE) before calling when an Order exists.
  */
-export async function reconcileOrderRefundFromStripeWebhook(
+async function reconcileLatePaymentOrderRefundsInTx(
   tx: Prisma.TransactionClient,
   params: {
     lockedOrder: {
@@ -1194,7 +1461,11 @@ export async function reconcileOrderRefundFromStripeWebhook(
       metadata?: Record<string, string> | null;
     }>;
   }
-): Promise<{ matchedLatePaymentRefund: boolean; enqueuedEmail: boolean }> {
+): Promise<{
+  matchedLatePaymentRefund: boolean;
+  matchedStripeRefundIds: Set<string>;
+  enqueuedEmail: boolean;
+}> {
   const { lockedOrder, paymentIntentId, hasMoreRefunds = false, refunds } = params;
 
   const refundIds = refunds.map((r) => r.id).filter(Boolean);
@@ -1203,36 +1474,96 @@ export async function reconcileOrderRefundFromStripeWebhook(
     .filter((id): id is string => typeof id === 'string' && id.length > 0);
 
   if (!paymentIntentId && refundIds.length === 0 && metaOrderRefundIds.length === 0) {
-    return { matchedLatePaymentRefund: false, enqueuedEmail: false };
+    return {
+      matchedLatePaymentRefund: false,
+      matchedStripeRefundIds: new Set<string>(),
+      enqueuedEmail: false,
+    };
   }
 
-  // Match strictly on trustworthy identifiers (PaymentIntent ID, persisted stripeRefundId, or metadata.orderRefundId).
-  // Never match solely on Order ID so another PaymentIntent's refund on the same Order cannot be misattributed.
+  // Match strictly LATE_PAYMENT OrderRefund records on trustworthy identifiers
+  // (PaymentIntent ID, persisted stripeRefundId, or metadata.orderRefundId).
+  // Buyer/partial ticket refunds are excluded so buyer webhooks never enter late-payment
+  // recovery, mutate PaymentTransaction, or emit late-payment emails.
   const existingRows = await tx.$queryRaw<OrderRefund[]>`
     SELECT *
     FROM "OrderRefund"
-    WHERE (
-      (${paymentIntentId ?? null}::text IS NOT NULL AND "stripePaymentIntentId" = ${paymentIntentId ?? null})
-      OR (${refundIds.length > 0} AND "stripeRefundId" = ANY(${refundIds}))
-      OR (${metaOrderRefundIds.length > 0} AND id = ANY(${metaOrderRefundIds}))
-    )
+    WHERE "refundKind" = 'LATE_PAYMENT'::"OrderRefundKind"
+      AND (
+        (${paymentIntentId ?? null}::text IS NOT NULL AND "stripePaymentIntentId" = ${paymentIntentId ?? null})
+        OR (${refundIds.length > 0} AND "stripeRefundId" = ANY(${refundIds}))
+        OR (${metaOrderRefundIds.length > 0} AND id = ANY(${metaOrderRefundIds}))
+      )
     ORDER BY id ASC
     FOR UPDATE
   `;
 
   if (existingRows.length === 0) {
-    return { matchedLatePaymentRefund: false, enqueuedEmail: false };
+    return {
+      matchedLatePaymentRefund: false,
+      matchedStripeRefundIds: new Set<string>(),
+      enqueuedEmail: false,
+    };
   }
+
+  const matchedStripeRefundIds = new Set<string>();
 
   // Empty or truncated charge.refunds payload cannot safely prove refund outcome;
   // leave record recoverable by worker or a subsequent attributable refund.updated webhook.
   if (hasMoreRefunds || refunds.length === 0) {
-    return { matchedLatePaymentRefund: true, enqueuedEmail: false };
+    return { matchedLatePaymentRefund: true, matchedStripeRefundIds, enqueuedEmail: false };
   }
 
+  const affectedPiIds = Array.from(new Set(existingRows.map((row) => row.stripePaymentIntentId)));
+  const siblingNonLateRefunds = await tx.orderRefund.findMany({
+    where: {
+      stripePaymentIntentId: { in: affectedPiIds },
+      refundKind: { not: OrderRefundKind.LATE_PAYMENT },
+    },
+    select: { id: true, stripeRefundId: true },
+  });
+  const siblingOrderRefundIds = new Set(siblingNonLateRefunds.map((s) => s.id));
+  const siblingStripeRefundIds = new Set(
+    siblingNonLateRefunds
+      .map((s) => s.stripeRefundId)
+      .filter((id): id is string => typeof id === 'string' && id.length > 0)
+  );
+
   let enqueuedEmail = false;
+  let matchedAnyLatePayment = false;
 
   for (const orderRefund of existingRows) {
+    const nonSiblingRefunds = refunds.filter((r) => {
+      const ownedBySiblingMetadata = Boolean(
+        r.metadata?.orderRefundId &&
+          r.metadata.orderRefundId !== orderRefund.id &&
+          siblingOrderRefundIds.has(r.metadata.orderRefundId)
+      );
+      const ownedBySiblingStripeId = Boolean(
+        r.id &&
+          r.id !== orderRefund.stripeRefundId &&
+          siblingStripeRefundIds.has(r.id)
+      );
+      return !ownedBySiblingMetadata && !ownedBySiblingStripeId;
+    });
+
+    // If all incoming Stripe refunds belong to known non-late-payment sibling refunds, ignore cleanly
+    if (nonSiblingRefunds.length === 0) {
+      continue;
+    }
+
+    // Track positively-owned late-payment stripeRefundIds even on already-terminal rows
+    for (const r of nonSiblingRefunds) {
+      if (
+        (orderRefund.stripeRefundId && r.id === orderRefund.stripeRefundId) ||
+        r.metadata?.orderRefundId === orderRefund.id
+      ) {
+        matchedStripeRefundIds.add(r.id);
+      }
+    }
+
+    matchedAnyLatePayment = true;
+
     // Terminal and MANUAL_REVIEW_REQUIRED records must not be overwritten or auto-cleared by ordinary webhooks.
     if (
       orderRefund.status === OrderRefundStatus.SUCCEEDED ||
@@ -1248,7 +1579,7 @@ export async function reconcileOrderRefundFromStripeWebhook(
     }
 
     // Positive ownership proof required: exact persisted stripeRefundId OR metadata.orderRefundId match
-    const matchingRefunds = refunds.filter((r) => {
+    const matchingRefunds = nonSiblingRefunds.filter((r) => {
       const matchesPersisted = Boolean(
         orderRefund.stripeRefundId && r.id === orderRefund.stripeRefundId
       );
@@ -1275,7 +1606,7 @@ export async function reconcileOrderRefundFromStripeWebhook(
       Boolean(targetRefund.currency) &&
       targetRefund.currency.toUpperCase() === orderRefund.currency.toUpperCase();
 
-    if (!amountMatches || !currencyMatches || refunds.length > 1) {
+    if (!amountMatches || !currencyMatches || nonSiblingRefunds.length > 1) {
       const now = new Date();
       await tx.orderRefund.update({
         where: { id: orderRefund.id },
@@ -1419,7 +1750,367 @@ export async function reconcileOrderRefundFromStripeWebhook(
     // Note: if targetRefund.status is null/missing, leave OrderRefund unchanged without confirming success.
   }
 
-  return { matchedLatePaymentRefund: true, enqueuedEmail };
+  return {
+    matchedLatePaymentRefund: matchedAnyLatePayment,
+    matchedStripeRefundIds,
+    enqueuedEmail,
+  };
+}
+
+/**
+ * Webhook reconciliation helper called inside an existing webhook transaction.
+ * Caller MUST lock Order (FOR UPDATE) before calling when an Order exists.
+ */
+export async function reconcileOrderRefundFromStripeWebhook(
+  tx: Prisma.TransactionClient,
+  params: {
+    lockedOrder: {
+      id: string;
+      orderNumber: string;
+      status: OrderStatus;
+      customerEmail: string;
+      customerName: string;
+      eventTitle: string;
+    } | null;
+    paymentIntentId?: string | null;
+    hasMoreRefunds?: boolean;
+    refunds: Array<{
+      id: string;
+      amount: number;
+      currency: string;
+      status: string | null;
+      failure_reason?: string;
+      payment_intent?: string | null;
+      metadata?: Record<string, string> | null;
+    }>;
+  }
+): Promise<{ matchedLatePaymentRefund: boolean; enqueuedEmail: boolean }> {
+  const res = await reconcileLatePaymentOrderRefundsInTx(tx, params);
+  return {
+    matchedLatePaymentRefund: res.matchedLatePaymentRefund,
+    enqueuedEmail: res.enqueuedEmail,
+  };
+}
+
+export async function reconcileOrderRefundFromStripeWebhookWithTrackedIds(
+  tx: Prisma.TransactionClient,
+  params: Parameters<typeof reconcileOrderRefundFromStripeWebhook>[1]
+) {
+  return reconcileLatePaymentOrderRefundsInTx(tx, params);
+}
+
+/**
+ * Reconciles buyer/partial/cancellation ticket refunds (ORGANIZER_TICKET_REFUND, ADMIN_TICKET_REFUND,
+ * EVENT_CANCELLATION) inside an active webhook transaction.
+ * Caller MUST lock Order (FOR UPDATE) before calling so confirmTicketRefundSucceededInTx
+ * maintains canonical Order -> Ticket -> OrderRefund lock order.
+ */
+export async function reconcileBuyerRefundsFromStripeWebhook(
+  tx: Prisma.TransactionClient,
+  params: {
+    lockedOrder: {
+      id: string;
+      orderNumber: string;
+      status: OrderStatus;
+      customerEmail: string;
+      customerName: string;
+      eventTitle: string;
+    } | null;
+    paymentIntentId?: string | null;
+    stripeChargeId?: string | null;
+    hasMoreRefunds?: boolean;
+    refunds: Array<{
+      id: string;
+      amount: number;
+      currency: string;
+      status: string | null;
+      failure_reason?: string;
+      payment_intent?: string | null;
+      metadata?: Record<string, string> | null;
+    }>;
+  }
+): Promise<{
+  matchedBuyerRefund: boolean;
+  matchedStripeRefundIds: Set<string>;
+  enqueuedEmail: boolean;
+  tiersToAdvanceWaitlist: string[];
+}> {
+  const { lockedOrder, paymentIntentId, stripeChargeId, hasMoreRefunds = false, refunds } = params;
+  const matchedStripeRefundIds = new Set<string>();
+  const waitlistTierSet = new Set<string>();
+
+  const refundIds = refunds.map((r) => r.id).filter(Boolean);
+  const metaOrderRefundIds = refunds
+    .map((r) => r.metadata?.orderRefundId)
+    .filter((id): id is string => typeof id === 'string' && id.length > 0);
+
+  if (!paymentIntentId && refundIds.length === 0 && metaOrderRefundIds.length === 0) {
+    return {
+      matchedBuyerRefund: false,
+      matchedStripeRefundIds,
+      enqueuedEmail: false,
+      tiersToAdvanceWaitlist: [],
+    };
+  }
+
+  const orClauses: Prisma.OrderRefundWhereInput[] = [];
+  if (paymentIntentId) {
+    orClauses.push({ stripePaymentIntentId: paymentIntentId });
+  }
+  if (refundIds.length > 0) {
+    orClauses.push({ stripeRefundId: { in: refundIds } });
+  }
+  if (metaOrderRefundIds.length > 0) {
+    orClauses.push({ id: { in: metaOrderRefundIds } });
+  }
+
+  const buyerRows =
+    orClauses.length > 0 && typeof tx.orderRefund?.findMany === 'function'
+      ? await tx.orderRefund.findMany({
+          where: {
+            refundKind: {
+              in: [
+                OrderRefundKind.ORGANIZER_TICKET_REFUND,
+                OrderRefundKind.ADMIN_TICKET_REFUND,
+                OrderRefundKind.EVENT_CANCELLATION,
+              ],
+            },
+            OR: orClauses,
+          },
+          orderBy: { id: 'asc' },
+        })
+      : [];
+
+  if (buyerRows.length === 0) {
+    return {
+      matchedBuyerRefund: false,
+      matchedStripeRefundIds,
+      enqueuedEmail: false,
+      tiersToAdvanceWaitlist: [],
+    };
+  }
+
+  if (hasMoreRefunds || refunds.length === 0) {
+    return {
+      matchedBuyerRefund: true,
+      matchedStripeRefundIds,
+      enqueuedEmail: false,
+      tiersToAdvanceWaitlist: [],
+    };
+  }
+
+  let matchedAnyBuyerRefund = false;
+  let enqueuedEmail = false;
+
+  for (const orderRefund of buyerRows) {
+    // Multiple partial refunds may share one stripePaymentIntentId; match positively to this row.
+    const matchingRefunds = refunds.filter((r) => {
+      if (r.metadata?.orderRefundId && r.metadata.orderRefundId !== orderRefund.id) {
+        return false;
+      }
+      if (r.payment_intent && r.payment_intent !== orderRefund.stripePaymentIntentId) {
+        return false;
+      }
+      const matchesPersisted = Boolean(
+        orderRefund.stripeRefundId && r.id === orderRefund.stripeRefundId
+      );
+      const matchesMetadata = r.metadata?.orderRefundId === orderRefund.id;
+      return matchesPersisted || matchesMetadata;
+    });
+
+    if (matchingRefunds.length === 0) {
+      continue;
+    }
+
+    matchedAnyBuyerRefund = true;
+    for (const r of matchingRefunds) {
+      if (r.id) {
+        matchedStripeRefundIds.add(r.id);
+      }
+    }
+
+    // Preserve terminal, cancelled, or manual-review states
+    if (
+      orderRefund.status === OrderRefundStatus.SUCCEEDED ||
+      orderRefund.status === OrderRefundStatus.MANUALLY_RESOLVED ||
+      orderRefund.status === OrderRefundStatus.MANUAL_REVIEW_REQUIRED ||
+      orderRefund.status === OrderRefundStatus.CANCELLED ||
+      orderRefund.requiresManualResolution
+    ) {
+      continue;
+    }
+
+    const targetRefund = matchingRefunds[0];
+    if (!targetRefund) {
+      continue;
+    }
+
+    const amountMatches = targetRefund.amount === orderRefund.amountInCents;
+    const currencyMatches =
+      Boolean(targetRefund.currency) &&
+      targetRefund.currency.toUpperCase() === orderRefund.currency.toUpperCase();
+
+    if (matchingRefunds.length > 1 || !amountMatches || !currencyMatches) {
+      const now = new Date();
+      await tx.orderRefund.update({
+        where: { id: orderRefund.id },
+        data: {
+          status: OrderRefundStatus.MANUAL_REVIEW_REQUIRED,
+          requiresManualResolution: true,
+          lockedBy: null,
+          lockedUntil: null,
+          failedAt: now,
+          lastErrorCategory: 'ANOMALY',
+          lastErrorCode: 'WEBHOOK_REFUND_MISMATCH',
+          lastErrorMessage: sanitizeRefundDiagnosticMessage(
+            `Webhook buyer refund mismatch for ${targetRefund.id}: observed ${targetRefund.amount} ${targetRefund.currency} across ${matchingRefunds.length} matching refund(s), expected ${orderRefund.amountInCents} ${orderRefund.currency}.`
+          ),
+        },
+      });
+      emitManualReviewCriticalAlert({
+        orderRefundId: orderRefund.id,
+        orderId: orderRefund.orderId,
+        stripePaymentIntentId: orderRefund.stripePaymentIntentId,
+        stripeRefundId: targetRefund.id,
+        amountInCents: orderRefund.amountInCents,
+        currency: orderRefund.currency,
+        code: 'WEBHOOK_REFUND_MISMATCH',
+        message: `Buyer refund webhook mismatch for ${targetRefund.id}.`,
+      });
+      if (lockedOrder?.customerEmail) {
+        const stats = await loadBuyerRefundEmailStats(tx, orderRefund.id, lockedOrder.id);
+        const emailRes = await enqueueBuyerRefundEmail(tx, {
+          kind: 'MANUAL_REVIEW',
+          orderRefundId: orderRefund.id,
+          orderId: lockedOrder.id,
+          recipientEmail: lockedOrder.customerEmail,
+          snapshot: {
+            orderRefundId: orderRefund.id,
+            orderNumber: lockedOrder.orderNumber,
+            refundAmountInCents: orderRefund.amountInCents,
+            currency: orderRefund.currency,
+            buyerName: lockedOrder.customerName,
+            eventTitle: lockedOrder.eventTitle,
+            ticketCount: stats.ticketCount,
+            isPartialRefund: stats.isPartialRefund,
+            stripeRefundId: targetRefund.id,
+            confirmedAtIso: null,
+            reasonSummary: orderRefund.reason || 'Organizer-initiated ticket refund',
+          },
+        });
+        if (emailRes.enqueued) enqueuedEmail = true;
+      }
+      continue;
+    }
+
+    if (targetRefund.status === 'succeeded') {
+      const now = new Date();
+      const fin = await confirmTicketRefundSucceededInTx(tx, {
+        orderRefundId: orderRefund.id,
+        stripeRefundId: targetRefund.id,
+        stripeChargeId: stripeChargeId ?? orderRefund.stripeChargeId,
+        confirmedByUserId: orderRefund.initiatedByUserId,
+        succeededAt: now,
+      });
+      for (const tierId of fin.tiersToAdvanceWaitlist) {
+        waitlistTierSet.add(tierId);
+      }
+      if (!fin.alreadyFinalized && lockedOrder?.customerEmail) {
+        const stats = await loadBuyerRefundEmailStats(tx, orderRefund.id, lockedOrder.id);
+        const emailRes = await enqueueBuyerRefundEmail(tx, {
+          kind: 'CONFIRMED',
+          orderRefundId: orderRefund.id,
+          orderId: lockedOrder.id,
+          recipientEmail: lockedOrder.customerEmail,
+          snapshot: {
+            orderRefundId: orderRefund.id,
+            orderNumber: lockedOrder.orderNumber,
+            refundAmountInCents: orderRefund.amountInCents,
+            currency: orderRefund.currency,
+            buyerName: lockedOrder.customerName,
+            eventTitle: lockedOrder.eventTitle,
+            ticketCount: stats.ticketCount,
+            isPartialRefund: stats.isPartialRefund,
+            stripeRefundId: targetRefund.id,
+            confirmedAtIso: now.toISOString(),
+            reasonSummary: orderRefund.reason || 'Organizer-initiated ticket refund',
+          },
+        });
+        if (emailRes.enqueued) {
+          enqueuedEmail = true;
+        }
+      }
+    } else if (targetRefund.status === 'pending' || targetRefund.status === 'requires_action') {
+      await tx.orderRefund.update({
+        where: { id: orderRefund.id },
+        data: {
+          status: OrderRefundStatus.STRIPE_PENDING,
+          stripeRefundId: targetRefund.id,
+          lockedBy: null,
+          lockedUntil: null,
+        },
+      });
+    } else if (targetRefund.status === 'failed' || targetRefund.status === 'canceled') {
+      const now = new Date();
+      await tx.orderRefund.update({
+        where: { id: orderRefund.id },
+        data: {
+          status: OrderRefundStatus.MANUAL_REVIEW_REQUIRED,
+          requiresManualResolution: true,
+          stripeRefundId: targetRefund.id,
+          failedAt: now,
+          lockedBy: null,
+          lockedUntil: null,
+          lastErrorCategory: 'PERMANENT',
+          lastErrorCode:
+            targetRefund.failure_reason || `STRIPE_REFUND_${targetRefund.status.toUpperCase()}`,
+          lastErrorMessage: `Stripe reported buyer refund ${targetRefund.id} status '${targetRefund.status}'.`,
+        },
+      });
+      emitManualReviewCriticalAlert({
+        orderRefundId: orderRefund.id,
+        orderId: orderRefund.orderId,
+        stripePaymentIntentId: orderRefund.stripePaymentIntentId,
+        stripeRefundId: targetRefund.id,
+        amountInCents: orderRefund.amountInCents,
+        currency: orderRefund.currency,
+        code: targetRefund.failure_reason || `STRIPE_REFUND_${targetRefund.status.toUpperCase()}`,
+        message: `Stripe reported buyer refund ${targetRefund.id} status '${targetRefund.status}'.`,
+      });
+      if (lockedOrder?.customerEmail) {
+        const stats = await loadBuyerRefundEmailStats(tx, orderRefund.id, lockedOrder.id);
+        const emailRes = await enqueueBuyerRefundEmail(tx, {
+          kind: 'MANUAL_REVIEW',
+          orderRefundId: orderRefund.id,
+          orderId: lockedOrder.id,
+          recipientEmail: lockedOrder.customerEmail,
+          snapshot: {
+            orderRefundId: orderRefund.id,
+            orderNumber: lockedOrder.orderNumber,
+            refundAmountInCents: orderRefund.amountInCents,
+            currency: orderRefund.currency,
+            buyerName: lockedOrder.customerName,
+            eventTitle: lockedOrder.eventTitle,
+            ticketCount: stats.ticketCount,
+            isPartialRefund: stats.isPartialRefund,
+            stripeRefundId: targetRefund.id,
+            confirmedAtIso: null,
+            reasonSummary: orderRefund.reason || 'Organizer-initiated ticket refund',
+          },
+        });
+        if (emailRes.enqueued) {
+          enqueuedEmail = true;
+        }
+      }
+    }
+  }
+
+  return {
+    matchedBuyerRefund: matchedAnyBuyerRefund,
+    matchedStripeRefundIds,
+    enqueuedEmail,
+    tiersToAdvanceWaitlist: Array.from(waitlistTierSet),
+  };
 }
 
 /**
@@ -1515,6 +2206,7 @@ export async function resolveManualOrderRefund(input: {
     });
 
     if (
+      refund.refundKind === OrderRefundKind.LATE_PAYMENT &&
       lockedOrder &&
       (input.action === 'REFUNDED_MANUALLY' || input.action === 'CONFIRMED_ALREADY_REFUNDED')
     ) {
@@ -1542,7 +2234,12 @@ export async function resolveManualOrderRefund(input: {
     // never emit stale "still unresolved" notices or fail permanently on dispatch.
     await tx.emailOutbox.updateMany({
       where: {
-        dedupeKey: buildLatePaymentRefundManualReviewDedupeKey(refund.id),
+        dedupeKey: {
+          in: [
+            buildLatePaymentRefundManualReviewDedupeKey(refund.id),
+            buildBuyerRefundManualReviewDedupeKey(refund.id),
+          ],
+        },
         status: EmailOutboxStatus.PENDING,
       },
       data: {

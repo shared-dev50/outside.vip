@@ -1,8 +1,9 @@
 import { api } from "../lib/api";
 import { useOptionalAuth } from "../context/AuthContext";
+import { OrderRefundModal } from "../components/orders/OrderRefundModal";
 import { OrderStatus } from "../types";
 import { useQuery } from "@tanstack/react-query";
-import { AlertCircle, ChevronDown, Search, X } from "lucide-react";
+import { AlertCircle, ChevronDown, RotateCcw, Search, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
@@ -22,6 +23,7 @@ export const OrdersPage: React.FC = () => {
   const [selectedStatus, setSelectedStatus] = useState<OrderStatus | undefined>(initialStatus);
   const [currentPage, setCurrentPage] = useState<number>(initialPage);
   const [sortBy, setSortBy] = useState<string>(initialSortBy);
+  const [activeRefundOrderId, setActiveRefundOrderId] = useState<string | null>(null);
 
   useEffect(() => {
     const params = new URLSearchParams();
@@ -164,62 +166,97 @@ export const OrdersPage: React.FC = () => {
         </div>
       </div>
       <div className="overflow-x-auto">
-        <table className="table table-zebra w-full">
-          <thead>
+        <table className="w-full text-left border-collapse bg-white border border-stone-200 rounded-xl overflow-hidden text-sm">
+          <thead className="bg-stone-50 border-b border-stone-200 text-xs uppercase tracking-wider text-stone-600">
             <tr>
-              <th>
-                <input
-                  type="text"
-                  placeholder="Order #"
-                  className="input input-sm input-bordered w-full"
-                />
-              </th>
-              <th>
-                <input
-                  type="text"
-                  placeholder="Date"
-                  className="input input-sm input-bordered w-full"
-                />
-              </th>
-              <th>
-                <input
-                  type="text"
-                  placeholder="Event"
-                  className="input input-sm input-bordered w-full"
-                />
-              </th>
-              <th>
-                <input
-                  type="text"
-                  placeholder="Tickets"
-                  className="input input-sm input-bordered w-full"
-                />
-              </th>
-              <th>
-                <input
-                  type="text"
-                  placeholder="Total"
-                  className="input input-sm input-bordered w-full"
-                />
-              </th>
+              <th className="px-4 py-3 font-semibold">Order #</th>
+              <th className="px-4 py-3 font-semibold">Date</th>
+              <th className="px-4 py-3 font-semibold">Customer</th>
+              <th className="px-4 py-3 font-semibold">Event</th>
+              <th className="px-4 py-3 font-semibold">Tickets</th>
+              <th className="px-4 py-3 font-semibold">Total</th>
+              <th className="px-4 py-3 font-semibold">Status & Refunds</th>
+              <th className="px-4 py-3 font-semibold text-right">Actions</th>
             </tr>
           </thead>
 
-          <tbody>
-            {orders.map((order) => (
-              <tr key={order.id}>
-                <td>{order.orderNumber}</td>
-                <td>{order.createdAt}</td>
-                <td>{order.event.title}</td>
-                <td>{order.ticketsCount}</td>
-                <td>
-                  $ {Number(order.totalInCents * order.ticketsCount).toFixed(2)}
-                </td>
-              </tr>
-            ))}
+          <tbody className="divide-y divide-stone-200">
+            {orders.map((order) => {
+              const refundedCents = order.refundedAmountInCents ?? 0;
+              const pendingRefundCents = order.pendingRefundAmountInCents ?? 0;
+              const currency = (order.currency || "USD").toUpperCase();
+
+              return (
+                <tr key={order.id} className="hover:bg-stone-50/70">
+                  <td className="px-4 py-3 font-mono font-semibold text-stone-900">
+                    #{order.orderNumber}
+                  </td>
+                  <td className="px-4 py-3 text-xs text-stone-600 whitespace-nowrap">
+                    {new Date(order.createdAt).toLocaleString()}
+                  </td>
+                  <td className="px-4 py-3">
+                    <div className="font-medium text-stone-900">{order.customerName}</div>
+                    <div className="text-xs text-stone-500">{order.customerEmail}</div>
+                  </td>
+                  <td className="px-4 py-3 text-stone-800">{order.event.title}</td>
+                  <td className="px-4 py-3 text-stone-700">{order.ticketsCount}</td>
+                  <td className="px-4 py-3 font-mono font-medium text-stone-900 whitespace-nowrap">
+                    {order.totalInCents === 0
+                      ? "FREE"
+                      : `${(order.totalInCents / 100).toFixed(2)} ${currency}`}
+                  </td>
+                  <td className="px-4 py-3 space-y-1 text-xs">
+                    <span className="inline-block px-2 py-0.5 rounded-full font-semibold border bg-stone-100 text-stone-800 border-stone-200">
+                      {order.status}
+                    </span>
+                    {refundedCents > 0 && (
+                      <div className="text-rose-700 font-medium">
+                        Refunded: {(refundedCents / 100).toFixed(2)} {currency}
+                      </div>
+                    )}
+                    {pendingRefundCents > 0 && (
+                      <div className="text-amber-700 font-medium">
+                        Pending Refund: {(pendingRefundCents / 100).toFixed(2)} {currency}
+                      </div>
+                    )}
+                  </td>
+                  <td className="px-4 py-3 text-right">
+                    {order.canManageRefunds && order.status === "COMPLETED" && (
+                      <button
+                        type="button"
+                        onClick={() => setActiveRefundOrderId(order.id)}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-stone-300 bg-white hover:bg-stone-900 hover:text-white text-stone-800 text-xs font-semibold transition-colors"
+                      >
+                        <RotateCcw className="w-3.5 h-3.5" />
+                        Manage Refunds
+                      </button>
+                    )}
+                    {order.canManageRefunds && order.status === "REFUNDED" && (
+                      <button
+                        type="button"
+                        onClick={() => setActiveRefundOrderId(order.id)}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-stone-200 bg-stone-50 hover:bg-stone-200 text-stone-700 text-xs font-medium transition-colors"
+                      >
+                        Refund Details
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
+
+      {activeRefundOrderId && (
+        <OrderRefundModal
+          orderId={activeRefundOrderId}
+          onClose={() => setActiveRefundOrderId(null)}
+          onRefundUpdated={() => {
+            refetch();
+          }}
+        />
+      )}
     </div>
   );
 };

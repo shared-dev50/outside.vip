@@ -1,6 +1,7 @@
 import Stripe from 'stripe';
 import {
   Prisma,
+  OrderRefundKind,
   PaymentProvider,
   PaymentStatus,
   OrderStatus,
@@ -48,8 +49,10 @@ import { fulfillOrderCompletionInTx } from '../orders/orderFulfillment.service.j
 import { triggerEmailOutboxDispatch } from '../notifications/emailOutboxWorker.js';
 import { processWaitlistForTier } from '../waitlist/waitlist.service.js';
 import {
+  buildLatePaymentRefundIdempotencyKey,
   enqueueOrderRefund,
-  reconcileOrderRefundFromStripeWebhook,
+  reconcileBuyerRefundsFromStripeWebhook,
+  reconcileOrderRefundFromStripeWebhookWithTrackedIds,
 } from '../refunds/orderRefund.service.js';
 import { triggerOrderRefundDispatch } from '../refunds/orderRefundWorker.js';
 
@@ -217,6 +220,9 @@ export async function processStripeWebhookEvent(
             const charge = event.data.object as Stripe.Charge;
             const res = await handleChargeRefunded(tx, charge);
             shouldWakeOutbox = shouldWakeOutbox || res.enqueuedEmail;
+            if (res.releasedWaitlistTierIds.length > 0) {
+              releasedWaitlistTierIds.push(...res.releasedWaitlistTierIds);
+            }
             break;
           }
 
@@ -226,6 +232,9 @@ export async function processStripeWebhookEvent(
             const refund = event.data.object as Stripe.Refund;
             const res = await handleRefundEvent(tx, refund);
             shouldWakeOutbox = shouldWakeOutbox || res.enqueuedEmail;
+            if (res.releasedWaitlistTierIds.length > 0) {
+              releasedWaitlistTierIds.push(...res.releasedWaitlistTierIds);
+            }
             break;
           }
 
@@ -553,9 +562,9 @@ export async function handlePaymentIntentSucceeded(
     return { fulfilled: false, enqueuedEmail: false, enqueuedRefund: false };
   }
 
-  // Idempotency guard: if an OrderRefund already exists for this PaymentIntent, do not re-process
+  // Idempotency guard: if a late-payment OrderRefund already exists for this PaymentIntent, do not re-process
   const existingRefundForPi = await tx.orderRefund.findUnique({
-    where: { stripePaymentIntentId: paymentIntent.id },
+    where: { idempotencyKey: buildLatePaymentRefundIdempotencyKey(paymentIntent.id) },
   });
   if (existingRefundForPi) {
     return { fulfilled: false, enqueuedEmail: false, enqueuedRefund: false };
@@ -1441,13 +1450,16 @@ async function handleChargeUpdated(
   const hasLatePaymentRefundForPi = paymentIntentId
     ? Boolean(
         await tx.orderRefund.findUnique({
-          where: { stripePaymentIntentId: paymentIntentId },
+          where: { idempotencyKey: buildLatePaymentRefundIdempotencyKey(paymentIntentId) },
           select: { id: true },
         })
       )
     : Boolean(
         await tx.orderRefund.findFirst({
-          where: { orderId: order.id },
+          where: {
+            orderId: order.id,
+            refundKind: OrderRefundKind.LATE_PAYMENT,
+          },
           select: { id: true },
         })
       );
@@ -1674,7 +1686,7 @@ async function handleChargeUpdated(
 async function handleChargeRefunded(
   tx: Prisma.TransactionClient,
   charge: Stripe.Charge
-): Promise<{ enqueuedEmail: boolean }> {
+): Promise<{ enqueuedEmail: boolean; releasedWaitlistTierIds: string[] }> {
   const paymentIntentId = typeof charge.payment_intent === 'string'
     ? charge.payment_intent
     : (charge.payment_intent as Stripe.PaymentIntent)?.id;
@@ -1712,6 +1724,7 @@ async function handleChargeRefunded(
           ...(metaOrderRefundIds.length > 0 ? [{ id: { in: metaOrderRefundIds } }] : []),
         ],
       },
+      orderBy: { createdAt: 'asc' },
       select: { orderId: true },
     });
     if (linkedRefund?.orderId) {
@@ -1730,26 +1743,39 @@ async function handleChargeRefunded(
       }
     : null;
 
-  const lateReconcile = await reconcileOrderRefundFromStripeWebhook(tx, {
+  const lateReconcile = await reconcileOrderRefundFromStripeWebhookWithTrackedIds(tx, {
     lockedOrder: lockedOrderSummary,
     paymentIntentId: paymentIntentId ?? null,
     hasMoreRefunds,
     refunds: chargeRefunds,
   });
 
+  const buyerReconcile = await reconcileBuyerRefundsFromStripeWebhook(tx, {
+    lockedOrder: lockedOrderSummary,
+    paymentIntentId: paymentIntentId ?? null,
+    stripeChargeId: charge.id,
+    hasMoreRefunds,
+    refunds: chargeRefunds,
+  });
+
   if (!order) {
-    if (lateReconcile.matchedLatePaymentRefund) {
-      return { enqueuedEmail: lateReconcile.enqueuedEmail };
+    if (lateReconcile.matchedLatePaymentRefund || buyerReconcile.matchedBuyerRefund) {
+      return {
+        enqueuedEmail: lateReconcile.enqueuedEmail || buyerReconcile.enqueuedEmail,
+        releasedWaitlistTierIds: buyerReconcile.tiersToAdvanceWaitlist,
+      };
     }
     throw new Error(`[ChargeRefunded] Order not found for charge ${charge.id}; throwing to trigger Stripe webhook retry`);
   }
 
-  // Isolate refund ledger effects by PaymentIntent:
-  // Check whether this incoming charge/refund belongs to an OrderRefund OR a distinct PI from the fulfilled Order.
+  // Isolate refund ledger effects by PaymentIntent and refundKind:
+  // Only a matching LATE_PAYMENT OrderRefund suppresses recordRefundLedger; buyer/partial
+  // ticket refunds sharing a PaymentIntent must never be mistaken for late-payment refunds.
   const orderRefundForIncomingCharge =
     paymentIntentId || refundIds.length > 0 || metaOrderRefundIds.length > 0
       ? await tx.orderRefund.findFirst({
           where: {
+            refundKind: OrderRefundKind.LATE_PAYMENT,
             OR: [
               ...(paymentIntentId ? [{ stripePaymentIntentId: paymentIntentId }] : []),
               ...(refundIds.length > 0 ? [{ stripeRefundId: { in: refundIds } }] : []),
@@ -1774,29 +1800,75 @@ async function handleChargeRefunded(
     select: { id: true },
   });
 
+  const knownTrackedStripeRefundIds = new Set<string>([
+    ...lateReconcile.matchedStripeRefundIds,
+    ...buyerReconcile.matchedStripeRefundIds,
+  ]);
+  const unmatchedExternalRefunds = chargeRefunds.filter(
+    (r) =>
+      r.id &&
+      !knownTrackedStripeRefundIds.has(r.id) &&
+      r.status !== 'failed' &&
+      r.status !== 'canceled'
+  );
+  const hasUntrackedExternalRefund =
+    chargeRefunds.length > 0
+      ? unmatchedExternalRefunds.length > 0
+      : !lateReconcile.matchedLatePaymentRefund && !buyerReconcile.matchedBuyerRefund;
+
   const isLegitimateSaleRefund =
     !orderRefundForIncomingCharge &&
     !isDifferentPiFromCompletedOrder &&
     (Boolean(saleLedgerEvidence) || order.status === OrderStatus.COMPLETED);
 
-  if (isLegitimateSaleRefund) {
-    const stripeRefundId = charge.refunds?.data?.[0]?.id;
-    await recordRefundLedger(tx, {
-      orderId: order.id,
-      amountInCents: charge.amount_refunded,
-      stripeRefundId,
-      stripeChargeId: charge.id,
-      reason: 'Stripe charge refunded',
-    });
+  if (isLegitimateSaleRefund && hasUntrackedExternalRefund) {
+    if (knownTrackedStripeRefundIds.size > 0 && unmatchedExternalRefunds.length > 0) {
+      for (const ext of unmatchedExternalRefunds) {
+        const extAmount = ext.amount > 0 ? ext.amount : charge.amount_refunded;
+        await recordRefundLedger(tx, {
+          orderId: order.id,
+          amountInCents: extAmount,
+          stripeRefundId: ext.id,
+          stripeChargeId: charge.id,
+          reason: 'External Stripe refund reconciled',
+        });
+      }
+      if (typeof charge.amount_refunded === 'number' && charge.amount_refunded > 0) {
+        const syncedRefunded = Math.max(
+          order.refundedAmountInCents ?? 0,
+          Math.min(order.totalInCents, charge.amount_refunded)
+        );
+        const fullyRefundedExternally = syncedRefunded >= order.totalInCents;
+        await tx.order.update({
+          where: { id: order.id },
+          data: {
+            refundedAmountInCents: syncedRefunded,
+            ...(fullyRefundedExternally ? { status: OrderStatus.REFUNDED } : {}),
+          },
+        });
+      }
+    } else {
+      const stripeRefundId = unmatchedExternalRefunds[0]?.id ?? charge.refunds?.data?.[0]?.id;
+      await recordRefundLedger(tx, {
+        orderId: order.id,
+        amountInCents: charge.amount_refunded,
+        stripeRefundId,
+        stripeChargeId: charge.id,
+        reason: 'Stripe charge refunded',
+      });
+    }
   }
 
-  return { enqueuedEmail: lateReconcile.enqueuedEmail };
+  return {
+    enqueuedEmail: lateReconcile.enqueuedEmail || buyerReconcile.enqueuedEmail,
+    releasedWaitlistTierIds: buyerReconcile.tiersToAdvanceWaitlist,
+  };
 }
 
 async function handleRefundEvent(
   tx: Prisma.TransactionClient,
   refund: Stripe.Refund
-): Promise<{ enqueuedEmail: boolean }> {
+): Promise<{ enqueuedEmail: boolean; releasedWaitlistTierIds: string[] }> {
   const paymentIntentId = typeof refund.payment_intent === 'string'
     ? refund.payment_intent
     : (refund.payment_intent as Stripe.PaymentIntent)?.id;
@@ -1814,6 +1886,7 @@ async function handleRefundEvent(
           ...(metaOrderRefundId ? [{ id: metaOrderRefundId }] : []),
         ],
       },
+      orderBy: { createdAt: 'asc' },
       select: { orderId: true },
     });
     if (linked?.orderId) {
@@ -1821,33 +1894,79 @@ async function handleRefundEvent(
     }
   }
 
-  const res = await reconcileOrderRefundFromStripeWebhook(tx, {
-    lockedOrder: order
-      ? {
-          id: order.id,
-          orderNumber: order.orderNumber,
-          status: order.status,
-          customerEmail: order.customerEmail,
-          customerName: order.customerName,
-          eventTitle: order.event?.title || 'Outside.vip Event',
-        }
-      : null,
+  const lockedOrderSummary = order
+    ? {
+        id: order.id,
+        orderNumber: order.orderNumber,
+        status: order.status,
+        customerEmail: order.customerEmail,
+        customerName: order.customerName,
+        eventTitle: order.event?.title || 'Outside.vip Event',
+      }
+    : null;
+
+  const refundPayload = [
+    {
+      id: refund.id,
+      amount: refund.amount,
+      currency: (refund.currency || order?.currency || 'USD').toUpperCase(),
+      status: typeof refund.status === 'string' ? refund.status : null,
+      failure_reason: refund.failure_reason,
+      payment_intent: paymentIntentId ?? null,
+      metadata: (refund.metadata || null) as Record<string, string> | null,
+    },
+  ];
+
+  const lateRes = await reconcileOrderRefundFromStripeWebhookWithTrackedIds(tx, {
+    lockedOrder: lockedOrderSummary,
     paymentIntentId: paymentIntentId ?? null,
     hasMoreRefunds: false,
-    refunds: [
-      {
-        id: refund.id,
-        amount: refund.amount,
-        currency: (refund.currency || order?.currency || 'USD').toUpperCase(),
-        status: typeof refund.status === 'string' ? refund.status : null,
-        failure_reason: refund.failure_reason,
-        payment_intent: paymentIntentId ?? null,
-        metadata: (refund.metadata || null) as Record<string, string> | null,
-      },
-    ],
+    refunds: refundPayload,
   });
 
-  return { enqueuedEmail: res.enqueuedEmail };
+  const chargeId =
+    typeof refund.charge === 'string'
+      ? refund.charge
+      : (refund.charge as Stripe.Charge)?.id ?? null;
+
+  const buyerRes = await reconcileBuyerRefundsFromStripeWebhook(tx, {
+    lockedOrder: lockedOrderSummary,
+    paymentIntentId: paymentIntentId ?? null,
+    stripeChargeId: chargeId,
+    hasMoreRefunds: false,
+    refunds: refundPayload,
+  });
+
+  // External Stripe Dashboard refund arriving via refund.created/refund.updated
+  const matchedTracked = lateRes.matchedLatePaymentRefund || buyerRes.matchedBuyerRefund;
+  if (!matchedTracked && order && refund.status === 'succeeded' && refund.amount > 0) {
+    const isDifferentPi = Boolean(
+      paymentIntentId && order.paymentReference && order.paymentReference !== paymentIntentId
+    );
+    if (!isDifferentPi && order.status === OrderStatus.COMPLETED) {
+      const saleEvidence = await tx.financialLedgerEntry.findFirst({
+        where: {
+          orderId: order.id,
+          type: { in: [LedgerEntryType.TICKET_SALE_PENDING, LedgerEntryType.TICKET_SALE_CLEARED] },
+        },
+        select: { id: true },
+      });
+      if (saleEvidence) {
+        await recordRefundLedger(tx, {
+          orderId: order.id,
+          amountInCents: refund.amount,
+          stripeRefundId: refund.id,
+          stripeChargeId: chargeId ?? undefined,
+          reason: 'External Stripe refund reconciled',
+        });
+      }
+    }
+  }
+
+  return {
+    enqueuedEmail: lateRes.enqueuedEmail || buyerRes.enqueuedEmail,
+    releasedWaitlistTierIds: buyerRes.tiersToAdvanceWaitlist,
+  };
 }
 
 async function handleDisputeEvent(

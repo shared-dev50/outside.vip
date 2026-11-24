@@ -5,6 +5,7 @@ import { prisma } from '../../db/prisma.js';
 import { calculateCheckoutFeeBreakdown } from '../checkout/checkout.financials.js';
 import { BadRequestError } from '../../utils/errors.js';
 import { isSupportedPlatformCurrency } from './stripeCountries.js';
+import { buildLatePaymentRefundIdempotencyKey } from '../refunds/refundAllocation.domain.js';
 
 export interface RecordTicketSaleParams {
   orderId: string;
@@ -26,6 +27,21 @@ export interface RecordRefundParams {
   amountInCents: number;
   stripeRefundId?: string;
   stripeChargeId?: string;
+  reason?: string;
+}
+
+export interface RecordTicketRefundLedgerParams {
+  orderId: string;
+  orderRefundId: string;
+  amountInCents: number;
+  ticketSubtotalInCents: number;
+  platformFeeReversedInCents: number;
+  serviceFeeReversedInCents: number;
+  processingFeeInCents: number;
+  organizerDebitInCents: number;
+  platformExpenseInCents: number;
+  stripeRefundId?: string | null;
+  stripeChargeId?: string | null;
   reason?: string;
 }
 
@@ -630,12 +646,59 @@ export async function reconcileChargeRefundBeforeSettlement(
 
   const hasLateRefund = paymentReference
     ? await tx.orderRefund.findUnique({
-        where: { stripePaymentIntentId: paymentReference },
+        where: { idempotencyKey: buildLatePaymentRefundIdempotencyKey(paymentReference) },
         select: { id: true },
       })
     : null;
 
   if (hasLateRefund) {
+    return;
+  }
+
+  // Also exclude already-tracked buyer/cancellation OrderRefund amounts (or matched Stripe refunds)
+  // so partial/full Workstream D ticket refunds do not trigger a second pro-rata deduction on charge.updated.
+  const trackedBuyerRefunds = await tx.orderRefund.findMany({
+    where: {
+      orderId,
+      refundKind: {
+        in: ['ORGANIZER_TICKET_REFUND', 'ADMIN_TICKET_REFUND', 'EVENT_CANCELLATION'],
+      },
+      status: {
+        in: ['SUCCEEDED', 'MANUALLY_RESOLVED'],
+      },
+    },
+    select: {
+      amountInCents: true,
+      stripeRefundId: true,
+    },
+  });
+
+  if (trackedBuyerRefunds.length > 0) {
+    const trackedRefundIds = new Set(
+      trackedBuyerRefunds
+        .map((r) => r.stripeRefundId)
+        .filter((id): id is string => typeof id === 'string' && id.length > 0)
+    );
+    const trackedSucceededTotal = trackedBuyerRefunds.reduce(
+      (sum, r) => sum + r.amountInCents,
+      0
+    );
+    const untrackedChargeRefunds = (charge.refunds?.data || []).filter(
+      (r) => !trackedRefundIds.has(r.id) && (r as any).status !== 'failed' && (r as any).status !== 'canceled'
+    );
+    const remainingUntrackedInCents = Math.max(0, charge.amount_refunded - trackedSucceededTotal);
+    if (remainingUntrackedInCents <= 0) {
+      return;
+    }
+    const singleUntrackedId =
+      untrackedChargeRefunds.length === 1 ? untrackedChargeRefunds[0].id : undefined;
+    await recordRefundLedger(tx, {
+      orderId,
+      amountInCents: remainingUntrackedInCents,
+      stripeRefundId: singleUntrackedId,
+      stripeChargeId: charge.id,
+      reason: 'Stripe charge refund reconciled prior to settlement',
+    });
     return;
   }
 
@@ -1030,6 +1093,256 @@ export async function recordRefundLedger(
       },
     });
   }
+}
+
+/**
+ * Exact ticket-allocation refund ledger accounting for confirmed Stripe buyer/organizer/admin refunds.
+ * Caller MUST hold canonical Order FOR UPDATE lock and invoke strictly after Stripe refund success.
+ *
+ * - Uses persisted integer allocations (`organizerDebitInCents`, fee reversals, `platformExpenseInCents`).
+ * - Idempotent across repeated webhook / worker delivery via `metadata.orderRefundId` (and `stripeRefundId`).
+ * - Pre-settlement orders deduct `PENDING` first (`REFUND_PENDING`) so `settleOrderEarnings` cannot
+ *   settle already-refunded pending earnings into `AVAILABLE`.
+ * - Settled / post-transfer portions deduct `AVAILABLE` first (`REFUND_CLEARED`) and track any
+ *   excess or withdrawn earnings as signed negative `RECOVERABLE` (`REFUND_POST_TRANSFER`), preserving
+ *   withdrawal netting.
+ * - Platform-borne processing costs post positively to `PLATFORM_EXPENSE` (Stage 2 expense convention),
+ *   and reversed platform/service fees offset `PLATFORM_REVENUE`.
+ */
+export async function recordTicketRefundLedgerInTx(
+  tx: Prisma.TransactionClient,
+  params: RecordTicketRefundLedgerParams
+): Promise<{ recorded: boolean; duplicate: boolean }> {
+  const {
+    orderId,
+    orderRefundId,
+    amountInCents,
+    ticketSubtotalInCents,
+    platformFeeReversedInCents,
+    serviceFeeReversedInCents,
+    processingFeeInCents,
+    organizerDebitInCents,
+    platformExpenseInCents,
+    stripeRefundId,
+    stripeChargeId,
+    reason,
+  } = params;
+
+  const order = await tx.order.findUnique({
+    where: { id: orderId },
+    include: {
+      event: { select: { id: true, organizerId: true, title: true } },
+    },
+  });
+
+  if (!order) {
+    throw new Error(`Order ${orderId} not found for exact ticket refund ledger posting.`);
+  }
+
+  const existingOrderEntries = await tx.financialLedgerEntry.findMany({
+    where: { orderId: order.id },
+    select: { id: true, stripeReferenceId: true, metadata: true },
+  });
+
+  const alreadyPostedForRefund = existingOrderEntries.some((entry) => {
+    const meta =
+      entry.metadata && typeof entry.metadata === 'object' && !Array.isArray(entry.metadata)
+        ? (entry.metadata as Record<string, unknown>)
+        : null;
+    if (meta?.orderRefundId === orderRefundId) {
+      return true;
+    }
+    if (stripeRefundId && entry.stripeReferenceId === stripeRefundId) {
+      return true;
+    }
+    return false;
+  });
+
+  if (alreadyPostedForRefund) {
+    return { recorded: false, duplicate: true };
+  }
+
+  const organizerId = order.event.organizerId;
+  const currency = order.currency.toUpperCase();
+  const balance = await getOrCreateOrganizerBalance(tx, organizerId, currency);
+  const stripeRef = stripeRefundId || stripeChargeId || null;
+
+  // Determine whether this order's earnings have already cleared to AVAILABLE.
+  const hasClearedSale = await tx.financialLedgerEntry.findFirst({
+    where: {
+      orderId: order.id,
+      type: LedgerEntryType.TICKET_SALE_CLEARED,
+    },
+    select: { id: true },
+  });
+
+  let remainingOrganizerDebit = Math.max(0, organizerDebitInCents);
+
+  if (remainingOrganizerDebit > 0 && !hasClearedSale) {
+    // Pre-settlement: absorb directly from this order's PENDING ledger balance so
+    // future settleOrderEarnings clears only the unrefunded portion.
+    const orderPendingEntries = await tx.financialLedgerEntry.findMany({
+      where: {
+        orderId: order.id,
+        balanceType: LedgerBalanceType.PENDING,
+      },
+      select: { amountInCents: true },
+    });
+    const orderPendingRemaining = Math.max(
+      0,
+      orderPendingEntries.reduce((sum, e) => sum + e.amountInCents, 0)
+    );
+    const pendingDebit = Math.min(
+      remainingOrganizerDebit,
+      orderPendingRemaining,
+      Math.max(0, balance.pendingBalanceInCents)
+    );
+
+    if (pendingDebit > 0) {
+      await tx.organizerBalance.update({
+        where: { userId: organizerId },
+        data: { pendingBalanceInCents: { decrement: pendingDebit } },
+      });
+
+      await tx.financialLedgerEntry.create({
+        data: {
+          type: LedgerEntryType.REFUND_PENDING,
+          balanceType: LedgerBalanceType.PENDING,
+          amountInCents: -pendingDebit,
+          currency,
+          organizerId,
+          eventId: order.eventId,
+          orderId: order.id,
+          stripeReferenceId: stripeRef,
+          description: `Pre-settlement ticket refund deduction for order #${order.orderNumber}${reason ? `: ${reason}` : ''}`,
+          metadata: {
+            idempotencyKey: `ticket_refund_${orderRefundId}_pending`,
+            orderRefundId,
+            stripeRefundId: stripeRefundId ?? null,
+            buyerRefundAmountInCents: amountInCents,
+            ticketSubtotalInCents,
+            pendingDebitInCents: pendingDebit,
+          },
+        },
+      });
+
+      remainingOrganizerDebit -= pendingDebit;
+    }
+  }
+
+  // Re-read current available balance after any pending decrement; absorb cleared earnings next.
+  if (remainingOrganizerDebit > 0) {
+    const currentAvailable = Math.max(0, balance.availableBalanceInCents);
+    const clearedDebit = Math.min(remainingOrganizerDebit, currentAvailable);
+
+    if (clearedDebit > 0) {
+      await tx.organizerBalance.update({
+        where: { userId: organizerId },
+        data: { availableBalanceInCents: { decrement: clearedDebit } },
+      });
+
+      await tx.financialLedgerEntry.create({
+        data: {
+          type: LedgerEntryType.REFUND_CLEARED,
+          balanceType: LedgerBalanceType.AVAILABLE,
+          amountInCents: -clearedDebit,
+          currency,
+          organizerId,
+          eventId: order.eventId,
+          orderId: order.id,
+          stripeReferenceId: stripeRef,
+          description: `Cleared-balance ticket refund deduction for order #${order.orderNumber}${reason ? `: ${reason}` : ''}`,
+          metadata: {
+            idempotencyKey: `ticket_refund_${orderRefundId}_cleared`,
+            orderRefundId,
+            stripeRefundId: stripeRefundId ?? null,
+            buyerRefundAmountInCents: amountInCents,
+            ticketSubtotalInCents,
+            clearedDebitInCents: clearedDebit,
+          },
+        },
+      });
+
+      remainingOrganizerDebit -= clearedDebit;
+    }
+  }
+
+  // Any remaining debit beyond pre-settlement/available earnings (already withdrawn or
+  // organizer-borne processing fees exceeding available balance) becomes recoverable debt.
+  if (remainingOrganizerDebit > 0) {
+    await tx.financialLedgerEntry.create({
+      data: {
+        type: LedgerEntryType.REFUND_POST_TRANSFER,
+        balanceType: LedgerBalanceType.RECOVERABLE,
+        amountInCents: -remainingOrganizerDebit,
+        currency,
+        organizerId,
+        eventId: order.eventId,
+        orderId: order.id,
+        stripeReferenceId: stripeRef,
+        description: `Post-transfer recoverable ticket refund liability for order #${order.orderNumber}${reason ? `: ${reason}` : ''}`,
+        metadata: {
+          idempotencyKey: `ticket_refund_${orderRefundId}_recoverable`,
+          orderRefundId,
+          stripeRefundId: stripeRefundId ?? null,
+          buyerRefundAmountInCents: amountInCents,
+          recoverableInCents: remainingOrganizerDebit,
+        },
+      },
+    });
+  }
+
+  // Reverse buyer-collected platform & service fees on PLATFORM_REVENUE
+  const reversedPlatformAndServiceFees =
+    Math.max(0, platformFeeReversedInCents) + Math.max(0, serviceFeeReversedInCents);
+  if (reversedPlatformAndServiceFees > 0) {
+    await tx.financialLedgerEntry.create({
+      data: {
+        type: LedgerEntryType.ADJUSTMENT,
+        balanceType: LedgerBalanceType.PLATFORM_REVENUE,
+        amountInCents: -reversedPlatformAndServiceFees,
+        currency,
+        organizerId,
+        eventId: order.eventId,
+        orderId: order.id,
+        stripeReferenceId: stripeRef,
+        description: `Platform & service fee reversal for ticket refund on order #${order.orderNumber}`,
+        metadata: {
+          idempotencyKey: `ticket_refund_${orderRefundId}_platform_rev_reversal`,
+          orderRefundId,
+          stripeRefundId: stripeRefundId ?? null,
+          platformFeeReversedInCents,
+          serviceFeeReversedInCents,
+        },
+      },
+    });
+  }
+
+  // Record platform-borne Stripe processing fee loss (Stage 2 positive PLATFORM_EXPENSE convention)
+  if (platformExpenseInCents > 0) {
+    await tx.financialLedgerEntry.create({
+      data: {
+        type: LedgerEntryType.STRIPE_PROCESSING_FEE,
+        balanceType: LedgerBalanceType.PLATFORM_EXPENSE,
+        amountInCents: platformExpenseInCents,
+        currency,
+        organizerId,
+        eventId: order.eventId,
+        orderId: order.id,
+        stripeReferenceId: stripeRef,
+        description: `Platform-borne Stripe processing fee on ticket refund for order #${order.orderNumber}`,
+        metadata: {
+          idempotencyKey: `ticket_refund_${orderRefundId}_platform_expense`,
+          orderRefundId,
+          stripeRefundId: stripeRefundId ?? null,
+          processingFeeInCents,
+          platformExpenseInCents,
+        },
+      },
+    });
+  }
+
+  return { recorded: true, duplicate: false };
 }
 
 /**

@@ -4,7 +4,11 @@ import { prisma } from '../../db/prisma.js';
 import { stripe } from '../../lib/stripe.js';
 import { fulfillPaidOrder, cancelOrderFromPaymentIntent } from '../webhooks/webhook.service.js';
 import { NotFoundError, ForbiddenError, UnauthorizedError, BadRequestError } from '../../utils/errors.js';
-import { generateTicketsPdf } from './ticketPdf.service.js';
+import {
+  filterEligiblePdfTickets,
+  generateTicketsPdf,
+  isTicketAdmissionEligible,
+} from './ticketPdf.service.js';
 
 const orderInclude = {
   event: {
@@ -190,7 +194,15 @@ export async function getOrderByOrderNumber(
           expiresAt: order.expiresAt,
           event: order.event,
           items: order.items,
-          tickets: order.tickets,
+          tickets: (order.tickets || []).map((t) => {
+            const admissionEligible =
+              order.status === 'COMPLETED' && isTicketAdmissionEligible(t.status);
+            return {
+              ...t,
+              admissionEligible,
+              ticketToken: admissionEligible ? t.ticketToken : null,
+            };
+          }),
         },
       },
     });
@@ -224,10 +236,24 @@ export async function downloadOrderTicketsPdf(
     }
 
     if (specificTicketId) {
-      const exists = order.tickets.some((t) => t.id === specificTicketId);
-      if (!exists) {
+      const targetTicket = order.tickets.find((t) => t.id === specificTicketId);
+      if (!targetTicket) {
         throw new NotFoundError(`Ticket '${specificTicketId}' not found in order ${orderNumber}`);
       }
+      if (!isTicketAdmissionEligible(targetTicket.status)) {
+        throw new BadRequestError(
+          `Ticket '${specificTicketId}' is not eligible for admission PDF download (status: ${targetTicket.status}).`,
+          'TICKET_NOT_ELIGIBLE_FOR_PDF'
+        );
+      }
+    }
+
+    const eligibleTickets = filterEligiblePdfTickets(order.tickets, specificTicketId);
+    if (eligibleTickets.length === 0) {
+      throw new BadRequestError(
+        'No eligible admission tickets remain for this order (all passes are cancelled, refunded, or refund pending).',
+        'NO_ELIGIBLE_TICKETS_FOR_PDF'
+      );
     }
 
     const pdfBuffer = await generateTicketsPdf(order as any, specificTicketId);

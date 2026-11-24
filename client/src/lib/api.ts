@@ -38,6 +38,10 @@ import {
   CustomizeSlugResult,
   HostAssignedEventItem,
   HostPromotionalAnalytics,
+  OrderRefundSummary,
+  RefundQuotePreview,
+  InitiateOrderRefundPayload,
+  InitiateOrderRefundResult,
 } from '../types';
 
 export interface EventStaffMember {
@@ -517,9 +521,40 @@ export const api = {
       }),
     getWaitlist: (eventId: string) =>
       request<OrganizerWaitlistResponse>(`/organizer/events/${eventId}/waitlist`),
+    getOrderRefunds: (orderId: string) =>
+      request<OrderRefundSummary>(`/organizer/orders/${encodeURIComponent(orderId)}/refunds`),
+    previewOrderRefund: (
+      orderId: string,
+      payload: {
+        ticketIds: string[];
+        refundStripeProcessingFee?: boolean;
+        feeBearer?: 'ORGANIZER' | 'PLATFORM' | 'SHARED';
+        restoreInventory?: boolean;
+        allowCheckedInOverride?: boolean;
+        overrideReason?: string;
+      }
+    ) =>
+      request<RefundQuotePreview>(
+        `/organizer/orders/${encodeURIComponent(orderId)}/refunds/preview`,
+        {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        }
+      ),
+    initiateOrderRefund: (orderId: string, payload: InitiateOrderRefundPayload) =>
+      request<InitiateOrderRefundResult>(
+        `/organizer/orders/${encodeURIComponent(orderId)}/refunds`,
+        {
+          method: 'POST',
+          headers: payload.idempotencyKey
+            ? { 'Idempotency-Key': payload.idempotencyKey }
+            : undefined,
+          body: JSON.stringify(payload),
+        }
+      ),
     checkInTicket: (payload: { token: string; eventId?: string; idempotencyKey?: string }) =>
       request<{
-        result: 'SUCCESS' | 'ALREADY_CHECKED_IN' | 'INVALID_TOKEN' | 'WRONG_EVENT' | 'CANCELLED_TICKET' | 'UNPAID_ORDER' | 'TICKET_NOT_YET_VALID' | 'TICKET_EXPIRED';
+        result: 'SUCCESS' | 'ALREADY_CHECKED_IN' | 'INVALID_TOKEN' | 'WRONG_EVENT' | 'CANCELLED_TICKET' | 'REFUND_PENDING_TICKET' | 'REFUNDED_TICKET' | 'UNPAID_ORDER' | 'TICKET_NOT_YET_VALID' | 'TICKET_EXPIRED';
         message: string;
         ticket?: any;
         totalCheckedIn?: number;
@@ -1025,6 +1060,8 @@ export const api = {
           | 'INVALID_TOKEN'
           | 'WRONG_EVENT'
           | 'CANCELLED_TICKET'
+          | 'REFUND_PENDING_TICKET'
+          | 'REFUNDED_TICKET'
           | 'UNPAID_ORDER'
           | 'TICKET_NOT_YET_VALID'
           | 'TICKET_EXPIRED';

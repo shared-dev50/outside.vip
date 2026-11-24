@@ -42,6 +42,7 @@ import {
 import { releaseExpiredReservations } from '../modules/checkout/checkout.service.js';
 import { processWaitlistForTier, hashOfferToken } from '../modules/waitlist/waitlist.service.js';
 import {
+  buildLatePaymentRefundIdempotencyKey,
   claimPendingOrderRefundBatch,
   ORDER_REFUND_MAX_ATTEMPTS,
   reapExpiredExhaustedRefundLeases,
@@ -435,7 +436,7 @@ describe('P2-04 Late Payment Protection & Automatic Stripe Refund (Real PostgreS
       await processStripeWebhookEvent(makePiSucceededEvent(order.id, paymentIntentId, order.totalInCents));
 
       const refund = await prisma.orderRefund.findUniqueOrThrow({
-        where: { stripePaymentIntentId: paymentIntentId },
+        where: { idempotencyKey: buildLatePaymentRefundIdempotencyKey(paymentIntentId) },
       });
       const updatedOrder = await prisma.order.findUniqueOrThrow({
         where: { id: order.id },
@@ -465,7 +466,7 @@ describe('P2-04 Late Payment Protection & Automatic Stripe Refund (Real PostgreS
         makePiSucceededEvent(expiredOnEnded.order.id, expiredOnEnded.paymentIntentId, expiredOnEnded.order.totalInCents)
       );
       const refundEnded = await prisma.orderRefund.findUniqueOrThrow({
-        where: { stripePaymentIntentId: expiredOnEnded.paymentIntentId },
+        where: { idempotencyKey: buildLatePaymentRefundIdempotencyKey(expiredOnEnded.paymentIntentId) },
       });
       expect(refundEnded.reason).toBe('EVENT_OR_SALES_CLOSED');
 
@@ -493,7 +494,7 @@ describe('P2-04 Late Payment Protection & Automatic Stripe Refund (Real PostgreS
         )
       );
       const refundClosedWindow = await prisma.orderRefund.findUniqueOrThrow({
-        where: { stripePaymentIntentId: pendingClosedWindow.paymentIntentId },
+        where: { idempotencyKey: buildLatePaymentRefundIdempotencyKey(pendingClosedWindow.paymentIntentId) },
       });
       const refreshedTier = await prisma.ticketTier.findUniqueOrThrow({ where: { id: closedSalesTier.id } });
       expect(refundClosedWindow.reason).toBe('EVENT_OR_SALES_CLOSED');
@@ -566,7 +567,7 @@ describe('P2-04 Late Payment Protection & Automatic Stripe Refund (Real PostgreS
       );
 
       const refund = await prisma.orderRefund.findUniqueOrThrow({
-        where: { stripePaymentIntentId: paymentIntentId },
+        where: { idempotencyKey: buildLatePaymentRefundIdempotencyKey(paymentIntentId) },
       });
       const offerAfter = await prisma.ticketWaitlistOffer.findUniqueOrThrow({ where: { id: expiredOffer.id } });
       const tierAfter = await prisma.ticketTier.findUniqueOrThrow({ where: { id: tier.id } });
@@ -706,7 +707,7 @@ describe('P2-04 Late Payment Protection & Automatic Stripe Refund (Real PostgreS
       });
 
       const refundRow = await prisma.orderRefund.findUniqueOrThrow({
-        where: { stripePaymentIntentId: paymentIntentId },
+        where: { idempotencyKey: buildLatePaymentRefundIdempotencyKey(paymentIntentId) },
       });
 
       const tx1 = prisma.$transaction(async (tx) => {
@@ -772,7 +773,7 @@ describe('P2-04 Late Payment Protection & Automatic Stripe Refund (Real PostgreS
         include: { transactions: true },
       });
       const updatedRefund = await prisma.orderRefund.findUniqueOrThrow({
-        where: { stripePaymentIntentId: paymentIntentId },
+        where: { idempotencyKey: buildLatePaymentRefundIdempotencyKey(paymentIntentId) },
       });
       expect(updatedOrder.status).toBe(OrderStatus.REFUNDED);
       expect(updatedOrder.transactions.find((t) => t.providerTransactionId === paymentIntentId)?.status).toBe(
@@ -820,7 +821,7 @@ describe('P2-04 Late Payment Protection & Automatic Stripe Refund (Real PostgreS
 
       const midOrder = await prisma.order.findUniqueOrThrow({ where: { id: order.id } });
       const midRefund = await prisma.orderRefund.findUniqueOrThrow({
-        where: { stripePaymentIntentId: paymentIntentId },
+        where: { idempotencyKey: buildLatePaymentRefundIdempotencyKey(paymentIntentId) },
       });
       expect(midOrder.status).toBe(OrderStatus.EXPIRED);
       expect(midRefund.status).toBe(OrderRefundStatus.STRIPE_PENDING);
@@ -913,7 +914,7 @@ describe('P2-04 Late Payment Protection & Automatic Stripe Refund (Real PostgreS
       expect(pass1.retried).toBe(1);
 
       const afterRetry = await prisma.orderRefund.findUniqueOrThrow({
-        where: { stripePaymentIntentId: paymentIntentId },
+        where: { idempotencyKey: buildLatePaymentRefundIdempotencyKey(paymentIntentId) },
       });
       expect(afterRetry.status).toBe(OrderRefundStatus.PENDING);
       expect(afterRetry.attempts).toBe(1);
@@ -959,7 +960,7 @@ describe('P2-04 Late Payment Protection & Automatic Stripe Refund (Real PostgreS
       await runEmailOutboxPass();
 
       const refundA = await prisma.orderRefund.findUniqueOrThrow({
-        where: { stripePaymentIntentId: caseA.paymentIntentId },
+        where: { idempotencyKey: buildLatePaymentRefundIdempotencyKey(caseA.paymentIntentId) },
       });
       expect(refundA.status).toBe(OrderRefundStatus.MANUAL_REVIEW_REQUIRED);
       expect(refundA.requiresManualResolution).toBe(true);
@@ -982,7 +983,7 @@ describe('P2-04 Late Payment Protection & Automatic Stripe Refund (Real PostgreS
       });
       await processStripeWebhookEvent(makePiSucceededEvent(caseB.order.id, caseB.paymentIntentId, caseB.order.totalInCents));
       await prisma.orderRefund.update({
-        where: { stripePaymentIntentId: caseB.paymentIntentId },
+        where: { idempotencyKey: buildLatePaymentRefundIdempotencyKey(caseB.paymentIntentId) },
         data: {
           status: OrderRefundStatus.PROCESSING,
           attempts: ORDER_REFUND_MAX_ATTEMPTS,
@@ -994,7 +995,7 @@ describe('P2-04 Late Payment Protection & Automatic Stripe Refund (Real PostgreS
       const reaped = await reapExpiredExhaustedRefundLeases();
       expect(reaped).toBeGreaterThanOrEqual(1);
       const refundB = await prisma.orderRefund.findUniqueOrThrow({
-        where: { stripePaymentIntentId: caseB.paymentIntentId },
+        where: { idempotencyKey: buildLatePaymentRefundIdempotencyKey(caseB.paymentIntentId) },
       });
       expect(refundB.status).toBe(OrderRefundStatus.MANUAL_REVIEW_REQUIRED);
       expect(refundB.requiresManualResolution).toBe(true);
@@ -1014,7 +1015,7 @@ describe('P2-04 Late Payment Protection & Automatic Stripe Refund (Real PostgreS
 
       await processStripeWebhookEvent(makePiSucceededEvent(order.id, paymentIntentId, order.totalInCents));
       const refundRow = await prisma.orderRefund.findUniqueOrThrow({
-        where: { stripePaymentIntentId: paymentIntentId },
+        where: { idempotencyKey: buildLatePaymentRefundIdempotencyKey(paymentIntentId) },
       });
 
       // Simulate worker 1 created refund on Stripe, then crashed before DB commit (expired PROCESSING lease, stripeRefundId still null)
@@ -1124,7 +1125,7 @@ describe('P2-04 Late Payment Protection & Automatic Stripe Refund (Real PostgreS
       expect(createSpy).not.toHaveBeenCalled();
 
       const multiRefundRow = await prisma.orderRefund.findUniqueOrThrow({
-        where: { stripePaymentIntentId: caseMulti.paymentIntentId },
+        where: { idempotencyKey: buildLatePaymentRefundIdempotencyKey(caseMulti.paymentIntentId) },
       });
       expect(multiRefundRow.lastErrorCode).toBe('STRIPE_MULTIPLE_EXISTING_REFUNDS');
     });
@@ -1328,7 +1329,7 @@ describe('P2-04 Late Payment Protection & Automatic Stripe Refund (Real PostgreS
       );
 
       const pendingManual = await prisma.orderRefund.findUniqueOrThrow({
-        where: { stripePaymentIntentId: paymentIntentId },
+        where: { idempotencyKey: buildLatePaymentRefundIdempotencyKey(paymentIntentId) },
       });
       expect(pendingManual.status).toBe(OrderRefundStatus.MANUAL_REVIEW_REQUIRED);
       expect(pendingManual.requiresManualResolution).toBe(true);
@@ -1407,7 +1408,7 @@ describe('P2-04 Late Payment Protection & Automatic Stripe Refund (Real PostgreS
       await runEmailOutboxPass();
 
       const refundRow = await prisma.orderRefund.findUniqueOrThrow({
-        where: { stripePaymentIntentId: paymentIntentId },
+        where: { idempotencyKey: buildLatePaymentRefundIdempotencyKey(paymentIntentId) },
       });
       const updatedOrder = await prisma.order.findUniqueOrThrow({ where: { id: order.id } });
       const manualOutbox = await prisma.emailOutbox.findUnique({
@@ -1459,7 +1460,7 @@ describe('P2-04 Late Payment Protection & Automatic Stripe Refund (Real PostgreS
       expect(createSpy).not.toHaveBeenCalled();
 
       const refundRow = await prisma.orderRefund.findUniqueOrThrow({
-        where: { stripePaymentIntentId: paymentIntentId },
+        where: { idempotencyKey: buildLatePaymentRefundIdempotencyKey(paymentIntentId) },
       });
       expect(refundRow.status).toBe(OrderRefundStatus.MANUAL_REVIEW_REQUIRED);
       expect(refundRow.lastErrorCode).toBe('STRIPE_REFUND_LIST_INCOMPLETE');
@@ -1490,7 +1491,7 @@ describe('P2-04 Late Payment Protection & Automatic Stripe Refund (Real PostgreS
       // Step 2: Duplicate pi_2 succeeds -> creates DUPLICATE_PAYMENT_INTENT MANUAL_REVIEW_REQUIRED OrderRefund
       await processStripeWebhookEvent(makePiSucceededEvent(order.id, pi2, order.totalInCents));
       const pi2Refund = await prisma.orderRefund.findUniqueOrThrow({
-        where: { stripePaymentIntentId: pi2 },
+        where: { idempotencyKey: buildLatePaymentRefundIdempotencyKey(pi2) },
       });
       expect(pi2Refund.status).toBe(OrderRefundStatus.MANUAL_REVIEW_REQUIRED);
       expect(pi2Refund.requiresManualResolution).toBe(true);
@@ -1586,7 +1587,7 @@ describe('P2-04 Late Payment Protection & Automatic Stripe Refund (Real PostgreS
           makePiSucceededEvent(order.id, paymentIntentId, order.totalInCents)
         );
         const refundRow = await prisma.orderRefund.findUniqueOrThrow({
-          where: { stripePaymentIntentId: paymentIntentId },
+          where: { idempotencyKey: buildLatePaymentRefundIdempotencyKey(paymentIntentId) },
         });
 
         const evt: Stripe.Event = {
@@ -1658,7 +1659,7 @@ describe('P2-04 Late Payment Protection & Automatic Stripe Refund (Real PostgreS
       );
 
       const orphanRefund = await prisma.orderRefund.findUniqueOrThrow({
-        where: { stripePaymentIntentId: orphanPi },
+        where: { idempotencyKey: buildLatePaymentRefundIdempotencyKey(orphanPi) },
       });
       expect(orphanRefund.orderId).toBeNull();
       expect(orphanRefund.status).toBe(OrderRefundStatus.MANUAL_REVIEW_REQUIRED);
@@ -1861,7 +1862,7 @@ describe('P2-04 Late Payment Protection & Automatic Stripe Refund (Real PostgreS
       await runOrderRefundPass({ workerId: 'w-race-1' });
 
       const refund1 = await prisma.orderRefund.findUniqueOrThrow({
-        where: { stripePaymentIntentId: pi1 },
+        where: { idempotencyKey: buildLatePaymentRefundIdempotencyKey(pi1) },
       });
 
       await resolveManualOrderRefund({
@@ -1898,7 +1899,7 @@ describe('P2-04 Late Payment Protection & Automatic Stripe Refund (Real PostgreS
       await runOrderRefundPass({ workerId: 'w-race-2' });
 
       const refund2 = await prisma.orderRefund.findUniqueOrThrow({
-        where: { stripePaymentIntentId: pi2 },
+        where: { idempotencyKey: buildLatePaymentRefundIdempotencyKey(pi2) },
       });
       const emailRow2 = await prisma.emailOutbox.findUniqueOrThrow({
         where: { dedupeKey: buildLatePaymentRefundManualReviewDedupeKey(refund2.id) },

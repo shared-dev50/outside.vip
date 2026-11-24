@@ -59,7 +59,7 @@ export type TicketTierStatus = 'ACTIVE' | 'PAUSED' | 'SOLD_OUT' | 'HIDDEN';
 
 export type OrderStatus = 'PENDING' | 'COMPLETED' | 'CANCELLED' | 'EXPIRED' | 'REFUNDED';
 
-export type TicketStatus = 'ISSUED' | 'CHECKED_IN' | 'CANCELLED' | 'REFUNDED';
+export type TicketStatus = 'ISSUED' | 'CHECKED_IN' | 'CANCELLED' | 'REFUND_PENDING' | 'REFUNDED';
 
 export type CheckInResult =
   | 'SUCCESS'
@@ -67,6 +67,8 @@ export type CheckInResult =
   | 'INVALID_TOKEN'
   | 'WRONG_EVENT'
   | 'CANCELLED_TICKET'
+  | 'REFUND_PENDING_TICKET'
+  | 'REFUNDED_TICKET'
   | 'TICKET_NOT_YET_VALID'
   | 'TICKET_EXPIRED';
 
@@ -425,7 +427,8 @@ export interface OrderItem {
 
 export interface Ticket {
   id: string;
-  ticketToken: string;
+  ticketToken: string | null;
+  admissionEligible?: boolean;
   orderId: string;
   eventId: string;
   event?: Event;
@@ -461,6 +464,17 @@ export interface Order {
   createdAt: string;
 }
 
+export type RefundFeeBearer = 'ORGANIZER' | 'PLATFORM' | 'SHARED' | 'NOT_APPLICABLE';
+export type RefundInitiatorRole = 'ORGANIZER' | 'ADMIN' | 'SYSTEM';
+export type OrderRefundStatus =
+  | 'PENDING'
+  | 'PROCESSING'
+  | 'STRIPE_PENDING'
+  | 'SUCCEEDED'
+  | 'MANUAL_REVIEW_REQUIRED'
+  | 'MANUALLY_RESOLVED'
+  | 'CANCELLED';
+
 export interface OrganizerOrderItem {
   id: string;
   orderNumber: string;
@@ -470,6 +484,9 @@ export interface OrganizerOrderItem {
   customerEmail: string;
   customerPhone?: string | null;
   totalInCents: number;
+  refundedAmountInCents?: number;
+  pendingRefundAmountInCents?: number;
+  canManageRefunds?: boolean;
   currency: string;
   platformFeeInCents: number;
   organizerNetInCents: number;
@@ -480,6 +497,7 @@ export interface OrganizerOrderItem {
   eventId: string;
   event: {
     id: string;
+    organizerId?: string;
     title: string;
     slug: string;
     startAt: string;
@@ -498,6 +516,141 @@ export interface OrganizerOrderItem {
   }>;
   ticketQuantity: number;
   ticketsCount: number;
+}
+
+export interface RefundSummaryTicket {
+  id: string;
+  ticketCode: string;
+  ticketTierId: string;
+  tierName: string;
+  status: TicketStatus;
+  attendeeName: string | null;
+  attendeeEmail: string | null;
+  checkedInAt: string | null;
+  refundedAt: string | null;
+  cancelledAt: string | null;
+  cancellationReason: string | null;
+  allocatedGrossInCents: number;
+  allocatedPlatformFeeInCents: number;
+  allocatedServiceFeeInCents: number;
+  allocatedProcessingFeeInCents: number;
+  allocatedBuyerTotalInCents: number;
+  activeRefundLock: boolean;
+  refundEligibleForOrganizer: boolean;
+  refundEligibleForAdmin: boolean;
+}
+
+export interface OrderRefundHistoryItem {
+  id: string;
+  status: OrderRefundStatus;
+  refundKind: string;
+  initiatorRole: RefundInitiatorRole;
+  feeBearer: RefundFeeBearer;
+  refundStripeProcessingFee: boolean;
+  amountInCents: number;
+  ticketSubtotalInCents: number;
+  platformFeeReversedInCents: number;
+  serviceFeeReversedInCents: number;
+  processingFeeInCents: number;
+  organizerDebitInCents: number;
+  platformExpenseInCents: number;
+  restoreInventory: boolean;
+  inventoryRestoredCount: number;
+  currency: string;
+  reason: string;
+  stripeRefundId: string | null;
+  requiresManualResolution: boolean;
+  lastErrorCode: string | null;
+  lastErrorMessage: string | null;
+  ticketIds: string[];
+  createdAt: string;
+  succeededAt: string | null;
+  failedAt: string | null;
+  cancelledAt: string | null;
+}
+
+export interface OrderRefundSummary {
+  order: {
+    id: string;
+    orderNumber: string;
+    status: OrderStatus;
+    currency: string;
+    totalInCents: number;
+    refundedAmountInCents: number;
+    pendingRefundAmountInCents: number;
+    remainingRefundableInCents: number;
+    platformFeeInCents: number;
+    organizerNetInCents: number;
+    paymentProvider: string;
+    isFreeOrder: boolean;
+    customerName: string;
+    customerEmail: string;
+    eventId: string;
+    eventTitle: string;
+  };
+  capabilities: {
+    initiatorRole: RefundInitiatorRole;
+    canOverrideCheckedIn: boolean;
+    canShiftFeeToPlatform: boolean;
+  };
+  tickets: RefundSummaryTicket[];
+  refunds: OrderRefundHistoryItem[];
+}
+
+export interface RefundQuotePreview {
+  orderId: string;
+  orderNumber: string;
+  currency: string;
+  isFreeCancellation: boolean;
+  initiatorRole: RefundInitiatorRole;
+  checkedInOverrideApplied: boolean;
+  buyerRefundAmountInCents: number;
+  ticketSubtotalInCents: number;
+  platformFeeReversedInCents: number;
+  serviceFeeReversedInCents: number;
+  stripeProcessingFeeInCents: number;
+  refundStripeProcessingFee: boolean;
+  feeBearer: RefundFeeBearer;
+  organizerDebitInCents: number;
+  platformExpenseInCents: number;
+  remainingOrderRefundableAfterInCents: number;
+  restoreInventory: boolean;
+  selectedTicketIds: string[];
+  lineItems: Array<{
+    ticketId: string;
+    allocatedGrossInCents: number;
+    allocatedPlatformFeeInCents: number;
+    allocatedServiceFeeInCents: number;
+    allocatedProcessingFeeInCents: number;
+    allocatedBuyerTotalInCents: number;
+    refundedAmountInCents: number;
+  }>;
+}
+
+export interface InitiateOrderRefundPayload {
+  ticketIds: string[];
+  reason: string;
+  refundStripeProcessingFee?: boolean;
+  feeBearer?: 'ORGANIZER' | 'PLATFORM' | 'SHARED';
+  restoreInventory?: boolean;
+  allowCheckedInOverride?: boolean;
+  overrideReason?: string;
+  idempotencyKey?: string;
+  confirm: boolean;
+}
+
+export interface InitiateOrderRefundResult {
+  mode: 'STRIPE_REFUND_QUEUED' | 'FREE_LOCAL_CANCELLED';
+  replayed: boolean;
+  orderRefundId: string | null;
+  status: string;
+  currency: string;
+  refundAmountInCents: number;
+  organizerDebitInCents: number;
+  platformExpenseInCents: number;
+  checkedInOverrideAudited: boolean;
+  cancelledTicketIds?: string[];
+  inventoryRestoredCount?: number;
 }
 
 export interface OrganizerOrdersPagination {
