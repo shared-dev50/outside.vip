@@ -11,7 +11,7 @@ import {
 } from 'lucide-react';
 import { NumericInput } from '../common/NumericInput';
 import { calculateTierEarnings, formatCents } from '../../lib/fees';
-import { FormTicketTier, TicketTierFieldErrors } from '../../lib/ticketCreation';
+import { FormTicketTier, TicketTierFieldErrors, getSubMinimumDisplayPriceError } from '../../lib/ticketCreation';
 
 interface TicketTierEditorSectionProps {
   ticketTiers: FormTicketTier[];
@@ -97,7 +97,10 @@ export const TicketTierEditorSection: React.FC<TicketTierEditorSectionProps> = (
         <div className="space-y-4">
           {ticketTiers.map((tier, idx) => {
             const errors = tierErrors[tier.tempId] || {};
-            const hasEnteredPrice = tier.price !== '' && !isNaN(Number(tier.price));
+            const liveDisplayPriceError = getSubMinimumDisplayPriceError(tier.displayPrice);
+            const displayPriceError = errors.displayPrice || liveDisplayPriceError;
+            const hasEnteredPrice =
+              !displayPriceError && tier.price !== '' && !isNaN(Number(tier.price));
             const tierEarnings = calculateTierEarnings(
               hasEnteredPrice ? Math.round(Number(tier.price) * 100) : 0,
               Math.max(0, Number(tier.totalCapacity) || 0)
@@ -244,14 +247,20 @@ export const TicketTierEditorSection: React.FC<TicketTierEditorSectionProps> = (
                       prefix="$"
                       placeholder="e.g. 29.59"
                       className={`w-full px-3 py-2 rounded-lg bg-white border text-stone-900 placeholder-stone-400 text-xs font-mono font-semibold focus:outline-none ${
-                        errors.price
+                        displayPriceError || errors.price
                           ? 'border-rose-400 focus:border-rose-500'
                           : 'border-stone-300 focus:border-stone-900'
                       }`}
                     />
-                    <p className="text-[10px] text-stone-500 mt-1 leading-tight">
-                      All-in price advertised to fans (includes all platform & processing fees).
-                    </p>
+                    {displayPriceError ? (
+                      <p role="alert" className="text-[11px] text-rose-600 font-medium mt-1">
+                        {displayPriceError}
+                      </p>
+                    ) : (
+                      <p className="text-[10px] text-stone-500 mt-1 leading-tight">
+                        All-in price advertised to fans (includes all platform & processing fees).
+                      </p>
+                    )}
                   </div>
                 </div>
 

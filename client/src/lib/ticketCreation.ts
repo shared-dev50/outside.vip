@@ -1,5 +1,5 @@
 import { TicketTier, TicketTierStatus } from '../types';
-import { calculateDisplayPriceFromGross } from './fees';
+import { calculateDisplayPriceFromGross, MIN_PAID_DISPLAY_PRICE_CENTS } from './fees';
 
 export interface FormTicketTier {
   id?: string;
@@ -29,6 +29,7 @@ export interface FormTicketTier {
 export interface TicketTierFieldErrors {
   name?: string;
   price?: string;
+  displayPrice?: string;
   totalCapacity?: string;
   minPerOrder?: string;
   maxPerOrder?: string;
@@ -106,6 +107,25 @@ export function mapExistingTicketTierToForm(
   };
 }
 
+export function getSubMinimumDisplayPriceError(
+  displayPrice: number | '' | null | undefined
+): string | null {
+  if (displayPrice === '' || displayPrice === null || displayPrice === undefined) {
+    return null;
+  }
+  const numeric = Number(displayPrice);
+  if (isNaN(numeric) || numeric <= 0) {
+    return null;
+  }
+  const displayCents = Math.round(numeric * 100);
+  if (displayCents > 0 && displayCents < MIN_PAID_DISPLAY_PRICE_CENTS) {
+    return `Paid tickets must have an all-in display price of at least $${(
+      MIN_PAID_DISPLAY_PRICE_CENTS / 100
+    ).toFixed(2)} (or enter 0 for a free ticket).`;
+  }
+  return null;
+}
+
 export function validateSingleTicketTier(
   tier: FormTicketTier,
   index: number
@@ -127,17 +147,36 @@ export function validateSingleTicketTier(
     setErr('name', 'Ticket name is required.', `Please enter a ticket name for ${label}.`);
   }
 
+  const subMinimumDisplayError = getSubMinimumDisplayPriceError(tier.displayPrice);
+  if (subMinimumDisplayError) {
+    setErr('displayPrice', subMinimumDisplayError, `${subMinimumDisplayError} (${label})`);
+  }
+
   if (tier.price === '' || tier.price === null || tier.price === undefined) {
-    setErr(
-      'price',
-      'Price is required (enter 0 for free).',
-      `Please enter a price for ${label} (enter 0 for a free ticket).`
-    );
+    if (!subMinimumDisplayError) {
+      setErr(
+        'price',
+        'Price is required (enter 0 for free).',
+        `Please enter a price for ${label} (enter 0 for a free ticket).`
+      );
+    }
   } else if (isNaN(Number(tier.price)) || Number(tier.price) < 0) {
     setErr(
       'price',
       'Price must be 0 or greater.',
       `Please provide a valid price for ${label} (enter 0 for free admission).`
+    );
+  } else if (
+    Math.round(Number(tier.price) * 100) === 0 &&
+    tier.displayPrice !== '' &&
+    tier.displayPrice !== null &&
+    tier.displayPrice !== undefined &&
+    Math.round(Number(tier.displayPrice) * 100) > 0
+  ) {
+    setErr(
+      'displayPrice',
+      'Display price must be $0.00 for a free ticket tier.',
+      `Display price must be $0.00 for a free ticket tier (${label}).`
     );
   }
 

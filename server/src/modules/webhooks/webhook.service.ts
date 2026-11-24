@@ -8,6 +8,7 @@ import {
   TicketTierStatus,
   EventStatus,
   WaitlistOfferStatus,
+  WaitlistEntryStatus,
   TransferStatus,
   PayoutStatus,
   LedgerEntryType,
@@ -45,6 +46,7 @@ import {
 import { triggerSettlementRecoveryDispatch } from '../finance/settlementRecoveryWorker.js';
 import { fulfillOrderCompletionInTx } from '../orders/orderFulfillment.service.js';
 import { triggerEmailOutboxDispatch } from '../notifications/emailOutboxWorker.js';
+import { processWaitlistForTier } from '../waitlist/waitlist.service.js';
 import {
   enqueueOrderRefund,
   reconcileOrderRefundFromStripeWebhook,
@@ -138,6 +140,7 @@ export async function processStripeWebhookEvent(
     shouldWakeOutbox?: boolean;
     shouldWakeRefund?: boolean;
     shouldWakeSettlement?: boolean;
+    releasedWaitlistTierIds?: string[];
   };
 
   try {
@@ -161,6 +164,7 @@ export async function processStripeWebhookEvent(
         let shouldWakeOutbox = false;
         let shouldWakeRefund = false;
         let shouldWakeSettlement = false;
+        let releasedWaitlistTierIds: string[] = [];
 
         switch (event.type) {
           case 'payment_intent.succeeded': {
@@ -170,6 +174,19 @@ export async function processStripeWebhookEvent(
             });
             shouldWakeOutbox = fulfillment.enqueuedEmail;
             shouldWakeRefund = fulfillment.enqueuedRefund;
+            break;
+          }
+
+          case 'payment_intent.processing': {
+            const paymentIntent = event.data.object as Stripe.PaymentIntent;
+            await handlePaymentIntentProcessing(tx, paymentIntent);
+            break;
+          }
+
+          case 'payment_intent.canceled': {
+            const paymentIntent = event.data.object as Stripe.PaymentIntent;
+            const cancelResult = await handlePaymentIntentCanceled(tx, paymentIntent);
+            releasedWaitlistTierIds = cancelResult.releasedTierIds;
             break;
           }
 
@@ -268,7 +285,13 @@ export async function processStripeWebhookEvent(
           },
         });
 
-        return { handled: true, shouldWakeOutbox, shouldWakeRefund, shouldWakeSettlement };
+        return {
+          handled: true,
+          shouldWakeOutbox,
+          shouldWakeRefund,
+          shouldWakeSettlement,
+          releasedWaitlistTierIds,
+        };
       },
       {
         isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
@@ -298,6 +321,11 @@ export async function processStripeWebhookEvent(
   }
   if (txResult.shouldWakeSettlement) {
     triggerSettlementRecoveryDispatch();
+  }
+  if (txResult.releasedWaitlistTierIds && txResult.releasedWaitlistTierIds.length > 0) {
+    for (const tierId of txResult.releasedWaitlistTierIds) {
+      processWaitlistForTier(tierId).catch(() => {});
+    }
   }
 
   return txResult.duplicate
@@ -340,6 +368,26 @@ export async function fulfillPaidOrder(
   }
 
   return true;
+}
+
+export async function cancelOrderFromPaymentIntent(
+  paymentIntent: Stripe.PaymentIntent
+): Promise<boolean> {
+  const result = await prisma.$transaction(
+    async (tx) => handlePaymentIntentCanceled(tx, paymentIntent),
+    {
+      isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
+      timeout: 10000,
+    }
+  );
+
+  if (result.cancelled && result.releasedTierIds.length > 0) {
+    for (const tierId of result.releasedTierIds) {
+      processWaitlistForTier(tierId).catch(() => {});
+    }
+  }
+
+  return result.cancelled;
 }
 
 async function recordPaymentMismatchAnomalyOutOfBand(
@@ -1090,6 +1138,224 @@ export async function handlePaymentIntentFailed(
       },
     },
   });
+}
+
+export async function handlePaymentIntentProcessing(
+  tx: Prisma.TransactionClient,
+  paymentIntent: Stripe.PaymentIntent
+): Promise<void> {
+  const metaOrderId = paymentIntent.metadata?.orderId as string | undefined;
+  const order = await lockOrderByIdentifier(tx, metaOrderId, paymentIntent.id);
+
+  if (!order) {
+    console.warn(`[StripeWebhook] Order for processing PaymentIntent ${paymentIntent.id} not found.`);
+    return;
+  }
+
+  console.info('[StripeWebhook] PaymentIntent processing', {
+    orderId: order.id,
+    orderNumber: order.orderNumber,
+    paymentIntentId: paymentIntent.id,
+    orderStatus: order.status,
+  });
+
+  if (order.status !== OrderStatus.PENDING) {
+    return;
+  }
+
+  const existingInitiatedTx = await tx.paymentTransaction.findFirst({
+    where: {
+      orderId: order.id,
+      provider: PaymentProvider.STRIPE,
+      providerTransactionId: paymentIntent.id,
+      status: PaymentStatus.INITIATED,
+    },
+  });
+
+  if (!existingInitiatedTx) {
+    await tx.paymentTransaction.create({
+      data: {
+        orderId: order.id,
+        provider: PaymentProvider.STRIPE,
+        providerTransactionId: paymentIntent.id,
+        status: PaymentStatus.INITIATED,
+        amountInCents: paymentIntent.amount || order.totalInCents,
+        currency: order.currency,
+        rawResponse: {
+          ...(paymentIntent as any),
+          processingState: 'processing',
+        },
+      },
+    });
+  }
+}
+
+export async function handlePaymentIntentCanceled(
+  tx: Prisma.TransactionClient,
+  paymentIntent: Stripe.PaymentIntent
+): Promise<{ cancelled: boolean; releasedTierIds: string[] }> {
+  const metaOrderId = paymentIntent.metadata?.orderId as string | undefined;
+  const order = await lockOrderByIdentifier(tx, metaOrderId, paymentIntent.id);
+
+  if (!order) {
+    console.warn(`[StripeWebhook] Order for canceled PaymentIntent ${paymentIntent.id} not found.`);
+    return { cancelled: false, releasedTierIds: [] };
+  }
+
+  // Only cancel PENDING orders matching this PaymentIntent; preserve COMPLETED, REFUNDED, CANCELLED,
+  // and EXPIRED orders (so P2-04 late-payment handling and terminal states stay intact).
+  if (order.status !== OrderStatus.PENDING) {
+    return { cancelled: false, releasedTierIds: [] };
+  }
+
+  if (order.paymentReference && paymentIntent.id && order.paymentReference !== paymentIntent.id) {
+    return { cancelled: false, releasedTierIds: [] };
+  }
+
+  // Canonical lock step 2: TicketReservation
+  const activeReservations = await tx.$queryRaw<
+    Array<{ id: string; ticketTierId: string; quantity: number }>
+  >`
+    SELECT id, "ticketTierId", quantity
+    FROM "TicketReservation"
+    WHERE "orderId" = ${order.id}
+      AND status = 'ACTIVE'::"ReservationStatus"
+    ORDER BY id ASC
+    FOR UPDATE
+  `;
+
+  // Canonical lock step 3: TicketWaitlistOffer
+  const linkedOffers = await tx.$queryRaw<
+    Array<{ id: string; entryId: string; status: WaitlistOfferStatus }>
+  >`
+    SELECT id, "entryId", status
+    FROM "TicketWaitlistOffer"
+    WHERE "orderId" = ${order.id}
+    ORDER BY id ASC
+    FOR UPDATE
+  `;
+
+  const tierQuantityMap = new Map<string, number>();
+  for (const res of activeReservations) {
+    tierQuantityMap.set(
+      res.ticketTierId,
+      (tierQuantityMap.get(res.ticketTierId) || 0) + res.quantity
+    );
+  }
+  const sortedTierIds = Array.from(tierQuantityMap.keys()).sort();
+
+  // Canonical lock step 4: TicketTier (sorted id ASC)
+  if (sortedTierIds.length > 0) {
+    const lockedTiers = await tx.$queryRaw<
+      Array<{ id: string; reservedQuantity: number }>
+    >`
+      SELECT id, "reservedQuantity"
+      FROM "TicketTier"
+      WHERE id = ANY(${sortedTierIds})
+      ORDER BY id ASC
+      FOR UPDATE
+    `;
+    const lockedTierMap = new Map(lockedTiers.map((t) => [t.id, t]));
+
+    for (const tierId of sortedTierIds) {
+      const releaseQty = tierQuantityMap.get(tierId) || 0;
+      const lockedTier = lockedTierMap.get(tierId);
+      if (!lockedTier || releaseQty <= 0) continue;
+
+      if (lockedTier.reservedQuantity < releaseQty) {
+        console.warn('[InventoryUnderflow]', {
+          context: 'handlePaymentIntentCanceled',
+          ticketTierId: tierId,
+          expectedReleaseQty: releaseQty,
+          observedReservedQty: lockedTier.reservedQuantity,
+          clampedReservedQty: 0,
+        });
+      }
+
+      await tx.ticketTier.update({
+        where: { id: tierId },
+        data: {
+          reservedQuantity: Math.max(0, lockedTier.reservedQuantity - releaseQty),
+        },
+      });
+    }
+  }
+
+  if (activeReservations.length > 0) {
+    await tx.ticketReservation.updateMany({
+      where: {
+        id: { in: activeReservations.map((r) => r.id) },
+        status: ReservationStatus.ACTIVE,
+      },
+      data: { status: ReservationStatus.RELEASED },
+    });
+  }
+
+  const pendingOfferIds = linkedOffers
+    .filter((offer) => offer.status === WaitlistOfferStatus.PENDING)
+    .map((offer) => offer.id);
+  const pendingEntryIds = Array.from(
+    new Set(
+      linkedOffers
+        .filter((offer) => offer.status === WaitlistOfferStatus.PENDING)
+        .map((offer) => offer.entryId)
+    )
+  );
+
+  if (pendingOfferIds.length > 0) {
+    await tx.ticketWaitlistOffer.updateMany({
+      where: {
+        id: { in: pendingOfferIds },
+        status: WaitlistOfferStatus.PENDING,
+      },
+      data: { status: WaitlistOfferStatus.EXPIRED },
+    });
+    await tx.ticketWaitlistEntry.updateMany({
+      where: {
+        id: { in: pendingEntryIds },
+        status: WaitlistEntryStatus.OFFERED,
+      },
+      data: { status: WaitlistEntryStatus.EXPIRED },
+    });
+  }
+
+  await tx.order.updateMany({
+    where: {
+      id: order.id,
+      status: OrderStatus.PENDING,
+    },
+    data: { status: OrderStatus.CANCELLED },
+  });
+
+  const existingCanceledTx = await tx.paymentTransaction.findFirst({
+    where: {
+      orderId: order.id,
+      provider: PaymentProvider.STRIPE,
+      providerTransactionId: paymentIntent.id,
+      status: PaymentStatus.FAILED,
+    },
+  });
+
+  if (!existingCanceledTx) {
+    const cancellationReason =
+      paymentIntent.cancellation_reason || 'PaymentIntent canceled';
+    await tx.paymentTransaction.create({
+      data: {
+        orderId: order.id,
+        provider: PaymentProvider.STRIPE,
+        providerTransactionId: paymentIntent.id,
+        status: PaymentStatus.FAILED,
+        amountInCents: paymentIntent.amount || order.totalInCents,
+        currency: order.currency,
+        rawResponse: {
+          ...(paymentIntent as any),
+          failureReason: cancellationReason,
+        },
+      },
+    });
+  }
+
+  return { cancelled: true, releasedTierIds: sortedTierIds };
 }
 
 async function lockOrderByIdentifier(

@@ -2,7 +2,7 @@ import crypto from 'crypto';
 import { Request, Response, NextFunction } from 'express';
 import { prisma } from '../../db/prisma.js';
 import { stripe } from '../../lib/stripe.js';
-import { fulfillPaidOrder } from '../webhooks/webhook.service.js';
+import { fulfillPaidOrder, cancelOrderFromPaymentIntent } from '../webhooks/webhook.service.js';
 import { NotFoundError, ForbiddenError, UnauthorizedError, BadRequestError } from '../../utils/errors.js';
 import { generateTicketsPdf } from './ticketPdf.service.js';
 
@@ -136,6 +136,15 @@ async function fetchAndAuthorizeOrder(req: Request, orderNumber: string) {
       const paymentIntent = await stripe.paymentIntents.retrieve(order.paymentReference);
       if (paymentIntent.status === 'succeeded') {
         await fulfillPaidOrder(paymentIntent);
+        const refreshed = await prisma.order.findUnique({
+          where: { orderNumber },
+          include: orderInclude,
+        });
+        if (refreshed) {
+          order = refreshed;
+        }
+      } else if (paymentIntent.status === 'canceled') {
+        await cancelOrderFromPaymentIntent(paymentIntent);
         const refreshed = await prisma.order.findUnique({
           where: { orderNumber },
           include: orderInclude,

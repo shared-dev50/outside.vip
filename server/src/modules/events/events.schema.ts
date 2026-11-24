@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { EventCategory, EventStatus, TicketTierStatus } from '@prisma/client';
-import { calculateGrossPriceFromDisplay } from '../checkout/checkout.financials.js';
+import { validateAndResolveTicketTierPricing } from '../checkout/checkout.financials.js';
 import { isSupportedPlatformCurrency } from '../finance/stripeCountries.js';
 
 export const listEventsQuerySchema = z.object({
@@ -64,18 +64,21 @@ export const createTicketTierSchema = createTicketTierBaseSchema
       path: ['validityEndAt'],
     }
   )
-  .transform((data) => {
-    let priceInCents = data.priceInCents;
-    if (priceInCents === undefined || priceInCents === null) {
-      if (data.displayPriceInCents !== undefined && data.displayPriceInCents !== null) {
-        priceInCents = calculateGrossPriceFromDisplay(data.displayPriceInCents);
-      } else {
-        priceInCents = 0;
-      }
+  .superRefine((data, ctx) => {
+    const pricing = validateAndResolveTicketTierPricing(data);
+    if (!pricing.valid) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: pricing.message || 'Invalid ticket tier pricing configuration.',
+        path: [pricing.field || 'displayPriceInCents'],
+      });
     }
+  })
+  .transform((data) => {
+    const pricing = validateAndResolveTicketTierPricing(data);
     return {
       ...data,
-      priceInCents,
+      priceInCents: pricing.resolvedPriceInCents ?? 0,
     };
   });
 

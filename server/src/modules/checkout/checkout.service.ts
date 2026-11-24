@@ -1,10 +1,11 @@
 import crypto from 'crypto';
+import type Stripe from 'stripe';
 import { Prisma, OrderStatus, PaymentProvider, ReservationStatus, TicketTierStatus, EventStatus, WaitlistOfferStatus, WaitlistEntryStatus } from '@prisma/client';
 import { nanoid } from 'nanoid';
 import { prisma } from '../../db/prisma.js';
 import { stripe } from '../../lib/stripe.js';
 import { env } from '../../config/env.js';
-import { BadRequestError, ConflictError, NotFoundError, ForbiddenError, TooManyRequestsError } from '../../utils/errors.js';
+import { BadRequestError, ConflictError, NotFoundError, ForbiddenError, TooManyRequestsError, ServiceUnavailableError } from '../../utils/errors.js';
 import { isTicketTierHidden, isTicketTierSalesDisabled } from '../../utils/ticketTierState.js';
 import { verifyEventAccessToken } from '../events/passwordAccess.service.js';
 import { hashOfferToken, processWaitlistForTier } from '../waitlist/waitlist.service.js';
@@ -15,6 +16,7 @@ import {
   calculateFinancialBreakdown,
   calculateCheckoutFeeBreakdown,
   CheckoutFeeBreakdown,
+  STRIPE_MIN_USD_CHARGE_CENTS,
 } from './checkout.financials.js';
 import { CreateCheckoutSessionInput } from './checkout.schema.js';
 
@@ -117,6 +119,132 @@ function buildFreeCheckoutResult(
     currency: order.currency,
     expiresAt: order.expiresAt.toISOString(),
     breakdown: breakdown || calculateCheckoutFeeBreakdown(0, totalQty),
+  };
+}
+
+async function resolveExistingOrderReplay(
+  existingOrder: {
+    id: string;
+    orderNumber: string;
+    orderAccessToken: string | null;
+    eventId: string;
+    customerEmail: string;
+    status: OrderStatus;
+    paymentProvider: PaymentProvider;
+    paymentReference: string | null;
+    totalInCents: number;
+    currency: string;
+    expiresAt: Date;
+    items: Array<{ ticketTierId: string; quantity: number }>;
+  },
+  input: CreateCheckoutSessionInput,
+  options: {
+    now: Date;
+    verifiedOfferId?: string | null;
+    hasOfferToken?: boolean;
+  }
+): Promise<CheckoutResult> {
+  assertIdempotentOrderMatchesInput(existingOrder, input);
+
+  if (
+    existingOrder.status === OrderStatus.COMPLETED &&
+    existingOrder.paymentProvider === PaymentProvider.FREE
+  ) {
+    if (options.hasOfferToken) {
+      if (!options.verifiedOfferId) {
+        throw new BadRequestError('This waitlist offer does not belong to the replayed order');
+      }
+    }
+    return buildFreeCheckoutResult(existingOrder);
+  }
+
+  if (existingOrder.status === OrderStatus.COMPLETED) {
+    throw new ConflictError('This checkout session has already been completed', 'IDEMPOTENCY_CONFLICT');
+  }
+
+  if (existingOrder.status === OrderStatus.CANCELLED) {
+    throw new ConflictError(
+      'This checkout payment session was canceled. Please start a new checkout.',
+      'PAYMENT_SESSION_CANCELED'
+    );
+  }
+
+  if (
+    existingOrder.status === OrderStatus.EXPIRED ||
+    existingOrder.status === OrderStatus.REFUNDED ||
+    existingOrder.expiresAt <= options.now
+  ) {
+    throw new ConflictError(
+      'This checkout session is no longer active. Please start a new checkout.',
+      'IDEMPOTENCY_CONFLICT'
+    );
+  }
+
+  if (existingOrder.paymentProvider === PaymentProvider.FREE) {
+    throw new ConflictError(
+      'A checkout request with this idempotency key is already being processed.',
+      'IDEMPOTENCY_CONFLICT'
+    );
+  }
+
+  if (
+    existingOrder.totalInCents <= 0 ||
+    (existingOrder.currency.toUpperCase() === 'USD' &&
+      existingOrder.totalInCents < STRIPE_MIN_USD_CHARGE_CENTS)
+  ) {
+    throw new BadRequestError(
+      `Paid checkout total must be at least $${(STRIPE_MIN_USD_CHARGE_CENTS / 100).toFixed(2)} USD to process payment.`,
+      'PAYMENT_AMOUNT_BELOW_MINIMUM'
+    );
+  }
+
+  if (!existingOrder.paymentReference) {
+    throw new ConflictError(
+      'A checkout request with this idempotency key is already being processed.',
+      'IDEMPOTENCY_CONFLICT'
+    );
+  }
+
+  let paymentIntent: Stripe.PaymentIntent | null = null;
+  try {
+    paymentIntent = await stripe.paymentIntents.retrieve(existingOrder.paymentReference);
+  } catch (retrieveErr) {
+    console.warn(
+      `[CheckoutReplay] Transient failure retrieving PaymentIntent ${existingOrder.paymentReference} for order ${existingOrder.orderNumber}:`,
+      retrieveErr
+    );
+    throw new ServiceUnavailableError(
+      'Unable to verify existing checkout payment session with Stripe. Please retry shortly.',
+      'PAYMENT_PROVIDER_UNAVAILABLE'
+    );
+  }
+
+  if (paymentIntent.status === 'canceled') {
+    throw new ConflictError(
+      'This checkout payment session was canceled. Please start a new checkout.',
+      'PAYMENT_SESSION_CANCELED'
+    );
+  }
+
+  if (!paymentIntent.client_secret) {
+    throw new ConflictError(
+      'A checkout request with this idempotency key is already being processed.',
+      'IDEMPOTENCY_CONFLICT'
+    );
+  }
+
+  return {
+    orderNumber: existingOrder.orderNumber,
+    orderAccessToken: existingOrder.orderAccessToken || '',
+    status: existingOrder.status,
+    paymentProvider: existingOrder.paymentProvider,
+    isFreeOrder: false,
+    clientSecret: paymentIntent.client_secret,
+    publishableKey: env.STRIPE_PUBLISHABLE_KEY,
+    totalInCents: existingOrder.totalInCents,
+    currency: existingOrder.currency,
+    expiresAt: existingOrder.expiresAt.toISOString(),
+    breakdown: calculateCheckoutFeeBreakdown(existingOrder.items),
   };
 }
 
@@ -467,13 +595,12 @@ export async function createCheckoutSession(
     existingOrder.status === OrderStatus.COMPLETED &&
     existingOrder.paymentProvider === PaymentProvider.FREE
   ) {
-    assertIdempotentOrderMatchesInput(existingOrder, input);
-    if (offerToken) {
-      if (!verifiedOffer || verifiedOffer.orderId !== existingOrder.id) {
-        throw new BadRequestError('This waitlist offer does not belong to the replayed order');
-      }
-    }
-    return buildFreeCheckoutResult(existingOrder);
+    return resolveExistingOrderReplay(existingOrder, input, {
+      now,
+      hasOfferToken: Boolean(offerToken),
+      verifiedOfferId:
+        verifiedOffer && verifiedOffer.orderId === existingOrder.id ? verifiedOffer.id : null,
+    });
   }
 
   if (verifiedOffer) {
@@ -499,34 +626,13 @@ export async function createCheckoutSession(
     }
   }
 
-  if (existingOrder && existingOrder.status === OrderStatus.COMPLETED) {
-    assertIdempotentOrderMatchesInput(existingOrder, input);
-    throw new ConflictError('This checkout session has already been completed');
-  }
-
-  if (existingOrder && existingOrder.status === OrderStatus.PENDING && existingOrder.expiresAt > now) {
-    if (existingOrder.paymentReference) {
-      try {
-        const paymentIntent = await stripe.paymentIntents.retrieve(existingOrder.paymentReference);
-        if (paymentIntent && paymentIntent.client_secret) {
-          return {
-            orderNumber: existingOrder.orderNumber,
-            orderAccessToken: existingOrder.orderAccessToken || '',
-            status: existingOrder.status,
-            paymentProvider: existingOrder.paymentProvider,
-            isFreeOrder: false,
-            clientSecret: paymentIntent.client_secret,
-            publishableKey: env.STRIPE_PUBLISHABLE_KEY,
-            totalInCents: existingOrder.totalInCents,
-            currency: existingOrder.currency,
-            expiresAt: existingOrder.expiresAt.toISOString(),
-            breakdown: calculateCheckoutFeeBreakdown(existingOrder.items),
-          };
-        }
-      } catch {
-        // Proceed with a fresh session if retrieving the previous intent fails
-      }
-    }
+  if (existingOrder) {
+    return resolveExistingOrderReplay(existingOrder, input, {
+      now,
+      hasOfferToken: Boolean(offerToken),
+      verifiedOfferId:
+        verifiedOffer && verifiedOffer.orderId === existingOrder.id ? verifiedOffer.id : null,
+    });
   }
 
   const requestedTierMap = new Map<string, number>();
@@ -914,6 +1020,17 @@ export async function createCheckoutSession(
         }
 
         // Paid checkout reservation updates (in locked tier ID order)
+        // Enforce Stripe's USD minimum payable amount before mutating inventory or calling Stripe.
+        if (
+          feeBreakdown.buyerTotalInCents <= 0 ||
+          (currency === 'USD' && feeBreakdown.buyerTotalInCents < STRIPE_MIN_USD_CHARGE_CENTS)
+        ) {
+          throw new BadRequestError(
+            `Paid checkout total must be at least $${(STRIPE_MIN_USD_CHARGE_CENTS / 100).toFixed(2)} USD to process payment.`,
+            'PAYMENT_AMOUNT_BELOW_MINIMUM'
+          );
+        }
+
         for (const item of [...orderItemsData].sort((a, b) =>
           a.ticketTierId.localeCompare(b.ticketTierId)
         )) {
@@ -1004,47 +1121,14 @@ export async function createCheckoutSession(
       });
 
       if (concurrentOrder) {
-        assertIdempotentOrderMatchesInput(concurrentOrder, input);
-
-        if (
-          concurrentOrder.status === OrderStatus.COMPLETED &&
-          concurrentOrder.paymentProvider === PaymentProvider.FREE
-        ) {
-          return buildFreeCheckoutResult(concurrentOrder);
-        }
-
-        if (
-          concurrentOrder.status === OrderStatus.PENDING &&
-          concurrentOrder.paymentReference
-        ) {
-          try {
-            const paymentIntent = await stripe.paymentIntents.retrieve(
-              concurrentOrder.paymentReference
-            );
-            if (paymentIntent && paymentIntent.client_secret) {
-              return {
-                orderNumber: concurrentOrder.orderNumber,
-                orderAccessToken: concurrentOrder.orderAccessToken || '',
-                status: concurrentOrder.status,
-                paymentProvider: concurrentOrder.paymentProvider,
-                isFreeOrder: false,
-                clientSecret: paymentIntent.client_secret,
-                publishableKey: env.STRIPE_PUBLISHABLE_KEY,
-                totalInCents: concurrentOrder.totalInCents,
-                currency: concurrentOrder.currency,
-                expiresAt: concurrentOrder.expiresAt.toISOString(),
-                breakdown: calculateCheckoutFeeBreakdown(concurrentOrder.items),
-              };
-            }
-          } catch {
-            // Fall through to conflict below if intent cannot be retrieved
-          }
-        }
-
-        throw new ConflictError(
-          'A checkout request with this idempotency key is already being processed.',
-          'IDEMPOTENCY_CONFLICT'
-        );
+        return resolveExistingOrderReplay(concurrentOrder, input, {
+          now: new Date(),
+          hasOfferToken: Boolean(offerToken),
+          verifiedOfferId:
+            verifiedOffer && verifiedOffer.orderId === concurrentOrder.id
+              ? verifiedOffer.id
+              : null,
+        });
       }
     }
 
@@ -1053,7 +1137,8 @@ export async function createCheckoutSession(
       error instanceof BadRequestError ||
       error instanceof TooManyRequestsError ||
       error instanceof ForbiddenError ||
-      error instanceof NotFoundError
+      error instanceof NotFoundError ||
+      error instanceof ServiceUnavailableError
     ) {
       throw error;
     }
@@ -1097,9 +1182,7 @@ export async function createCheckoutSession(
           processingFeeInCents: createdFeeBreakdown?.processingFeeInCents.toString() || '0',
         },
         receipt_email: customerEmail,
-        automatic_payment_methods: {
-          enabled: true,
-        },
+        payment_method_types: ['card'],
       },
       {
         idempotencyKey: `stripe_pi_${finalIdempotencyKey}`,

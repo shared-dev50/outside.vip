@@ -90,7 +90,8 @@ export const OrderConfirmationPage: React.FC = () => {
     return new Intl.NumberFormat('en-US', {
       style: 'currency',
       currency,
-      maximumFractionDigits: 0,
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
     }).format(cents / 100);
   };
 
@@ -167,7 +168,41 @@ export const OrderConfirmationPage: React.FC = () => {
 
   const isConfirmed = order.status === 'COMPLETED';
   const isPending = order.status === 'PENDING';
+  const normalizedStatus = String(order.status || '').toUpperCase();
+  const isExpired = normalizedStatus === 'EXPIRED';
+  const isCancelled = normalizedStatus === 'CANCELLED';
+  const isFailed = normalizedStatus === 'FAILED';
+  const isRefunded = normalizedStatus === 'REFUNDED';
+  const isTerminalNonCompleted = isExpired || isCancelled || isFailed || isRefunded;
   const tickets = order.tickets || [];
+
+  const statusHeading = isConfirmed
+    ? 'Order Confirmed & Secured'
+    : isPending
+    ? 'Payment Processing'
+    : isExpired
+    ? 'Order Expired'
+    : isCancelled
+    ? 'Order Cancelled'
+    : isFailed
+    ? 'Payment Failed'
+    : isRefunded
+    ? 'Order Refunded'
+    : `Order ${order.status}`;
+
+  const statusSubtitlePrefix = isConfirmed
+    ? 'Official pass issued for Outside.vip order '
+    : isPending
+    ? 'Awaiting webhook verification for Outside.vip order '
+    : isExpired
+    ? 'The checkout reservation expired before payment completed for Outside.vip order '
+    : isCancelled
+    ? 'This checkout was cancelled for Outside.vip order '
+    : isFailed
+    ? 'Payment failed for Outside.vip order '
+    : isRefunded
+    ? 'Refund processed for Outside.vip order '
+    : 'Status recorded for Outside.vip order ';
 
   return (
     <div className="max-w-3xl mx-auto px-4 sm:px-6 py-10 space-y-8">
@@ -188,27 +223,25 @@ export const OrderConfirmationPage: React.FC = () => {
               ? 'bg-emerald-50 text-emerald-600 border-emerald-200'
               : isPending
               ? 'bg-amber-50 text-amber-600 border-amber-200'
+              : isExpired || isCancelled || isFailed
+              ? 'bg-rose-50 text-rose-600 border-rose-200'
               : 'bg-gray-50 text-gray-600 border-gray-200'
           }`}
         >
           {isConfirmed ? (
             <CheckCircle2 className="w-7 h-7" />
-          ) : (
+          ) : isPending ? (
             <Clock className="w-7 h-7 animate-spin" />
+          ) : (
+            <AlertCircle className="w-7 h-7" />
           )}
         </div>
         <div className="space-y-1">
           <h1 className="font-display font-bold text-2xl sm:text-3xl text-gray-900">
-            {isConfirmed
-              ? 'Order Confirmed & Secured'
-              : isPending
-              ? 'Payment Processing'
-              : `Order ${order.status}`}
+            {statusHeading}
           </h1>
           <p className="text-sm text-gray-600">
-            {isConfirmed
-              ? `Official pass issued for Outside.vip order `
-              : 'Awaiting webhook verification for Outside.vip order '}
+            {statusSubtitlePrefix}
             <span className="font-mono text-gray-900 font-bold">{order.orderNumber}</span>
           </p>
         </div>
@@ -284,6 +317,30 @@ export const OrderConfirmationPage: React.FC = () => {
               >
                 Check status now
               </button>
+            </div>
+          </div>
+        )}
+
+        {tickets.length === 0 && isTerminalNonCompleted && (
+          <div className="p-8 rounded-2xl bg-white border border-gray-200 text-center space-y-3">
+            <AlertCircle className="w-6 h-6 text-gray-500 mx-auto" />
+            <div className="font-bold text-sm text-gray-900">No active tickets for this order</div>
+            <p className="text-xs text-gray-500 max-w-sm mx-auto">
+              {isExpired
+                ? 'This checkout reservation hold expired before payment was confirmed.'
+                : isCancelled
+                ? 'This checkout order was cancelled and any reserved inventory was released.'
+                : isFailed
+                ? 'This payment attempt did not succeed and no tickets were issued.'
+                : 'This order was refunded and its tickets are no longer active.'}
+            </p>
+            <div className="pt-1">
+              <Link
+                to={order.event?.slug ? `/events/${order.event.slug}` : '/events'}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-gray-900 text-white hover:bg-black text-xs font-medium transition-colors shadow-sm"
+              >
+                Return to Event
+              </Link>
             </div>
           </div>
         )}

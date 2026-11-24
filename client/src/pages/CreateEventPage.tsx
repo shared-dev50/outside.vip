@@ -51,6 +51,7 @@ import {
   calculateCombinedEarnings,
   calculateDisplayPriceFromGross,
   calculateGrossPriceFromDisplay,
+  MIN_PAID_DISPLAY_PRICE_CENTS,
   formatCents,
 } from '../lib/fees';
 import { extractYouTubeVideoId, getYouTubeEmbedUrl } from '../lib/youtube';
@@ -439,7 +440,12 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
             calculatedGross = 0;
           } else {
             const displayCents = Math.round(Number(displayVal) * 100);
-            calculatedGross = calculateGrossPriceFromDisplay(displayCents) / 100;
+            if (displayCents >= MIN_PAID_DISPLAY_PRICE_CENTS) {
+              calculatedGross = calculateGrossPriceFromDisplay(displayCents) / 100;
+            } else {
+              // Keep gross blank so positive sub-minimum display inputs (< $1.30) never coerce to $0 Free
+              calculatedGross = '';
+            }
           }
           return {
             ...tier,
