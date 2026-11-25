@@ -457,29 +457,70 @@ describe('Organizer Orders Listing API (GET /api/organizer/orders)', () => {
   });
 
   describe('6. Search Filtering', () => {
-    it('applies case-insensitive search across orderNumber, customerName, customerEmail, customerPhone', async () => {
+    it('applies case-insensitive partial search across orderNumber, customerName, customerEmail, customerPhone, and event title', async () => {
       const countSpy = vi.spyOn(prisma.order, 'count').mockResolvedValue(1);
       vi.spyOn(prisma.order, 'findMany').mockResolvedValue([mockOrdersList[0]] as any);
 
       const res = await request(app)
-        .get('/api/organizer/orders?search=Mwangi')
+        .get('/api/organizer/orders?search=mWaNg')
         .set('Authorization', `Bearer ${organizerToken}`);
 
       expect(res.status).toBe(200);
       expect(countSpy).toHaveBeenCalledWith({
         where: {
           AND: expect.arrayContaining([
+            { event: { organizerId } },
             {
               OR: [
-                { orderNumber: { contains: 'Mwangi', mode: 'insensitive' } },
-                { customerName: { contains: 'Mwangi', mode: 'insensitive' } },
-                { customerEmail: { contains: 'Mwangi', mode: 'insensitive' } },
-                { customerPhone: { contains: 'Mwangi', mode: 'insensitive' } },
+                { orderNumber: { contains: 'mWaNg', mode: 'insensitive' } },
+                { customerName: { contains: 'mWaNg', mode: 'insensitive' } },
+                { customerEmail: { contains: 'mWaNg', mode: 'insensitive' } },
+                { customerPhone: { contains: 'mWaNg', mode: 'insensitive' } },
+                { event: { title: { contains: 'mWaNg', mode: 'insensitive' } } },
               ],
             },
           ]),
         },
       });
+    });
+
+    it('matches partial #prefixed order numbers while keeping event owner/team scoping intact', async () => {
+      const findManySpy = vi.spyOn(prisma.order, 'findMany').mockResolvedValue([mockOrdersList[0]] as any);
+      vi.spyOn(prisma.order, 'count').mockResolvedValue(1);
+
+      const res = await request(app)
+        .get('/api/organizer/orders?search=%2310001')
+        .set('Authorization', `Bearer ${organizerToken}`);
+
+      expect(res.status).toBe(200);
+      expect(findManySpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: {
+            AND: [
+              { event: { organizerId } },
+              {
+                OR: [
+                  { orderNumber: { contains: '#10001', mode: 'insensitive' } },
+                  { orderNumber: { contains: '10001', mode: 'insensitive' } },
+                  { customerName: { contains: '#10001', mode: 'insensitive' } },
+                  { customerEmail: { contains: '#10001', mode: 'insensitive' } },
+                  { customerPhone: { contains: '#10001', mode: 'insensitive' } },
+                  { event: { title: { contains: '#10001', mode: 'insensitive' } } },
+                ],
+              },
+            ],
+          },
+        })
+      );
+    });
+
+    it('rejects unauthorized attendees even when search parameter is supplied', async () => {
+      const res = await request(app)
+        .get('/api/organizer/orders?search=Solar')
+        .set('Authorization', `Bearer ${attendeeToken}`);
+
+      expect(res.status).toBe(403);
+      expect(res.body.success).toBe(false);
     });
   });
 

@@ -3987,12 +3987,18 @@ export async function getOrganizerOrders(
     }
 
     if (search) {
+      const normalizedOrderSearch =
+        search.startsWith('#') && search.length > 1 ? search.slice(1).trim() : '';
       andConditions.push({
         OR: [
           { orderNumber: { contains: search, mode: 'insensitive' } },
+          ...(normalizedOrderSearch
+            ? [{ orderNumber: { contains: normalizedOrderSearch, mode: 'insensitive' as const } }]
+            : []),
           { customerName: { contains: search, mode: 'insensitive' } },
           { customerEmail: { contains: search, mode: 'insensitive' } },
           { customerPhone: { contains: search, mode: 'insensitive' } },
+          { event: { title: { contains: search, mode: 'insensitive' } } },
         ],
       });
     }

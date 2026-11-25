@@ -7,7 +7,6 @@ import { DiscoverPage } from './pages/DiscoverPage';
 import { EventDetailPage } from './pages/EventDetailPage';
 import { OrdersPage } from './pages/OrdersPage';
 import { TeamsPage } from './pages/TeamsPage';
-import { AtendeePage } from './pages/AtendeePage';
 import { OrganizerDashboardPage } from './pages/OrganizerDashboardPage';
 import { CreateEventPage } from './pages/CreateEventPage';
 import { EventPreviewPage } from './pages/EventPreviewPage';
@@ -30,7 +29,6 @@ export const App: React.FC = () => {
     location.pathname.startsWith('/organizer') ||
     location.pathname.startsWith('/host') ||
     location.pathname.startsWith('/orders') ||
-    location.pathname.startsWith('/attendees') ||
     location.pathname.startsWith('/team') ||
     location.pathname.startsWith('/login') ||
     location.pathname.startsWith('/signin') ||
@@ -57,20 +55,12 @@ export const App: React.FC = () => {
           <Route path="/events" element={<DiscoverPage />} />
           <Route path="/events/:slug" element={<EventDetailPage />} />
 
-          {/* Authenticated Orders & Attendees */}
+          {/* Authenticated Orders */}
           <Route
             path="/orders"
             element={
               <RequireAuth>
                 <OrdersPage />
-              </RequireAuth>
-            }
-          />
-          <Route
-            path="/atendees"
-            element={
-              <RequireAuth>
-                <AtendeePage />
               </RequireAuth>
             }
           />

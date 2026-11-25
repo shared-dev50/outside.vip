@@ -21,7 +21,6 @@ export const Navbar: React.FC = () => {
   const isDiscover = location.pathname.startsWith('/events');
   const isOrganizer = location.pathname.startsWith('/organizer');
   const isHost = location.pathname.startsWith('/host');
-  const isAtendee = location.pathname.startsWith('/atendee');
   const isOrder = location.pathname.startsWith('/order');
   const isTeam = location.pathname.startsWith('/team');
 
@@ -88,16 +87,7 @@ export const Navbar: React.FC = () => {
             >
               Orders
             </Link>
-             <Link
-              to="/atendees"
-              className={`transition-colors py-1 ${isAtendee
-                ? 'text-stone-900 font-bold border-b-2 border-stone-900'
-                : 'text-stone-500 hover:text-stone-900 font-medium'
-                }`}
-            >
-              Atendee
-            </Link>
-             <Link
+            <Link
               to="/teams"
               className={`transition-colors py-1 ${isTeam
                 ? 'text-stone-900 font-bold border-b-2 border-stone-900'
@@ -242,6 +232,13 @@ export const Navbar: React.FC = () => {
               className="block text-stone-600 hover:text-stone-900 py-1.5"
             >
               Organizer Portal
+            </Link>
+            <Link
+              to="/orders"
+              onClick={() => setMobileMenuOpen(false)}
+              className="block text-stone-600 hover:text-stone-900 py-1.5"
+            >
+              Orders
             </Link>
             <Link
               to="/teams"

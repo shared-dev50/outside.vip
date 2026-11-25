@@ -261,7 +261,7 @@ describe('Authentication Stage 4: Cross-Role Navigation, Unified OTP Login & Das
       expect(html).not.toContain('View Only Event');
     });
 
-    it('renders absolute Navbar links (/orders, /atendees, /teams) cleanly from nested routes', () => {
+    it('renders absolute Navbar links (/orders, /teams) cleanly from nested routes without obsolete /atendees link', () => {
       const html = renderToString(
         <QueryClientProvider client={queryClient}>
           <MemoryRouter initialEntries={['/organizer/finance']}>
@@ -273,13 +273,13 @@ describe('Authentication Stage 4: Cross-Role Navigation, Unified OTP Login & Das
       );
 
       expect(html).toContain('href="/orders"');
-      expect(html).toContain('href="/atendees"');
       expect(html).toContain('href="/teams"');
+      expect(html).not.toContain('href="/atendees"');
       expect(html).not.toContain('href="/organizer/orders"');
       expect(html).not.toContain('href="/organizer/atendees"');
     });
 
-    it('blocks unauthenticated access to /orders and /atendees via RequireAuth', () => {
+    it('blocks unauthenticated access to /orders via RequireAuth', () => {
       const ordersHtml = renderToString(
         <QueryClientProvider client={queryClient}>
           <MemoryRouter initialEntries={['/orders']}>
