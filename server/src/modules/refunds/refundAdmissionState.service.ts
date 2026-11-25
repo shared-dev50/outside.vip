@@ -409,7 +409,6 @@ export async function initiateTicketRefundInTx(
       status: OrderRefundStatus.PENDING,
       refundTickets: {
         create: quote.lineItems.map((line) => ({
-          orderId: lockedOrder.id,
           ticketId: line.ticketId,
           lockState: OrderRefundTicketLockState.ACTIVE_PENDING,
           allocatedGrossInCents: line.allocatedGrossInCents,

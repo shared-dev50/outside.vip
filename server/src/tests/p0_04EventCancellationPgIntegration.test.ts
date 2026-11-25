@@ -267,6 +267,7 @@ describe('Stage 4 P0-04 — Real PostgreSQL Accounting & Concurrency Integration
         status: OrderStatus.COMPLETED,
         paymentProvider: PaymentProvider.STRIPE,
         paymentReference: `pi_pg_${nanoid(8)}`,
+        idempotencyKey: `idem_pg_ord_${nanoid(8)}`,
         customerEmail: 'buyer_pg@example.com',
         customerName: 'PG Buyer',
         totalInCents: 9289,
@@ -390,7 +391,11 @@ describe('Stage 4 P0-04 — Real PostgreSQL Accounting & Concurrency Integration
   it('serializes concurrent executeWithdrawal vs cancelEventsTransactionally in real PostgreSQL with explicit barriers for both lock orderings', async () => {
     const transfersCreateSpy = vi
       .spyOn(stripe.transfers, 'create')
-      .mockResolvedValue({ id: `tr_stripe_${nanoid(8)}` } as any);
+      .mockResolvedValue({
+        id: `tr_stripe_${nanoid(8)}`,
+        amount: 8000,
+        currency: 'usd',
+      } as any);
 
     // Ordering 1: Cancellation acquires Event FOR UPDATE first -> concurrent withdrawal blocks and rejects
     {
@@ -527,7 +532,7 @@ describe('Stage 4 P0-04 — Real PostgreSQL Accounting & Concurrency Integration
         amountInCents: 8000,
         idempotencyKey: `conc_w2_${nanoid(6)}`,
       });
-      expect(wResult.transfer.status).toBe(TransferStatus.SUCCEEDED);
+      expect(wResult.status).toBe(TransferStatus.SUCCEEDED);
 
       // Release FOR SHARE so queued cancellation finishes
       releaseShare();
