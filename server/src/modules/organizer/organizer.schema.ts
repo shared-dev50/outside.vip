@@ -241,6 +241,7 @@ export const createEventSchema = z
 
 export const updateEventSchema = z.object({
   title: z.string().min(2).max(200).optional(),
+  cancellationReason: z.string().trim().max(500).optional(),
   tagline: z.string().max(300).optional().nullable(),
   description: z.string().optional(),
   category: z.nativeEnum(EventCategory).optional(),
@@ -285,6 +286,10 @@ export const updateEventSchema = z.object({
 
 export type CreateEventInput = z.infer<typeof createEventSchema>;
 export type UpdateEventInput = z.infer<typeof updateEventSchema>;
+
+export const cancelEventBodySchema = z.object({
+  reason: z.string().trim().max(500).optional(),
+});
 
 export const earningsPreviewInputSchema = z.object({
   tiers: z

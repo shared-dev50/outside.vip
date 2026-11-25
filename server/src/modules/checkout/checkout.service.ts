@@ -715,6 +715,30 @@ export async function createCheckoutSession(
   try {
     reservationResult = await prisma.$transaction(
       async (tx) => {
+        // Guard against concurrent event cancellation or closure inside the checkout transaction
+        // Canonical lock order: Event (FOR SHARE) -> TicketWaitlistOffer -> TicketTier
+        const lockedEvents = await tx.$queryRaw<
+          Array<{ status: EventStatus; endAt: Date }>
+        >`
+          SELECT status, "endAt"
+          FROM "Event"
+          WHERE id = ${event.id}
+          FOR SHARE
+        `;
+        const liveEvent = lockedEvents[0];
+        const txCheckNow = new Date();
+        if (!liveEvent || liveEvent.status !== EventStatus.PUBLISHED) {
+          throw new BadRequestError(
+            liveEvent?.status === EventStatus.CANCELLED
+              ? 'This event has been cancelled and ticket sales are closed.'
+              : 'Tickets can only be purchased for published events.',
+            liveEvent?.status === EventStatus.CANCELLED ? 'EVENT_CANCELLED' : 'EVENT_NOT_PUBLISHED'
+          );
+        }
+        if (liveEvent.endAt < txCheckNow) {
+          throw new BadRequestError('This event has already concluded');
+        }
+
         // Lock waitlist offer BEFORE TicketTier to maintain canonical lock order:
         // TicketWaitlistOffer -> TicketTier (sorted id ASC)
         if (verifiedOffer) {

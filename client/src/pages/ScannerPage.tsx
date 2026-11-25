@@ -35,6 +35,7 @@ type ScanStatus =
   | 'cancelled'
   | 'refund_pending'
   | 'refunded'
+  | 'event_cancelled'
   | 'unpaid'
   | 'forbidden'
   | 'session_expired'
@@ -540,6 +541,7 @@ export const ScannerPage: React.FC<ScannerPageProps> = ({ initialUser, initialEv
         code === 'CANCELLED_TICKET' ||
         code === 'REFUND_PENDING_TICKET' ||
         code === 'REFUNDED_TICKET' ||
+        code === 'EVENT_CANCELLED' ||
         code === 'UNPAID_ORDER' ||
         code === 'INVALID_TOKEN' ||
         status === 404 ||
@@ -558,6 +560,15 @@ export const ScannerPage: React.FC<ScannerPageProps> = ({ initialUser, initialEv
           note: message,
           token: trimmed,
           wrongEvent: err.data?.ticket || err.data?.event,
+        });
+      } else if (code === 'EVENT_CANCELLED') {
+        setScanStatus('event_cancelled');
+        setTicketMeta({
+          note:
+            message ||
+            'This event has been cancelled. Tickets are no longer valid for entry.',
+          attendee: err.data?.ticket?.attendeeName,
+          tier: err.data?.ticket?.tierName,
         });
       } else if (code === 'REFUND_PENDING_TICKET') {
         setScanStatus('refund_pending');
@@ -1117,6 +1128,26 @@ export const ScannerPage: React.FC<ScannerPageProps> = ({ initialUser, initialEv
                     </button>
                   </div>
                 )}
+              </div>
+            )}
+
+            {scanStatus === 'event_cancelled' && (
+              <div className="space-y-4">
+                <div className="w-20 h-20 rounded-full bg-rose-50 text-rose-600 mx-auto flex items-center justify-center border border-rose-200">
+                  <XCircle className="w-10 h-10" />
+                </div>
+                <div>
+                  <span className="px-3.5 py-1 rounded-full bg-rose-100 text-rose-800 font-mono font-semibold text-xs uppercase tracking-wider border border-rose-300 inline-block mb-3">
+                    Event Cancelled · Admission Closed
+                  </span>
+                  <h2 className="text-xl sm:text-2xl font-display font-bold text-gray-900">
+                    Event Has Been Cancelled
+                  </h2>
+                  <p className="text-xs text-gray-600 mt-2 max-w-md mx-auto">
+                    {ticketMeta?.note ||
+                      'This event has been cancelled and tickets are no longer valid for entry.'}
+                  </p>
+                </div>
               </div>
             )}
 

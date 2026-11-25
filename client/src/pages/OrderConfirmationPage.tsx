@@ -262,6 +262,22 @@ export const OrderConfirmationPage: React.FC = () => {
         </div>
       </div>
 
+      {order.event?.status === 'CANCELLED' && (
+        <div className="p-4 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-start gap-2.5">
+          <AlertCircle className="w-4 h-4 mt-0.5 shrink-0 text-rose-600" />
+          <div className="space-y-1">
+            <div className="font-semibold text-rose-900">
+              Event Cancelled — Admission Passes Disabled
+            </div>
+            <p className="leading-relaxed">
+              This event has been cancelled and tickets are no longer valid for entry. Refunds are
+              handled manually by the organizer or platform support; you will receive a separate
+              confirmation if a refund is issued.
+            </p>
+          </div>
+        </div>
+      )}
+
       {downloadError && (
         <div className="p-4 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs flex items-center justify-between">
           <div className="flex items-center gap-2">

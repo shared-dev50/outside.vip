@@ -11,8 +11,15 @@ import {
   earningsPreviewInputSchema,
   organizerWorkspaceSchema,
   organizerOrdersQuerySchema,
+  cancelEventBodySchema,
 } from './organizer.schema.js';
 import { calculateCombinedEarnings } from '../checkout/checkout.financials.js';
+import {
+  cancelEventsTransactionally,
+  cancelSeriesEventsTransactionally,
+  executeEventCancellationInTx,
+} from '../events/eventCancellation.service.js';
+import { triggerEmailOutboxDispatch } from '../notifications/emailOutboxWorker.js';
 import { NotFoundError, ForbiddenError, BadRequestError, ConflictError, UnauthorizedError } from '../../utils/errors.js';
 import { getRedisClient } from '../../lib/redis.js';
 import { invalidateUserAuthCache } from '../../lib/session.service.js';
@@ -1199,6 +1206,16 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
     // If transitioning to PUBLISHED or updating tiers on a PUBLISHED event, enforce Stripe readiness for paid tiers
     const nextStatus = input.status ?? existingEvent.status;
     if (
+      existingEvent.status === EventStatus.CANCELLED &&
+      input.status !== undefined &&
+      input.status !== EventStatus.CANCELLED
+    ) {
+      throw new ConflictError(
+        'Cancelled events cannot be reverted to an active or draft status.',
+        'EVENT_CANCELLED'
+      );
+    }
+    if (
       nextStatus === EventStatus.PUBLISHED &&
       (existingEvent.status !== EventStatus.PUBLISHED || input.ticketTiers !== undefined)
     ) {
@@ -1371,7 +1388,63 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
       }
     }
 
+    let cancelEmailsEnqueued = false;
+
     const updatedEvent = await prisma.$transaction(async (tx) => {
+      // Acquire canonical locks upfront before any series, event, or tier mutations:
+      // EventSeries (FOR UPDATE, if series update) -> Event (id ASC FOR UPDATE).
+      if (input.applyToFuture && existingEvent.seriesId) {
+        await tx.$queryRaw<Array<{ id: string }>>`
+          SELECT id
+          FROM "EventSeries"
+          WHERE id = ${existingEvent.seriesId}
+          FOR UPDATE
+        `;
+      }
+
+      const lockedEventRows =
+        input.applyToFuture && existingEvent.seriesId
+          ? await tx.$queryRaw<
+              Array<{ id: string; status: EventStatus; startAt: Date }>
+            >`
+              SELECT id, status, "startAt"
+              FROM "Event"
+              WHERE "seriesId" = ${existingEvent.seriesId}
+              ORDER BY id ASC
+              FOR UPDATE
+            `
+          : await tx.$queryRaw<
+              Array<{ id: string; status: EventStatus; startAt: Date }>
+            >`
+              SELECT id, status, "startAt"
+              FROM "Event"
+              WHERE id = ${id}
+              FOR UPDATE
+            `;
+
+      const lockedPrimary = lockedEventRows.find((r) => r.id === id);
+      if (!lockedPrimary) {
+        throw new NotFoundError('Event not found');
+      }
+
+      const isNonCancelStatusRequest =
+        input.status !== undefined && input.status !== EventStatus.CANCELLED;
+
+      if (lockedPrimary.status === EventStatus.CANCELLED && isNonCancelStatusRequest) {
+        throw new ConflictError(
+          'Cancelled events cannot be reverted to an active or draft status.',
+          'EVENT_CANCELLED'
+        );
+      }
+
+      const targetIdsToCancel: string[] = [];
+      if (
+        input.status === EventStatus.CANCELLED &&
+        lockedPrimary.status !== EventStatus.CANCELLED
+      ) {
+        targetIdsToCancel.push(id);
+      }
+
       let payoutDetailsId = existingEvent.payoutDetailsId;
       if (isOwner && input.payoutDetails) {
         const savedPayout = await saveOrganizerPayoutDetails(tx, existingEvent.organizerId, input.payoutDetails);
@@ -1413,46 +1486,77 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
         const futureOccurrences = await tx.event.findMany({
           where: {
             seriesId: existingEvent.seriesId,
-            startAt: { gte: existingEvent.startAt },
+            startAt: { gte: lockedPrimary.startAt },
             id: { not: id },
           },
           include: { ticketTiers: true },
         });
 
+        if (isNonCancelStatusRequest && futureOccurrences.some((occ) => occ.status === EventStatus.CANCELLED)) {
+          throw new ConflictError(
+            'One or more future occurrences in this series are cancelled and cannot be reverted to an active or draft status.',
+            'EVENT_CANCELLED'
+          );
+        }
+
         for (const occ of futureOccurrences) {
-          await tx.event.update({
-            where: { id: occ.id },
-            data: {
-              ...(input.title !== undefined && { title: input.title }),
-              ...(input.tagline !== undefined && { tagline: input.tagline }),
-              ...(input.description !== undefined && { description: input.description }),
-              ...(input.category !== undefined && { category: input.category }),
-              ...(input.coverImageUrl !== undefined && { coverImageUrl: input.coverImageUrl }),
-              ...(input.coverImagePublicId !== undefined && { coverImagePublicId: input.coverImagePublicId }),
-              ...(input.thumbnailUrl !== undefined && {
-                thumbnailUrl:
-                  input.thumbnailUrl ||
-                  (input.coverImagePublicId ? generateThumbnailUrl(input.coverImageUrl || occ.coverImageUrl) : null),
-              }),
-              ...(normalizedLocation.venueName !== undefined && { venueName: normalizedLocation.venueName }),
-              ...(normalizedLocation.venueAddress !== undefined && { venueAddress: normalizedLocation.venueAddress }),
-              ...(normalizedLocation.city !== undefined && { city: normalizedLocation.city }),
-              ...(normalizedLocation.country !== undefined && { country: normalizedLocation.country }),
-              ...(normalizedLocation.latitude !== undefined && { latitude: normalizedLocation.latitude }),
-              ...(normalizedLocation.longitude !== undefined && { longitude: normalizedLocation.longitude }),
-              ...(normalizedLocation.placeId !== undefined && { placeId: normalizedLocation.placeId }),
-              ...(input.timezone !== undefined && { timezone: input.timezone }),
-              ...(input.ageRestriction !== undefined && { ageRestriction: input.ageRestriction }),
-              ...(input.dressCode !== undefined && { dressCode: input.dressCode }),
-              ...(input.status !== undefined && { status: input.status }),
-              ...(input.showOnExplore !== undefined && { showOnExplore: input.showOnExplore }),
-              ...(input.hideGuestCount !== undefined && { hideGuestCount: input.hideGuestCount }),
-              ...(isPasswordProtected !== undefined && { isPasswordProtected }),
-              ...(passwordHash !== undefined && { passwordHash }),
-              ...(youtubeVideoId !== undefined && { youtubeVideoId }),
-              ...(youtubeVideoUrl !== undefined && { youtubeVideoUrl }),
-            },
-          });
+          if (input.status === EventStatus.CANCELLED && occ.status !== EventStatus.CANCELLED) {
+            targetIdsToCancel.push(occ.id);
+          }
+
+          const occData = {
+            ...(input.title !== undefined && { title: input.title }),
+            ...(input.tagline !== undefined && { tagline: input.tagline }),
+            ...(input.description !== undefined && { description: input.description }),
+            ...(input.category !== undefined && { category: input.category }),
+            ...(input.coverImageUrl !== undefined && { coverImageUrl: input.coverImageUrl }),
+            ...(input.coverImagePublicId !== undefined && { coverImagePublicId: input.coverImagePublicId }),
+            ...(input.thumbnailUrl !== undefined && {
+              thumbnailUrl:
+                input.thumbnailUrl ||
+                (input.coverImagePublicId ? generateThumbnailUrl(input.coverImageUrl || occ.coverImageUrl) : null),
+            }),
+            ...(normalizedLocation.venueName !== undefined && { venueName: normalizedLocation.venueName }),
+            ...(normalizedLocation.venueAddress !== undefined && { venueAddress: normalizedLocation.venueAddress }),
+            ...(normalizedLocation.city !== undefined && { city: normalizedLocation.city }),
+            ...(normalizedLocation.country !== undefined && { country: normalizedLocation.country }),
+            ...(normalizedLocation.latitude !== undefined && { latitude: normalizedLocation.latitude }),
+            ...(normalizedLocation.longitude !== undefined && { longitude: normalizedLocation.longitude }),
+            ...(normalizedLocation.placeId !== undefined && { placeId: normalizedLocation.placeId }),
+            ...(input.timezone !== undefined && { timezone: input.timezone }),
+            ...(input.ageRestriction !== undefined && { ageRestriction: input.ageRestriction }),
+            ...(input.dressCode !== undefined && { dressCode: input.dressCode }),
+            ...(input.status !== undefined &&
+              input.status !== EventStatus.CANCELLED &&
+              occ.status !== EventStatus.CANCELLED && { status: input.status }),
+            ...(input.showOnExplore !== undefined && { showOnExplore: input.showOnExplore }),
+            ...(input.hideGuestCount !== undefined && { hideGuestCount: input.hideGuestCount }),
+            ...(isPasswordProtected !== undefined && { isPasswordProtected }),
+            ...(passwordHash !== undefined && { passwordHash }),
+            ...(youtubeVideoId !== undefined && { youtubeVideoId }),
+            ...(youtubeVideoUrl !== undefined && { youtubeVideoUrl }),
+          };
+
+          if (isNonCancelStatusRequest) {
+            const occUpdated = await tx.event.updateMany({
+              where: {
+                id: occ.id,
+                status: { not: EventStatus.CANCELLED },
+              },
+              data: occData,
+            });
+            if (occUpdated.count === 0) {
+              throw new ConflictError(
+                'Cancelled occurrences in this series cannot be reverted to an active or draft status.',
+                'EVENT_CANCELLED'
+              );
+            }
+          } else {
+            await tx.event.update({
+              where: { id: occ.id },
+              data: occData,
+            });
+          }
 
           // Sync gallery on future occurrences if updated
           if (input.galleryImages !== undefined) {
@@ -1487,8 +1591,8 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
             }
           }
 
-          // Safely sync tiers on future occurrences with 0 sales
-          if (input.ticketTiers) {
+          // Safely sync tiers on future non-cancelled occurrences with 0 sales; never churn tiers of CANCELLED occurrences
+          if (input.ticketTiers && occ.status !== EventStatus.CANCELLED) {
             const occSales = occ.ticketTiers.reduce((acc: number, t: any) => acc + t.soldQuantity, 0);
             if (occSales === 0) {
               await tx.ticketTier.deleteMany({ where: { eventId: occ.id } });
@@ -1520,45 +1624,64 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
         }
       }
 
-      await tx.event.update({
-        where: { id },
-        data: {
-          ...(input.title !== undefined && { title: input.title }),
-          ...(input.tagline !== undefined && { tagline: input.tagline }),
-          ...(input.description !== undefined && { description: input.description }),
-          ...(input.category !== undefined && { category: input.category }),
-          ...(input.coverImageUrl !== undefined && { coverImageUrl: input.coverImageUrl }),
-          ...(input.coverImagePublicId !== undefined && { coverImagePublicId: input.coverImagePublicId }),
-          ...(input.thumbnailUrl !== undefined && {
-            thumbnailUrl:
-              input.thumbnailUrl ||
-              (input.coverImagePublicId
-                ? generateThumbnailUrl(input.coverImageUrl || existingEvent.coverImageUrl)
-                : null),
-          }),
-          ...(normalizedLocation.venueName !== undefined && { venueName: normalizedLocation.venueName }),
-          ...(normalizedLocation.venueAddress !== undefined && { venueAddress: normalizedLocation.venueAddress }),
-          ...(normalizedLocation.city !== undefined && { city: normalizedLocation.city }),
-          ...(normalizedLocation.country !== undefined && { country: normalizedLocation.country }),
-          ...(normalizedLocation.latitude !== undefined && { latitude: normalizedLocation.latitude }),
-          ...(normalizedLocation.longitude !== undefined && { longitude: normalizedLocation.longitude }),
-          ...(normalizedLocation.placeId !== undefined && { placeId: normalizedLocation.placeId }),
-          ...(input.startAt !== undefined && { startAt: new Date(input.startAt) }),
-          ...(input.endAt !== undefined && { endAt: new Date(input.endAt) }),
-          ...(input.timezone !== undefined && { timezone: input.timezone }),
-          ...(input.ageRestriction !== undefined && { ageRestriction: input.ageRestriction }),
-          ...(input.dressCode !== undefined && { dressCode: input.dressCode }),
-          ...(input.status !== undefined && { status: input.status }),
-          ...(input.showOnExplore !== undefined && { showOnExplore: input.showOnExplore }),
-          ...(input.hideGuestCount !== undefined && { hideGuestCount: input.hideGuestCount }),
-          ...(isPasswordProtected !== undefined && { isPasswordProtected }),
-          ...(passwordHash !== undefined && { passwordHash }),
-          ...(youtubeVideoId !== undefined && { youtubeVideoId }),
-          ...(youtubeVideoUrl !== undefined && { youtubeVideoUrl }),
-          ...(existingEvent.seriesId && !input.applyToFuture ? { isCustomized: true } : {}),
-          ...(isOwner && payoutDetailsId ? { payoutDetailsId } : {}),
-        },
-      });
+      const primaryData = {
+        ...(input.title !== undefined && { title: input.title }),
+        ...(input.tagline !== undefined && { tagline: input.tagline }),
+        ...(input.description !== undefined && { description: input.description }),
+        ...(input.category !== undefined && { category: input.category }),
+        ...(input.coverImageUrl !== undefined && { coverImageUrl: input.coverImageUrl }),
+        ...(input.coverImagePublicId !== undefined && { coverImagePublicId: input.coverImagePublicId }),
+        ...(input.thumbnailUrl !== undefined && {
+          thumbnailUrl:
+            input.thumbnailUrl ||
+            (input.coverImagePublicId
+              ? generateThumbnailUrl(input.coverImageUrl || existingEvent.coverImageUrl)
+              : null),
+        }),
+        ...(normalizedLocation.venueName !== undefined && { venueName: normalizedLocation.venueName }),
+        ...(normalizedLocation.venueAddress !== undefined && { venueAddress: normalizedLocation.venueAddress }),
+        ...(normalizedLocation.city !== undefined && { city: normalizedLocation.city }),
+        ...(normalizedLocation.country !== undefined && { country: normalizedLocation.country }),
+        ...(normalizedLocation.latitude !== undefined && { latitude: normalizedLocation.latitude }),
+        ...(normalizedLocation.longitude !== undefined && { longitude: normalizedLocation.longitude }),
+        ...(normalizedLocation.placeId !== undefined && { placeId: normalizedLocation.placeId }),
+        ...(input.startAt !== undefined && { startAt: new Date(input.startAt) }),
+        ...(input.endAt !== undefined && { endAt: new Date(input.endAt) }),
+        ...(input.timezone !== undefined && { timezone: input.timezone }),
+        ...(input.ageRestriction !== undefined && { ageRestriction: input.ageRestriction }),
+        ...(input.dressCode !== undefined && { dressCode: input.dressCode }),
+        ...(input.status !== undefined &&
+          input.status !== EventStatus.CANCELLED && { status: input.status }),
+        ...(input.showOnExplore !== undefined && { showOnExplore: input.showOnExplore }),
+        ...(input.hideGuestCount !== undefined && { hideGuestCount: input.hideGuestCount }),
+        ...(isPasswordProtected !== undefined && { isPasswordProtected }),
+        ...(passwordHash !== undefined && { passwordHash }),
+        ...(youtubeVideoId !== undefined && { youtubeVideoId }),
+        ...(youtubeVideoUrl !== undefined && { youtubeVideoUrl }),
+        ...(existingEvent.seriesId && !input.applyToFuture ? { isCustomized: true } : {}),
+        ...(isOwner && payoutDetailsId ? { payoutDetailsId } : {}),
+      };
+
+      if (isNonCancelStatusRequest) {
+        const updatedPrimary = await tx.event.updateMany({
+          where: {
+            id,
+            status: { not: EventStatus.CANCELLED },
+          },
+          data: primaryData,
+        });
+        if (updatedPrimary.count === 0) {
+          throw new ConflictError(
+            'Cancelled events cannot be reverted to an active or draft status.',
+            'EVENT_CANCELLED'
+          );
+        }
+      } else {
+        await tx.event.update({
+          where: { id },
+          data: primaryData,
+        });
+      }
 
       if (input.galleryImages !== undefined) {
         await tx.eventGalleryImage.deleteMany({ where: { eventId: id } });
@@ -1665,6 +1788,21 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
         }
       }
 
+      if (targetIdsToCancel.length > 0) {
+        const cancelResult = await executeEventCancellationInTx(tx, {
+          eventIds: targetIdsToCancel,
+          actorUserId: organizerId,
+          actorEmail: req.user!.email,
+          actorRole: req.user!.role,
+          reason: input.cancellationReason ?? null,
+          isAdminOverride: existingEvent.organizerId !== organizerId && req.user!.role === 'ADMIN',
+          isSeriesCancellation: Boolean(input.applyToFuture && existingEvent.seriesId),
+          seriesId: existingEvent.seriesId,
+          ipAddress: req.ip,
+        });
+        cancelEmailsEnqueued = cancelResult.enqueuedEmailCount > 0;
+      }
+
       return tx.event.findUnique({
         where: { id },
         include: {
@@ -1725,7 +1863,15 @@ export async function updateOrganizerEvent(req: Request, res: Response, next: Ne
       }
     }
 
-    if (input.ticketTiers && updatedEvent?.ticketTiers) {
+    if (cancelEmailsEnqueued) {
+      triggerEmailOutboxDispatch();
+    }
+
+    if (
+      updatedEvent?.status !== EventStatus.CANCELLED &&
+      input.ticketTiers &&
+      updatedEvent?.ticketTiers
+    ) {
       for (const tier of updatedEvent.ticketTiers) {
         if (tier.waitlistEnabled && !isTicketTierHidden(tier) && !isTicketTierSalesDisabled(tier)) {
           processWaitlistForTier(tier.id).catch((err) =>
@@ -1769,6 +1915,10 @@ export async function publishEvent(req: Request, res: Response, next: NextFuncti
 
     if (!event) {
       throw new NotFoundError('Event not found');
+    }
+
+    if (event.status === EventStatus.CANCELLED) {
+      throw new ConflictError('A cancelled event cannot be republished.', 'EVENT_CANCELLED');
     }
 
     if (event.organizerId !== organizerId && req.user!.role !== 'ADMIN') {
@@ -1881,9 +2031,20 @@ export async function publishEvent(req: Request, res: Response, next: NextFuncti
       await assertStripeReadyForPaidPublishing(event.organizerId);
     }
 
-    const updated = await prisma.event.update({
-      where: { id },
+    const publishedRes = await prisma.event.updateMany({
+      where: {
+        id,
+        status: { not: EventStatus.CANCELLED },
+      },
       data: { status: EventStatus.PUBLISHED },
+    });
+
+    if (publishedRes.count === 0) {
+      throw new ConflictError('A cancelled event cannot be republished.', 'EVENT_CANCELLED');
+    }
+
+    const updated = await prisma.event.findUnique({
+      where: { id },
       include: { ticketTiers: true },
     });
 
@@ -1914,6 +2075,10 @@ export async function unpublishEvent(req: Request, res: Response, next: NextFunc
 
     if (event.organizerId !== organizerId && req.user!.role !== 'ADMIN') {
       throw new ForbiddenError('You do not have permission to unpublish this event');
+    }
+
+    if (event.status === EventStatus.CANCELLED) {
+      throw new ConflictError('Cancelled events cannot be reverted to draft status.', 'EVENT_CANCELLED');
     }
 
     if (event.organizerId !== organizerId && req.user!.role === 'ADMIN') {
@@ -1954,9 +2119,20 @@ export async function unpublishEvent(req: Request, res: Response, next: NextFunc
       return;
     }
 
-    const updated = await prisma.event.update({
-      where: { id },
+    const unpublishedRes = await prisma.event.updateMany({
+      where: {
+        id,
+        status: { not: EventStatus.CANCELLED },
+      },
       data: { status: EventStatus.DRAFT },
+    });
+
+    if (unpublishedRes.count === 0) {
+      throw new ConflictError('Cancelled events cannot be reverted to draft status.', 'EVENT_CANCELLED');
+    }
+
+    const updated = await prisma.event.findUnique({
+      where: { id },
       include: { ticketTiers: true },
     });
 
@@ -1976,6 +2152,7 @@ export async function cancelOrganizerEvent(req: Request, res: Response, next: Ne
   try {
     const organizerId = req.user!.userId;
     const { id } = req.params;
+    const body = cancelEventBodySchema.parse(req.body ?? {});
 
     const event = await prisma.event.findUnique({
       where: { id },
@@ -1990,31 +2167,34 @@ export async function cancelOrganizerEvent(req: Request, res: Response, next: Ne
       await resolveEventAuthorization(id, req.user!, 'canCancelEvent');
     }
 
-    if (event.organizerId !== organizerId && req.user!.role === 'ADMIN') {
-      await recordAdminAuditLog({
-        actorUserId: organizerId,
-        actorEmail: req.user!.email,
-        action: 'ADMIN_EVENT_CANCEL_OVERRIDE',
-        targetType: 'Event',
-        targetId: event.id,
-        metadata: { eventOrganizerId: event.organizerId },
-        ipAddress: req.ip,
-      });
-    }
+    const cancelSummary = await cancelEventsTransactionally({
+      eventIds: [id],
+      actorUserId: organizerId,
+      actorEmail: req.user!.email,
+      actorRole: req.user!.role,
+      reason: body.reason ?? null,
+      isAdminOverride: event.organizerId !== organizerId && req.user!.role === 'ADMIN',
+      isSeriesCancellation: false,
+      ipAddress: req.ip,
+    });
 
-    const updated = await prisma.event.update({
+    const updated = await prisma.event.findUnique({
       where: { id },
-      data: { status: EventStatus.CANCELLED },
       include: { ticketTiers: true },
     });
 
-    await cancelWaitlistForEventIds([id]);
+    const alreadyCancelled = cancelSummary.cancelledEventIds.length === 0;
 
     res.json({
       success: true,
       data: {
         event: updated,
-        message: event.seriesId
+        alreadyCancelled,
+        cancelledPendingOrdersCount: cancelSummary.cancelledPendingOrdersCount,
+        affectedCompletedOrdersCount: cancelSummary.affectedCompletedOrdersCount,
+        message: alreadyCancelled
+          ? 'Event is already cancelled. Financial holds, notifications, and admission blocks remain active.'
+          : event.seriesId
           ? `Occurrence #${event.occurrenceIndex || 1} has been cancelled. Other occurrences in the series remain unchanged.`
           : 'Event has been cancelled.',
       },
@@ -2028,17 +2208,11 @@ export async function cancelOrganizerSeries(req: Request, res: Response, next: N
   try {
     const organizerId = req.user!.userId;
     const { id } = req.params;
+    const body = cancelEventBodySchema.parse(req.body ?? {});
 
     const series = await prisma.eventSeries.findUnique({
       where: { id },
-      include: {
-        events: {
-          where: {
-            startAt: { gte: new Date() },
-            status: { not: EventStatus.CANCELLED },
-          },
-        },
-      },
+      select: { id: true, organizerId: true },
     });
 
     if (!series) {
@@ -2049,26 +2223,25 @@ export async function cancelOrganizerSeries(req: Request, res: Response, next: N
       throw new ForbiddenError('You do not have permission to cancel this series');
     }
 
-    const updateResult = await prisma.event.updateMany({
-      where: {
-        seriesId: id,
-        startAt: { gte: new Date() },
-        status: { not: EventStatus.CANCELLED },
-      },
-      data: {
-        status: EventStatus.CANCELLED,
-      },
+    // Resolve and lock upcoming non-cancelled occurrences strictly inside the transaction
+    // under EventSeries (FOR UPDATE) -> Event (ORDER BY id ASC FOR UPDATE).
+    const cancelSummary = await cancelSeriesEventsTransactionally({
+      seriesId: id,
+      actorUserId: organizerId,
+      actorEmail: req.user!.email,
+      actorRole: req.user!.role,
+      reason: body.reason ?? null,
+      ipAddress: req.ip,
     });
-
-    const cancelledEventIds = series.events.map((e) => e.id);
-    await cancelWaitlistForEventIds(cancelledEventIds);
 
     res.json({
       success: true,
       data: {
         seriesId: id,
-        cancelledCount: updateResult.count,
-        message: `Cancelled ${updateResult.count} upcoming occurrence(s) in this series. Past events and history were preserved.`,
+        cancelledCount: cancelSummary.cancelledEventIds.length,
+        cancelledPendingOrdersCount: cancelSummary.cancelledPendingOrdersCount,
+        affectedCompletedOrdersCount: cancelSummary.affectedCompletedOrdersCount,
+        message: `Cancelled ${cancelSummary.cancelledEventIds.length} upcoming occurrence(s) in this series. Past events and history were preserved.`,
       },
     });
   } catch (error) {
@@ -2483,6 +2656,7 @@ export async function checkInTicket(req: Request, res: Response, next: NextFunct
             eventId: true,
             ticketToken: true,
             status: true,
+            event: { select: { status: true } },
             order: { select: { status: true } },
           },
         });
@@ -2496,6 +2670,36 @@ export async function checkInTicket(req: Request, res: Response, next: NextFunct
           freshTicket.ticketToken.length > 10
             ? `${freshTicket.ticketToken.slice(0, 7)}...${freshTicket.ticketToken.slice(-4)}`
             : '***';
+
+        if (freshTicket.event?.status === 'CANCELLED') {
+          await redisClient?.del(idemRedisKey!).catch(() => {});
+          console.warn(
+            `[CheckIn] Blocked stale Redis replay for CANCELLED event: token=${maskTok}`
+          );
+          await prisma.checkInLog.create({
+            data: {
+              ticketId: freshTicket.id,
+              eventId: freshTicket.eventId,
+              scannedToken: freshTicket.ticketToken,
+              scannedByUserId: scannerUserId,
+              result: 'EVENT_CANCELLED',
+              notes: 'Stale idempotency replay rejected: event has been cancelled.',
+            },
+          });
+          res.status(400).json({
+            success: false,
+            error: {
+              message: 'This event has been cancelled. Tickets are no longer valid for entry.',
+              statusCode: 400,
+              code: 'EVENT_CANCELLED',
+            },
+            data: {
+              result: 'EVENT_CANCELLED',
+              message: 'This event has been cancelled. Tickets are no longer valid for entry.',
+            },
+          });
+          return true;
+        }
 
         if (freshTicket.status === 'REFUND_PENDING') {
           await redisClient?.del(idemRedisKey!).catch(() => {});
@@ -2708,6 +2912,7 @@ export async function checkInTicket(req: Request, res: Response, next: NextFunct
           id: true,
           slug: true,
           title: true,
+          status: true,
           organizerId: true,
           timezone: true,
           startAt: true,
@@ -2928,6 +3133,39 @@ export async function checkInTicket(req: Request, res: Response, next: NextFunct
         });
         return;
       }
+    }
+
+    if (ticket.event.status === 'CANCELLED') {
+      if (idemRedisKey && redisClient) {
+        await redisClient.delLockIfMatches(idemRedisKey, lockId).catch(() => {});
+      }
+      console.warn(
+        `[CheckIn] Rejected EVENT_CANCELLED: token=${maskedToken}, event=${ticket.event.id}`
+      );
+      await prisma.checkInLog.create({
+        data: {
+          ticketId: ticket.id,
+          eventId: ticket.eventId,
+          scannedToken: ticket.ticketToken,
+          scannedByUserId: scannerUserId,
+          result: 'EVENT_CANCELLED',
+          notes: 'Event has been cancelled and admission is closed.',
+        },
+      });
+
+      res.status(400).json({
+        success: false,
+        error: {
+          message: 'This event has been cancelled. Tickets are no longer valid for entry.',
+          statusCode: 400,
+          code: 'EVENT_CANCELLED',
+        },
+        data: {
+          result: 'EVENT_CANCELLED',
+          message: 'This event has been cancelled. Tickets are no longer valid for entry.',
+        },
+      });
+      return;
     }
 
     if (ticket.status === 'REFUND_PENDING') {
@@ -3265,6 +3503,7 @@ export async function checkInTicket(req: Request, res: Response, next: NextFunct
     type AtomicCheckInOutcome =
       | { kind: 'SUCCESS'; checkInTime: Date }
       | { kind: 'RECOVERED_IDEMPOTENCY_SUCCESS'; checkInTime: Date }
+      | { kind: 'EVENT_CANCELLED' }
       | { kind: 'REFUND_PENDING_TICKET' }
       | { kind: 'REFUNDED_TICKET' }
       | { kind: 'CANCELLED_TICKET' }
@@ -3272,9 +3511,13 @@ export async function checkInTicket(req: Request, res: Response, next: NextFunct
       | { kind: 'ALREADY_CHECKED_IN'; checkedInAt: Date | null };
 
     const txOutcome: AtomicCheckInOutcome = await prisma.$transaction(async (tx) => {
-      const orderRows = await tx.$queryRaw<Array<{ status: string }>>`
-        SELECT status FROM "Order"
-        WHERE id = ${ticket.orderId}
+      const orderRows = await tx.$queryRaw<
+        Array<{ status: string; eventStatus?: string }>
+      >`
+        SELECT o.status, e.status AS "eventStatus"
+        FROM "Order" o
+        JOIN "Event" e ON e.id = o."eventId"
+        WHERE o.id = ${ticket.orderId}
         FOR SHARE
       `;
 
@@ -3307,8 +3550,23 @@ export async function checkInTicket(req: Request, res: Response, next: NextFunct
       `;
 
       const lockedTicket = lockedTickets[0];
+      const currentEventStatus = orderRows[0]?.eventStatus ?? ticket.event.status;
       const currentOrderStatus = orderRows[0]?.status ?? ticket.order.status;
       const currentTicketStatus = lockedTicket?.status ?? ticket.status;
+
+      if (currentEventStatus === 'CANCELLED') {
+        await tx.checkInLog.create({
+          data: {
+            ticketId: ticket.id,
+            eventId: ticket.eventId,
+            scannedToken: ticket.ticketToken,
+            scannedByUserId: scannerUserId,
+            result: 'EVENT_CANCELLED',
+            notes: 'Event transitioned to CANCELLED before check-in committed.',
+          },
+        });
+        return { kind: 'EVENT_CANCELLED' };
+      }
 
       if (currentTicketStatus === 'REFUND_PENDING') {
         await tx.checkInLog.create({
@@ -3426,6 +3684,22 @@ export async function checkInTicket(req: Request, res: Response, next: NextFunct
     if (txOutcome.kind !== 'SUCCESS' && txOutcome.kind !== 'RECOVERED_IDEMPOTENCY_SUCCESS') {
       if (idemRedisKey && redisClient) {
         await redisClient.delLockIfMatches(idemRedisKey, lockId).catch(() => {});
+      }
+
+      if (txOutcome.kind === 'EVENT_CANCELLED') {
+        res.status(400).json({
+          success: false,
+          error: {
+            message: 'This event has been cancelled. Tickets are no longer valid for entry.',
+            statusCode: 400,
+            code: 'EVENT_CANCELLED',
+          },
+          data: {
+            result: 'EVENT_CANCELLED',
+            message: 'This event has been cancelled. Tickets are no longer valid for entry.',
+          },
+        });
+        return;
       }
 
       if (txOutcome.kind === 'REFUND_PENDING_TICKET') {

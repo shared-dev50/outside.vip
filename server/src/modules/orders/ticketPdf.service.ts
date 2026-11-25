@@ -2,6 +2,7 @@ import PDFDocument from 'pdfkit';
 import QRCode from 'qrcode';
 import sharp from 'sharp';
 import { TicketStatus } from '@prisma/client';
+import { BadRequestError } from '../../utils/errors.js';
 
 export const INELIGIBLE_ADMISSION_TICKET_STATUSES: ReadonlySet<string> = new Set([
   TicketStatus.REFUND_PENDING,
@@ -30,6 +31,7 @@ export function filterEligiblePdfTickets<
 
 interface TicketPdfEvent {
   title: string;
+  status?: string | null;
   tagline?: string | null;
   description?: string | null;
   category: string;
@@ -303,6 +305,13 @@ export async function generateTicketsPdf(
   order: TicketPdfOrder,
   specificTicketId?: string
 ): Promise<Buffer> {
+  if (order.event?.status === 'CANCELLED') {
+    throw new BadRequestError(
+      'This event has been cancelled. Admission passes are no longer valid or downloadable.',
+      'EVENT_CANCELLED_NO_ADMISSION_PASSES'
+    );
+  }
+
   const ticketsToRender = filterEligiblePdfTickets(order.tickets, specificTicketId);
 
   if (ticketsToRender.length === 0) {

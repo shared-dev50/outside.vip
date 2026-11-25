@@ -16,6 +16,7 @@ const orderInclude = {
       id: true,
       slug: true,
       title: true,
+      status: true,
       tagline: true,
       description: true,
       category: true,
@@ -196,7 +197,9 @@ export async function getOrderByOrderNumber(
           items: order.items,
           tickets: (order.tickets || []).map((t) => {
             const admissionEligible =
-              order.status === 'COMPLETED' && isTicketAdmissionEligible(t.status);
+              order.status === 'COMPLETED' &&
+              order.event?.status !== 'CANCELLED' &&
+              isTicketAdmissionEligible(t.status);
             return {
               ...t,
               admissionEligible,
@@ -228,6 +231,13 @@ export async function downloadOrderTicketsPdf(
     if (order.status !== 'COMPLETED') {
       throw new BadRequestError(
         `Tickets are only downloadable for confirmed and paid orders. Current order status: ${order.status}`
+      );
+    }
+
+    if (order.event?.status === 'CANCELLED') {
+      throw new BadRequestError(
+        'This event has been cancelled. Admission passes are no longer valid or downloadable.',
+        'EVENT_CANCELLED_NO_ADMISSION_PASSES'
       );
     }
 

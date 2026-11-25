@@ -727,6 +727,7 @@ describe('Stage 4 P0-03 Workstream C — Admission, PDF/QR & Accounting Foundati
 
       // Verify getOrganizerBalance & executeWithdrawal enforce netAvailableInCents protection
       vi.spyOn(prisma.organizerBalance, 'findUnique').mockResolvedValueOnce({ ...balanceState } as any);
+      vi.spyOn(prisma.event, 'findMany').mockResolvedValueOnce([]);
       vi.spyOn(prisma.financialLedgerEntry, 'findMany')
         .mockResolvedValueOnce([recoverableRow] as any)
         .mockResolvedValueOnce([ledgerRows[0]] as any);

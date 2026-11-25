@@ -16,6 +16,9 @@ import {
   BuyerRefundContentSnapshot,
   BuyerRefundNotificationKind,
   EmailDeliveryError,
+  EVENT_CANCELLED_TEMPLATE_VERSION,
+  EventCancelledBuyerContentSnapshot,
+  EventCancelledOrganizerContentSnapshot,
   LATE_PAYMENT_REFUND_TEMPLATE_VERSION,
   LatePaymentRefundContentSnapshot,
   LatePaymentRefundNotificationKind,
@@ -27,6 +30,8 @@ import {
   resolveEmailFrom,
   sanitizeEmailLogMessage,
   sendBuyerRefundEmail,
+  sendEventCancelledBuyerEmail,
+  sendEventCancelledOrganizerEmail,
   sendLatePaymentRefundEmail,
   sendOrderConfirmationEmail,
 } from '../../lib/email.service.js';
@@ -487,11 +492,182 @@ export async function enqueueOrderConfirmationEmail(
     skipDuplicates: true,
   });
 
-    return {
-      enqueued: result.count > 0,
-      dedupeKey,
-      idempotencyKey,
+  return {
+    enqueued: result.count > 0,
+    dedupeKey,
+    idempotencyKey,
+  };
+}
+
+export function buildEventCancelledBuyerDedupeKey(eventId: string, orderId: string): string {
+  return `event_cancelled_buyer:${eventId}:${orderId}`;
+}
+
+export function buildEventCancelledBuyerIdempotencyKey(eventId: string, orderId: string): string {
+  return `event-cancelled-buyer:${eventId}:${orderId}`;
+}
+
+export function buildEventCancelledOrganizerDedupeKey(eventId: string): string {
+  return `event_cancelled_organizer:${eventId}`;
+}
+
+export function buildEventCancelledOrganizerIdempotencyKey(eventId: string): string {
+  return `event-cancelled-organizer:${eventId}`;
+}
+
+export async function enqueueEventCancelledBuyerEmail(
+  tx: Prisma.TransactionClient,
+  params: {
+    eventId: string;
+    orderId: string;
+    recipientEmail: string;
+    snapshot: Omit<
+      EventCancelledBuyerContentSnapshot,
+      'templateVersion' | 'fromEmail' | 'eventId' | 'orderId'
+    > & {
+      fromEmail?: string;
     };
+  }
+): Promise<{ enqueued: boolean; dedupeKey: string; idempotencyKey: string }> {
+  const dedupeKey = buildEventCancelledBuyerDedupeKey(params.eventId, params.orderId);
+  const idempotencyKey = buildEventCancelledBuyerIdempotencyKey(params.eventId, params.orderId);
+
+  const fullSnapshot: EventCancelledBuyerContentSnapshot = {
+    templateVersion: EVENT_CANCELLED_TEMPLATE_VERSION,
+    eventId: params.eventId,
+    orderId: params.orderId,
+    fromEmail: params.snapshot.fromEmail || resolveEmailFrom(),
+    orderNumber: params.snapshot.orderNumber,
+    buyerName: params.snapshot.buyerName,
+    eventTitle: params.snapshot.eventTitle,
+    eventStartAtIso: params.snapshot.eventStartAtIso ?? null,
+    cancelledAtIso: params.snapshot.cancelledAtIso,
+    cancellationReason: params.snapshot.cancellationReason,
+    ticketCount: Math.max(1, params.snapshot.ticketCount),
+    orderTotalInCents: Math.max(0, params.snapshot.orderTotalInCents),
+    currency: (params.snapshot.currency || 'USD').toUpperCase(),
+  };
+
+  const result = await tx.emailOutbox.createMany({
+    data: [
+      {
+        dedupeKey,
+        type: EmailOutboxType.EVENT_CANCELLED_BUYER,
+        status: EmailOutboxStatus.PENDING,
+        orderId: params.orderId,
+        recipientEmail: normalizeEmail(params.recipientEmail),
+        idempotencyKey,
+        templateVersion: fullSnapshot.templateVersion,
+        contentSnapshot: fullSnapshot as unknown as Prisma.InputJsonValue,
+        attempts: 0,
+        maxAttempts: EMAIL_OUTBOX_MAX_ATTEMPTS,
+        nextAttemptAt: new Date(),
+      },
+    ],
+    skipDuplicates: true,
+  });
+
+  return {
+    enqueued: result.count > 0,
+    dedupeKey,
+    idempotencyKey,
+  };
+}
+
+export async function enqueueEventCancelledOrganizerEmail(
+  tx: Prisma.TransactionClient,
+  params: {
+    eventId: string;
+    recipientEmail: string;
+    snapshot: Omit<
+      EventCancelledOrganizerContentSnapshot,
+      'templateVersion' | 'fromEmail' | 'eventId'
+    > & {
+      fromEmail?: string;
+    };
+  }
+): Promise<{ enqueued: boolean; dedupeKey: string; idempotencyKey: string }> {
+  const dedupeKey = buildEventCancelledOrganizerDedupeKey(params.eventId);
+  const idempotencyKey = buildEventCancelledOrganizerIdempotencyKey(params.eventId);
+
+  const fullSnapshot: EventCancelledOrganizerContentSnapshot = {
+    templateVersion: EVENT_CANCELLED_TEMPLATE_VERSION,
+    eventId: params.eventId,
+    fromEmail: params.snapshot.fromEmail || resolveEmailFrom(),
+    organizerName: params.snapshot.organizerName,
+    eventTitle: params.snapshot.eventTitle,
+    eventStartAtIso: params.snapshot.eventStartAtIso ?? null,
+    cancelledAtIso: params.snapshot.cancelledAtIso,
+    actorEmail: params.snapshot.actorEmail,
+    cancellationReason: params.snapshot.cancellationReason,
+    affectedOrdersCount: Math.max(0, params.snapshot.affectedOrdersCount),
+    cancelledPendingOrdersCount: Math.max(0, params.snapshot.cancelledPendingOrdersCount),
+  };
+
+  const result = await tx.emailOutbox.createMany({
+    data: [
+      {
+        dedupeKey,
+        type: EmailOutboxType.EVENT_CANCELLED_ORGANIZER,
+        status: EmailOutboxStatus.PENDING,
+        orderId: null,
+        recipientEmail: normalizeEmail(params.recipientEmail),
+        idempotencyKey,
+        templateVersion: fullSnapshot.templateVersion,
+        contentSnapshot: fullSnapshot as unknown as Prisma.InputJsonValue,
+        attempts: 0,
+        maxAttempts: EMAIL_OUTBOX_MAX_ATTEMPTS,
+        nextAttemptAt: new Date(),
+      },
+    ],
+    skipDuplicates: true,
+  });
+
+  return {
+    enqueued: result.count > 0,
+    dedupeKey,
+    idempotencyKey,
+  };
+}
+
+function isValidEventCancelledBuyerSnapshot(
+  raw: unknown
+): raw is EventCancelledBuyerContentSnapshot {
+  if (!raw || typeof raw !== 'object') return false;
+  const c = raw as Record<string, unknown>;
+  return (
+    c.templateVersion === EVENT_CANCELLED_TEMPLATE_VERSION &&
+    typeof c.eventId === 'string' &&
+    typeof c.orderId === 'string' &&
+    typeof c.fromEmail === 'string' &&
+    typeof c.orderNumber === 'string' &&
+    typeof c.buyerName === 'string' &&
+    typeof c.eventTitle === 'string' &&
+    typeof c.cancelledAtIso === 'string' &&
+    typeof c.cancellationReason === 'string' &&
+    typeof c.ticketCount === 'number' &&
+    typeof c.orderTotalInCents === 'number' &&
+    typeof c.currency === 'string'
+  );
+}
+
+function isValidEventCancelledOrganizerSnapshot(
+  raw: unknown
+): raw is EventCancelledOrganizerContentSnapshot {
+  if (!raw || typeof raw !== 'object') return false;
+  const c = raw as Record<string, unknown>;
+  return (
+    c.templateVersion === EVENT_CANCELLED_TEMPLATE_VERSION &&
+    typeof c.eventId === 'string' &&
+    typeof c.fromEmail === 'string' &&
+    typeof c.organizerName === 'string' &&
+    typeof c.eventTitle === 'string' &&
+    typeof c.cancelledAtIso === 'string' &&
+    typeof c.actorEmail === 'string' &&
+    typeof c.cancellationReason === 'string' &&
+    typeof c.affectedOrdersCount === 'number' &&
+    typeof c.cancelledPendingOrdersCount === 'number'
+  );
 }
 
 function isValidOrderConfirmationSnapshot(
@@ -1093,6 +1269,154 @@ export async function processClaimedEmailOutboxItem(
       }
 
       return 'retried';
+    }
+  }
+
+  if (item.type === EmailOutboxType.EVENT_CANCELLED_BUYER) {
+    if (!isValidEventCancelledBuyerSnapshot(item.contentSnapshot)) {
+      return markPermanentGuarded(
+        'INVALID_CONTENT_SNAPSHOT',
+        'Stored buyer event cancellation snapshot is invalid.',
+        'CRITICAL',
+        'SNAPSHOT_CORRUPT'
+      );
+    }
+
+    try {
+      const result = await sendEventCancelledBuyerEmail({
+        to: item.recipientEmail,
+        snapshot: item.contentSnapshot,
+        idempotencyKey: item.idempotencyKey,
+      });
+
+      const updated = await prisma.emailOutbox.updateMany({
+        where: {
+          id: item.id,
+          status: EmailOutboxStatus.PROCESSING,
+          lockedBy: workerId,
+        },
+        data: {
+          status: EmailOutboxStatus.SENT,
+          provider: result.provider,
+          providerMessageId: result.messageId,
+          sentAt: result.sentAt,
+          lockedBy: null,
+          lockedUntil: null,
+          lastErrorCode: null,
+          lastErrorMessage: null,
+        },
+      });
+
+      return updated.count === 0 ? 'leaseLost' : 'accepted';
+    } catch (err) {
+      const classification = classifyOutboxFailure(err);
+      if (classification.disposition === 'CONFIG_FAILURE' || classification.disposition === 'PAYLOAD_CONFLICT' || classification.disposition === 'PERMANENT' || item.attempts >= item.maxAttempts) {
+        return markPermanentGuarded(
+          classification.code,
+          classification.message,
+          classification.disposition === 'CONFIG_FAILURE' || classification.disposition === 'PAYLOAD_CONFLICT' ? 'CRITICAL' : 'ERROR',
+          classification.disposition === 'CONFIG_FAILURE'
+            ? 'EMAIL_CONFIG_FAILURE'
+            : classification.disposition === 'PAYLOAD_CONFLICT'
+            ? 'RESEND_IDEMPOTENCY_PAYLOAD_CONFLICT'
+            : item.attempts >= item.maxAttempts
+            ? 'RETRIES_EXHAUSTED'
+            : 'PERMANENT_DELIVERY_FAILURE'
+        );
+      }
+
+      const delayMs = computeNextRetryDelayMs(item.attempts, options?.randomFn);
+      const nextAttemptAt = new Date(Date.now() + delayMs);
+      const updated = await prisma.emailOutbox.updateMany({
+        where: {
+          id: item.id,
+          status: EmailOutboxStatus.PROCESSING,
+          lockedBy: workerId,
+        },
+        data: {
+          status: EmailOutboxStatus.PENDING,
+          nextAttemptAt,
+          lockedBy: null,
+          lockedUntil: null,
+          lastErrorCode: classification.code,
+          lastErrorMessage: classification.message,
+        },
+      });
+      return updated.count === 0 ? 'leaseLost' : 'retried';
+    }
+  }
+
+  if (item.type === EmailOutboxType.EVENT_CANCELLED_ORGANIZER) {
+    if (!isValidEventCancelledOrganizerSnapshot(item.contentSnapshot)) {
+      return markPermanentGuarded(
+        'INVALID_CONTENT_SNAPSHOT',
+        'Stored organizer event cancellation snapshot is invalid.',
+        'CRITICAL',
+        'SNAPSHOT_CORRUPT'
+      );
+    }
+
+    try {
+      const result = await sendEventCancelledOrganizerEmail({
+        to: item.recipientEmail,
+        snapshot: item.contentSnapshot,
+        idempotencyKey: item.idempotencyKey,
+      });
+
+      const updated = await prisma.emailOutbox.updateMany({
+        where: {
+          id: item.id,
+          status: EmailOutboxStatus.PROCESSING,
+          lockedBy: workerId,
+        },
+        data: {
+          status: EmailOutboxStatus.SENT,
+          provider: result.provider,
+          providerMessageId: result.messageId,
+          sentAt: result.sentAt,
+          lockedBy: null,
+          lockedUntil: null,
+          lastErrorCode: null,
+          lastErrorMessage: null,
+        },
+      });
+
+      return updated.count === 0 ? 'leaseLost' : 'accepted';
+    } catch (err) {
+      const classification = classifyOutboxFailure(err);
+      if (classification.disposition === 'CONFIG_FAILURE' || classification.disposition === 'PAYLOAD_CONFLICT' || classification.disposition === 'PERMANENT' || item.attempts >= item.maxAttempts) {
+        return markPermanentGuarded(
+          classification.code,
+          classification.message,
+          classification.disposition === 'CONFIG_FAILURE' || classification.disposition === 'PAYLOAD_CONFLICT' ? 'CRITICAL' : 'ERROR',
+          classification.disposition === 'CONFIG_FAILURE'
+            ? 'EMAIL_CONFIG_FAILURE'
+            : classification.disposition === 'PAYLOAD_CONFLICT'
+            ? 'RESEND_IDEMPOTENCY_PAYLOAD_CONFLICT'
+            : item.attempts >= item.maxAttempts
+            ? 'RETRIES_EXHAUSTED'
+            : 'PERMANENT_DELIVERY_FAILURE'
+        );
+      }
+
+      const delayMs = computeNextRetryDelayMs(item.attempts, options?.randomFn);
+      const nextAttemptAt = new Date(Date.now() + delayMs);
+      const updated = await prisma.emailOutbox.updateMany({
+        where: {
+          id: item.id,
+          status: EmailOutboxStatus.PROCESSING,
+          lockedBy: workerId,
+        },
+        data: {
+          status: EmailOutboxStatus.PENDING,
+          nextAttemptAt,
+          lockedBy: null,
+          lockedUntil: null,
+          lastErrorCode: classification.code,
+          lastErrorMessage: classification.message,
+        },
+      });
+      return updated.count === 0 ? 'leaseLost' : 'retried';
     }
   }
 

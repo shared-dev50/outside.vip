@@ -250,6 +250,11 @@ export async function handleBalanceAvailableWebhook(
         OR o."stripeSettlementStatus" = 'PENDING'::"StripeSettlementStatus"
       )
       AND o."stripeSettlementLockedBy" IS NULL
+      AND EXISTS (
+        SELECT 1 FROM "Event" e
+        WHERE e.id = o."eventId"
+          AND e.status <> 'CANCELLED'::"EventStatus"
+      )
       AND (
         o."stripeAvailableOn" IS NULL
         OR o."stripeAvailableOn" <= (NOW() AT TIME ZONE 'UTC') + INTERVAL '24 hours'
@@ -293,6 +298,11 @@ export async function reapExpiredExhaustedSettlementLeases(): Promise<number> {
       AND "stripeSettlementLockedUntil" IS NOT NULL
       AND "stripeSettlementLockedUntil" < (NOW() AT TIME ZONE 'UTC')
       AND "stripeSettlementAttempts" >= ${SETTLEMENT_MAX_ATTEMPTS}
+      AND EXISTS (
+        SELECT 1 FROM "Event" e
+        WHERE e.id = "Order"."eventId"
+          AND e.status <> 'CANCELLED'::"EventStatus"
+      )
     RETURNING *
   `;
 
@@ -345,6 +355,11 @@ export async function claimPendingSettlementBatch(options?: {
           )
         )
         AND o."stripeSettlementAttempts" < ${SETTLEMENT_MAX_ATTEMPTS}
+        AND EXISTS (
+          SELECT 1 FROM "Event" e
+          WHERE e.id = o."eventId"
+            AND e.status <> 'CANCELLED'::"EventStatus"
+        )
         AND EXISTS (
           SELECT 1 FROM "FinancialLedgerEntry" fle
           WHERE fle."orderId" = o.id
@@ -771,6 +786,23 @@ export async function processClaimedSettlementOrder(
           paymentReference: locked.paymentReference,
           charge: charge!,
         });
+      }
+
+      // Hold cancelled-event orders without advancing PENDING funds to AVAILABLE
+      if (typeof (tx as any)?.event?.findUnique === 'function') {
+        const orderEvent = await tx.event.findUnique({
+          where: { id: order.eventId },
+          select: { status: true },
+        });
+        if (orderEvent?.status === 'CANCELLED') {
+          await settleOrderEarnings(tx, {
+            orderId: locked.id,
+            stripeChargeId: charge!.id,
+            stripeBalanceTransactionId: balanceTx!.id,
+            availableOn: availableOnDate,
+          });
+          return 'failedPermanent' as const;
+        }
       }
 
       // Hold in PENDING if an active dispute exists on this order or charge

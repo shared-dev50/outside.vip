@@ -942,7 +942,9 @@ export const OrganizerDashboardPage: React.FC<OrganizerDashboardPageProps> = ({
 
             <p className="text-xs text-stone-600 leading-relaxed font-sans">
               Are you sure you want to cancel{' '}
-              <strong className="text-stone-900">"{eventToCancel.title}"</strong>? Active waitlist entries for this occurrence will also be cancelled.
+              <strong className="text-stone-900">"{eventToCancel.title}"</strong>? Pending
+              checkouts and waitlist offers will be released, ticket sales and admission scans will
+              stop, and buyer refunds remain manually initiated from your Orders dashboard.
             </p>
 
             <div>

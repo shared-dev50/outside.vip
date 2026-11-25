@@ -13,7 +13,10 @@ import { prisma } from '../../db/prisma.js';
 import { stripe } from '../../lib/stripe.js';
 import { env } from '../../config/env.js';
 import { BadRequestError, ServiceUnavailableError } from '../../utils/errors.js';
-import { getOrCreateOrganizerBalance } from './ledger.service.js';
+import {
+  computeCancelledEventHeldAvailableInCents,
+  getOrCreateOrganizerBalance,
+} from './ledger.service.js';
 import {
   classifyStripeError,
   classifyTransferCreateError,
@@ -525,9 +528,21 @@ export async function executeWithdrawal(
   try {
     transferRecord = await prisma.$transaction(
       async (tx) => {
+        // Canonical Lock Order: Event (id ASC FOR SHARE) -> OrganizerBalance (FOR UPDATE).
+        // Locking all organizer events FOR SHARE before OrganizerBalance serializes concurrent
+        // withdrawals cleanly against executeEventCancellationInTx (which locks Event FOR UPDATE
+        // before OrganizerBalance FOR UPDATE), preventing READ COMMITTED withdrawal races.
+        await tx.$queryRaw<Array<{ id: string }>>`
+          SELECT id
+          FROM "Event"
+          WHERE "organizerId" = ${userId}
+          ORDER BY id ASC
+          FOR SHARE
+        `;
+
         await getOrCreateOrganizerBalance(tx, userId, DEFAULT_PLATFORM_CURRENCY);
 
-        // Lock balance row to prevent concurrent race conditions on withdrawals
+        // Re-read locked OrganizerBalance row cleanly under FOR UPDATE
         const [lockedBalance] = await tx.$queryRaw<
           Array<{
             id: string;
@@ -562,12 +577,18 @@ export async function executeWithdrawal(
         });
         const signedRecoverable = recoverableEntries.reduce((s, e) => s + e.amountInCents, 0);
         const totalRecoverable = Math.max(0, -signedRecoverable);
+        const cancelledEventHold = await computeCancelledEventHeldAvailableInCents(tx, userId);
 
-        const netAvailable = Math.max(0, lockedBalance.availableBalanceInCents - totalRecoverable);
+        const netAvailable = Math.max(
+          0,
+          lockedBalance.availableBalanceInCents - totalRecoverable - cancelledEventHold
+        );
 
         if (amountInCents > netAvailable) {
           throw new BadRequestError(
-            `Insufficient available balance. You requested $${(amountInCents / 100).toFixed(2)}, but only $${(netAvailable / 100).toFixed(2)} is currently available for withdrawal.`,
+            cancelledEventHold > 0
+              ? `Insufficient withdrawable balance. You requested $${(amountInCents / 100).toFixed(2)}, but only $${(netAvailable / 100).toFixed(2)} is currently available ($${(cancelledEventHold / 100).toFixed(2)} is held from cancelled event earnings pending manual refunds).`
+              : `Insufficient available balance. You requested $${(amountInCents / 100).toFixed(2)}, but only $${(netAvailable / 100).toFixed(2)} is currently available for withdrawal.`,
             'INSUFFICIENT_AVAILABLE_BALANCE'
           );
         }

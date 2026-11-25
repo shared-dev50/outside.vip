@@ -89,10 +89,69 @@ export const sentTeamInvitationEmails: TeamInvitationEmailMessage[] = [];
 export const sentOrderConfirmationEmails: OrderConfirmationEmailMessage[] = [];
 export const sentLatePaymentRefundEmails: LatePaymentRefundEmailMessage[] = [];
 export const sentBuyerRefundEmails: BuyerRefundEmailMessage[] = [];
+export const sentEventCancelledBuyerEmails: EventCancelledBuyerEmailMessage[] = [];
+export const sentEventCancelledOrganizerEmails: EventCancelledOrganizerEmailMessage[] = [];
 
 export const ORDER_CONFIRMATION_TEMPLATE_VERSION = 1;
 export const LATE_PAYMENT_REFUND_TEMPLATE_VERSION = 1;
 export const BUYER_REFUND_TEMPLATE_VERSION = 1;
+export const EVENT_CANCELLED_TEMPLATE_VERSION = 1;
+
+export interface EventCancelledBuyerContentSnapshot {
+  templateVersion: 1;
+  eventId: string;
+  orderId: string;
+  fromEmail: string;
+  orderNumber: string;
+  buyerName: string;
+  eventTitle: string;
+  eventStartAtIso?: string | null;
+  cancelledAtIso: string;
+  cancellationReason: string;
+  ticketCount: number;
+  orderTotalInCents: number;
+  currency: string;
+}
+
+export interface EventCancelledBuyerEmailMessage {
+  to: string;
+  from: string;
+  subject: string;
+  text: string;
+  html: string;
+  eventId: string;
+  orderId: string;
+  orderNumber: string;
+  idempotencyKey: string;
+  templateVersion: number;
+  sentAt: Date;
+}
+
+export interface EventCancelledOrganizerContentSnapshot {
+  templateVersion: 1;
+  eventId: string;
+  fromEmail: string;
+  organizerName: string;
+  eventTitle: string;
+  eventStartAtIso?: string | null;
+  cancelledAtIso: string;
+  actorEmail: string;
+  cancellationReason: string;
+  affectedOrdersCount: number;
+  cancelledPendingOrdersCount: number;
+}
+
+export interface EventCancelledOrganizerEmailMessage {
+  to: string;
+  from: string;
+  subject: string;
+  text: string;
+  html: string;
+  eventId: string;
+  idempotencyKey: string;
+  templateVersion: number;
+  sentAt: Date;
+}
 
 export type BuyerRefundNotificationKind = 'CONFIRMED' | 'MANUAL_REVIEW';
 
@@ -2304,6 +2363,369 @@ export async function sendBuyerRefundEmail(params: {
       html: rendered.html,
       orderNumber: params.snapshot.orderNumber,
       orderRefundId: params.snapshot.orderRefundId,
+      idempotencyKey: params.idempotencyKey,
+      templateVersion: params.snapshot.templateVersion,
+      sentAt,
+    });
+
+    return {
+      sent: true,
+      status: 'recorded',
+      provider: 'test-recorder',
+      messageId: `test_rec_${crypto.randomUUID()}`,
+      from: rendered.from,
+      to: rendered.to,
+      expiresInMinutes: 0,
+      sentAt,
+    };
+  }
+
+  const resendApiKey = resolveResendApiKey();
+  if (!resendApiKey) {
+    throw new EmailDeliveryError(
+      'Email delivery service is not configured. RESEND_API_KEY is missing.',
+      {
+        code: 'EMAIL_SERVICE_UNCONFIGURED',
+        providerStatusCode: null,
+        retryable: false,
+      }
+    );
+  }
+
+  const resend = new Resend(resendApiKey);
+  const timeoutMs = getEffectiveTimeoutMs();
+  const sensitiveValues = [resendApiKey];
+
+  try {
+    const { messageId } = await sendSingleResendAttempt({
+      resend,
+      from: rendered.from,
+      to: rendered.to,
+      subject: rendered.subject,
+      text: rendered.text,
+      html: rendered.html,
+      idempotencyKey: params.idempotencyKey,
+      timeoutMs,
+    });
+
+    return {
+      sent: true,
+      status: 'sent',
+      provider: 'resend',
+      messageId,
+      from: rendered.from,
+      to: rendered.to,
+      expiresInMinutes: 0,
+      sentAt,
+    };
+  } catch (err) {
+    const deliveryError =
+      err instanceof EmailDeliveryError
+        ? err
+        : classifyProviderError({ message: err instanceof Error ? err.message : undefined });
+
+    const safeDetail = sanitizeEmailLogMessage(
+      deliveryError.providerDetail || deliveryError.message,
+      sensitiveValues
+    );
+
+    throw new EmailDeliveryError(deliveryError.message, {
+      code: deliveryError.code,
+      providerStatusCode: deliveryError.providerStatusCode,
+      providerErrorName: deliveryError.providerErrorName,
+      retryable: deliveryError.retryable,
+      timedOut: deliveryError.timedOut,
+      providerDetail: safeDetail,
+    });
+  }
+}
+
+export function renderEventCancelledBuyerEmail(params: {
+  to: string;
+  from?: string;
+  snapshot: EventCancelledBuyerContentSnapshot;
+}): {
+  to: string;
+  from: string;
+  subject: string;
+  text: string;
+  html: string;
+} {
+  const { snapshot } = params;
+  const from = sanitizeHeaderField(
+    params.from || snapshot.fromEmail || resolveEmailFrom() || DEFAULT_EMAIL_FROM
+  );
+  const to = sanitizeHeaderField(normalizeEmail(params.to));
+  const cleanTitle = sanitizeHeaderField(snapshot.eventTitle || 'Outside.vip Event');
+  const cleanBuyerName = (snapshot.buyerName || 'Customer').trim() || 'Customer';
+  const cleanOrderNumber = sanitizeHeaderField(snapshot.orderNumber || 'N/A');
+  const cleanReason = (snapshot.cancellationReason || 'Cancelled by event organizer').trim();
+  const ticketLabel = snapshot.ticketCount === 1 ? '1 ticket' : `${snapshot.ticketCount} tickets`;
+  const paidNotice =
+    snapshot.orderTotalInCents > 0
+      ? `Order Total: ${formatDeterministicMoney(snapshot.orderTotalInCents, snapshot.currency)}`
+      : 'Order Type: Free Registration';
+
+  const subject = sanitizeHeaderField(
+    `Event cancelled: ${cleanTitle} — Order #${cleanOrderNumber}`
+  );
+
+  const text = [
+    `Hi ${cleanBuyerName},`,
+    '',
+    `We are writing to inform you that "${cleanTitle}" has been cancelled.`,
+    `Order Reference: #${cleanOrderNumber} (${ticketLabel})`,
+    paidNotice,
+    `Reason: ${cleanReason}`,
+    '',
+    'Important Notice:',
+    '- Your tickets for this cancelled event are no longer valid for admission.',
+    '- Refunds are NOT issued automatically. Refund requests and payouts are handled manually by the event organizer or Outside.vip support.',
+    snapshot.orderTotalInCents > 0
+      ? '- You will receive a separate refund confirmation email only after a refund is manually initiated and completed.'
+      : '- No payment was charged for your free registration.',
+    '',
+    'Outside.vip',
+  ].join('\n');
+
+  const html = `<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+    <title>${escapeHtml(subject)}</title>
+  </head>
+  <body style="margin: 0; padding: 24px; background-color: #0A0A0C; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #F5F5F7;">
+    <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="max-width: 580px; margin: 0 auto; background: #121216; border: 1px solid #22222A; border-radius: 16px; overflow: hidden;">
+      <tr>
+        <td style="padding: 32px;">
+          <p style="font-size: 11px; text-transform: uppercase; letter-spacing: 0.14em; color: #F43F5E; font-weight: 700; margin: 0 0 10px 0;">Outside.vip Event Update</p>
+          <h1 style="font-size: 24px; font-weight: 700; margin: 0 0 12px 0; color: #FFFFFF; line-height: 1.3;">${escapeHtml(cleanTitle)} has been cancelled</h1>
+          <p style="font-size: 15px; line-height: 1.6; color: #B8B8C2; margin: 0 0 18px 0;">
+            Hi <strong style="color: #FFFFFF;">${escapeHtml(cleanBuyerName)}</strong>, <strong style="color: #FFFFFF;">${escapeHtml(cleanTitle)}</strong> (Order <strong style="color: #FFFFFF;">#${escapeHtml(cleanOrderNumber)}</strong> · ${escapeHtml(ticketLabel)}) has been cancelled.
+          </p>
+          <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="background: #18181F; border: 1px solid #262630; border-radius: 12px; margin-bottom: 18px;">
+            <tr>
+              <td style="padding: 16px 20px;">
+                <p style="font-size: 13px; color: #B8B8C2; margin: 0 0 6px 0;"><strong style="color: #FFFFFF;">Cancellation Reason:</strong> ${escapeHtml(cleanReason)}</p>
+                <p style="font-size: 13px; color: #B8B8C2; margin: 0 0 6px 0;"><strong style="color: #FFFFFF;">Admission Status:</strong> Cancelled — tickets are no longer valid for entry.</p>
+                <p style="font-size: 13px; color: #B8B8C2; margin: 0;"><strong style="color: #FFFFFF;">Refund Policy:</strong> Refunds are handled manually and have not been automatically issued.</p>
+              </td>
+            </tr>
+          </table>
+          <p style="font-size: 13px; line-height: 1.6; color: #8E8E99; margin: 0;">
+            ${snapshot.orderTotalInCents > 0 ? 'You will receive a separate confirmation email once a manual refund has been processed and confirmed.' : 'No payment was charged for this free ticket order.'}
+          </p>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>`.trim();
+
+  return { to, from, subject, text, html };
+}
+
+export async function sendEventCancelledBuyerEmail(params: {
+  to: string;
+  snapshot: EventCancelledBuyerContentSnapshot;
+  idempotencyKey: string;
+}): Promise<EmailDeliveryResult> {
+  const rendered = renderEventCancelledBuyerEmail({
+    to: params.to,
+    from: params.snapshot.fromEmail,
+    snapshot: params.snapshot,
+  });
+
+  const sentAt = new Date();
+  const activeNodeEnv = getActiveNodeEnv();
+  const shouldUseResendInTest = env.NODE_ENV === 'test' && Boolean(testOptions.useResendInTest);
+
+  if (activeNodeEnv === 'test' && !shouldUseResendInTest) {
+    sentEventCancelledBuyerEmails.push({
+      to: rendered.to,
+      from: rendered.from,
+      subject: rendered.subject,
+      text: rendered.text,
+      html: rendered.html,
+      eventId: params.snapshot.eventId,
+      orderId: params.snapshot.orderId,
+      orderNumber: params.snapshot.orderNumber,
+      idempotencyKey: params.idempotencyKey,
+      templateVersion: params.snapshot.templateVersion,
+      sentAt,
+    });
+
+    return {
+      sent: true,
+      status: 'recorded',
+      provider: 'test-recorder',
+      messageId: `test_rec_${crypto.randomUUID()}`,
+      from: rendered.from,
+      to: rendered.to,
+      expiresInMinutes: 0,
+      sentAt,
+    };
+  }
+
+  const resendApiKey = resolveResendApiKey();
+  if (!resendApiKey) {
+    throw new EmailDeliveryError(
+      'Email delivery service is not configured. RESEND_API_KEY is missing.',
+      {
+        code: 'EMAIL_SERVICE_UNCONFIGURED',
+        providerStatusCode: null,
+        retryable: false,
+      }
+    );
+  }
+
+  const resend = new Resend(resendApiKey);
+  const timeoutMs = getEffectiveTimeoutMs();
+  const sensitiveValues = [resendApiKey];
+
+  try {
+    const { messageId } = await sendSingleResendAttempt({
+      resend,
+      from: rendered.from,
+      to: rendered.to,
+      subject: rendered.subject,
+      text: rendered.text,
+      html: rendered.html,
+      idempotencyKey: params.idempotencyKey,
+      timeoutMs,
+    });
+
+    return {
+      sent: true,
+      status: 'sent',
+      provider: 'resend',
+      messageId,
+      from: rendered.from,
+      to: rendered.to,
+      expiresInMinutes: 0,
+      sentAt,
+    };
+  } catch (err) {
+    const deliveryError =
+      err instanceof EmailDeliveryError
+        ? err
+        : classifyProviderError({ message: err instanceof Error ? err.message : undefined });
+
+    const safeDetail = sanitizeEmailLogMessage(
+      deliveryError.providerDetail || deliveryError.message,
+      sensitiveValues
+    );
+
+    throw new EmailDeliveryError(deliveryError.message, {
+      code: deliveryError.code,
+      providerStatusCode: deliveryError.providerStatusCode,
+      providerErrorName: deliveryError.providerErrorName,
+      retryable: deliveryError.retryable,
+      timedOut: deliveryError.timedOut,
+      providerDetail: safeDetail,
+    });
+  }
+}
+
+export function renderEventCancelledOrganizerEmail(params: {
+  to: string;
+  from?: string;
+  snapshot: EventCancelledOrganizerContentSnapshot;
+}): {
+  to: string;
+  from: string;
+  subject: string;
+  text: string;
+  html: string;
+} {
+  const { snapshot } = params;
+  const from = sanitizeHeaderField(
+    params.from || snapshot.fromEmail || resolveEmailFrom() || DEFAULT_EMAIL_FROM
+  );
+  const to = sanitizeHeaderField(normalizeEmail(params.to));
+  const cleanTitle = sanitizeHeaderField(snapshot.eventTitle || 'Outside.vip Event');
+  const cleanOrgName = (snapshot.organizerName || 'Organizer').trim() || 'Organizer';
+  const cleanActor = sanitizeHeaderField(snapshot.actorEmail || 'system');
+  const cleanReason = (snapshot.cancellationReason || 'Cancelled').trim();
+
+  const subject = sanitizeHeaderField(`Event cancelled confirmation: ${cleanTitle}`);
+
+  const text = [
+    `Hi ${cleanOrgName},`,
+    '',
+    `Your event "${cleanTitle}" has been marked as cancelled.`,
+    `Cancelled By: ${cleanActor}`,
+    `Cancelled At: ${formatDeterministicDateTime(snapshot.cancelledAtIso, 'UTC')}`,
+    `Reason: ${cleanReason}`,
+    `Affected Completed Orders: ${snapshot.affectedOrdersCount}`,
+    `Pending Checkouts Released: ${snapshot.cancelledPendingOrdersCount}`,
+    '',
+    'Important Financial & Refund Reminders:',
+    '- Buyer refunds were NOT issued automatically. You must initiate refunds manually per order in your Organizer Orders dashboard.',
+    '- Waitlist offers and active check-in admissions for this event have been disabled.',
+    '- Unsettled and unwithdrawn earnings associated with this cancelled event remain held against withdrawal while refunds are processed.',
+    '',
+    'Outside.vip',
+  ].join('\n');
+
+  const html = `<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+    <title>${escapeHtml(subject)}</title>
+  </head>
+  <body style="margin: 0; padding: 24px; background-color: #0A0A0C; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #F5F5F7;">
+    <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="max-width: 580px; margin: 0 auto; background: #121216; border: 1px solid #22222A; border-radius: 16px; overflow: hidden;">
+      <tr>
+        <td style="padding: 32px;">
+          <p style="font-size: 11px; text-transform: uppercase; letter-spacing: 0.14em; color: #F59E0B; font-weight: 700; margin: 0 0 10px 0;">Outside.vip Organizer Notice</p>
+          <h1 style="font-size: 24px; font-weight: 700; margin: 0 0 12px 0; color: #FFFFFF; line-height: 1.3;">${escapeHtml(cleanTitle)} cancelled</h1>
+          <p style="font-size: 15px; line-height: 1.6; color: #B8B8C2; margin: 0 0 18px 0;">
+            Hi <strong style="color: #FFFFFF;">${escapeHtml(cleanOrgName)}</strong>, your event <strong style="color: #FFFFFF;">${escapeHtml(cleanTitle)}</strong> has been cancelled by <strong style="color: #FFFFFF;">${escapeHtml(cleanActor)}</strong>.
+          </p>
+          <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="background: #18181F; border: 1px solid #262630; border-radius: 12px; margin-bottom: 18px;">
+            <tr>
+              <td style="padding: 16px 20px;">
+                <p style="font-size: 13px; color: #B8B8C2; margin: 0 0 6px 0;"><strong style="color: #FFFFFF;">Reason:</strong> ${escapeHtml(cleanReason)}</p>
+                <p style="font-size: 13px; color: #B8B8C2; margin: 0 0 6px 0;"><strong style="color: #FFFFFF;">Affected Completed Orders:</strong> ${snapshot.affectedOrdersCount}</p>
+                <p style="font-size: 13px; color: #B8B8C2; margin: 0;"><strong style="color: #FFFFFF;">Buyer Refunds:</strong> Manual action required — no automatic refunds were issued.</p>
+              </td>
+            </tr>
+          </table>
+          <p style="font-size: 13px; line-height: 1.6; color: #8E8E99; margin: 0;">
+            Ticket sales, admission scans, and future earnings settlements/withdrawals for this event have been disabled/held. Existing completed orders remain visible in your Orders dashboard for manual refund processing.
+          </p>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>`.trim();
+
+  return { to, from, subject, text, html };
+}
+
+export async function sendEventCancelledOrganizerEmail(params: {
+  to: string;
+  snapshot: EventCancelledOrganizerContentSnapshot;
+  idempotencyKey: string;
+}): Promise<EmailDeliveryResult> {
+  const rendered = renderEventCancelledOrganizerEmail({
+    to: params.to,
+    from: params.snapshot.fromEmail,
+    snapshot: params.snapshot,
+  });
+
+  const sentAt = new Date();
+  const activeNodeEnv = getActiveNodeEnv();
+  const shouldUseResendInTest = env.NODE_ENV === 'test' && Boolean(testOptions.useResendInTest);
+
+  if (activeNodeEnv === 'test' && !shouldUseResendInTest) {
+    sentEventCancelledOrganizerEmails.push({
+      to: rendered.to,
+      from: rendered.from,
+      subject: rendered.subject,
+      text: rendered.text,
+      html: rendered.html,
+      eventId: params.snapshot.eventId,
       idempotencyKey: params.idempotencyKey,
       templateVersion: params.snapshot.templateVersion,
       sentAt,

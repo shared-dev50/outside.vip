@@ -134,6 +134,7 @@ enum CheckInResult {
   CANCELLED_TICKET
   REFUND_PENDING_TICKET
   REFUNDED_TICKET
+  EVENT_CANCELLED
   TICKET_NOT_YET_VALID
   TICKET_EXPIRED
 }
@@ -328,8 +329,11 @@ model Event {
   isPasswordProtected Boolean @default(false)
   passwordHash        String?
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+  cancelledAt        DateTime?
+  cancelledByUserId  String?
+  cancellationReason String?   @db.Text
 
   ticketTiers     TicketTier[]
   orders          Order[]
@@ -367,6 +371,7 @@ model Event {
   @@index([seriesId])
   @@index([showOnExplore, status])
   @@index([placeId])
+  @@index([organizerId, status])
 }
 
 model EventSeries {
@@ -1107,6 +1112,8 @@ enum EmailOutboxType {
   LATE_PAYMENT_REFUND_MANUAL_REVIEW
   BUYER_REFUND_CONFIRMED
   BUYER_REFUND_MANUAL_REVIEW
+  EVENT_CANCELLED_BUYER
+  EVENT_CANCELLED_ORGANIZER
 }
 
 enum OrderRefundStatus {

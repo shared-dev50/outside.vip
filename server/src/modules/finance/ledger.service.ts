@@ -1,5 +1,12 @@
 import crypto from 'crypto';
-import { Prisma, LedgerEntryType, LedgerBalanceType, PaymentProvider, StripeSettlementStatus } from '@prisma/client';
+import {
+  EventStatus,
+  Prisma,
+  LedgerEntryType,
+  LedgerBalanceType,
+  PaymentProvider,
+  StripeSettlementStatus,
+} from '@prisma/client';
 import type Stripe from 'stripe';
 import { prisma } from '../../db/prisma.js';
 import { calculateCheckoutFeeBreakdown } from '../checkout/checkout.financials.js';
@@ -371,7 +378,7 @@ export async function settleOrderEarnings(
   const order = await tx.order.findUnique({
     where: { id: orderId },
     include: {
-      event: { select: { id: true, organizerId: true, title: true } },
+      event: { select: { id: true, organizerId: true, title: true, status: true } },
     },
   });
 
@@ -419,6 +426,25 @@ export async function settleOrderEarnings(
         },
       });
     }
+    return;
+  }
+
+  // P0-04: Do not settle pending earnings for CANCELLED events into withdrawable available balance.
+  if (order.event.status === EventStatus.CANCELLED) {
+    await tx.order.update({
+      where: { id: order.id },
+      data: {
+        stripeSettlementStatus: StripeSettlementStatus.FAILED_PERMANENT,
+        stripeSettlementFailedAt: order.stripeSettlementFailedAt ?? new Date(),
+        stripeSettlementLockedBy: null,
+        stripeSettlementLockedUntil: null,
+        stripeSettlementNextAttemptAt: null,
+        stripeSettlementLastErrorCategory: 'PERMANENT',
+        stripeSettlementLastErrorCode: 'EVENT_CANCELLED',
+        stripeSettlementLastErrorMessage:
+          'Settlement withheld because the associated event has been cancelled.',
+      },
+    });
     return;
   }
 
@@ -891,7 +917,7 @@ export async function recordRefundLedger(
   const order = await tx.order.findUnique({
     where: { id: orderId },
     include: {
-      event: { select: { id: true, organizerId: true, title: true } },
+      event: { select: { id: true, organizerId: true, title: true, status: true } },
     },
   });
 
@@ -1131,7 +1157,7 @@ export async function recordTicketRefundLedgerInTx(
   const order = await tx.order.findUnique({
     where: { id: orderId },
     include: {
-      event: { select: { id: true, organizerId: true, title: true } },
+      event: { select: { id: true, organizerId: true, title: true, status: true } },
     },
   });
 
@@ -1471,11 +1497,445 @@ export async function recordDisputeLedger(
   });
 }
 
+const UNATTRIBUTED_POOL_KEY = '__unattributed__';
+
+function allocateProportionalDeduction(
+  buckets: Array<{ key: string; available: number }>,
+  requestedAmount: number
+): Map<string, number> {
+  const result = new Map<string, number>();
+  if (requestedAmount <= 0 || buckets.length === 0) {
+    return result;
+  }
+
+  const positive = buckets
+    .filter((b) => b.available > 0)
+    .sort((a, b) => a.key.localeCompare(b.key));
+  const totalAvailable = positive.reduce((sum, b) => sum + b.available, 0);
+  if (totalAvailable <= 0) {
+    return result;
+  }
+
+  const target = Math.min(requestedAmount, totalAvailable);
+  const shares = positive.map((b) => {
+    const exact = (target * b.available) / totalAvailable;
+    const base = Math.floor(exact);
+    return {
+      key: b.key,
+      available: b.available,
+      allocated: base,
+      remainder: exact - base,
+    };
+  });
+
+  let remaining = target - shares.reduce((sum, s) => sum + s.allocated, 0);
+  if (remaining > 0) {
+    const byRemainder = [...shares].sort((a, b) => {
+      if (b.remainder !== a.remainder) {
+        return b.remainder - a.remainder;
+      }
+      return a.key.localeCompare(b.key);
+    });
+    for (const share of byRemainder) {
+      if (remaining <= 0) break;
+      if (share.allocated < share.available) {
+        share.allocated += 1;
+        remaining -= 1;
+      }
+    }
+  }
+
+  for (const share of shares) {
+    if (share.allocated > 0) {
+      result.set(share.key, share.allocated);
+    }
+  }
+  return result;
+}
+
+function getLedgerEntryCausalRank(entry: {
+  type?: LedgerEntryType;
+  balanceType?: LedgerBalanceType;
+  amountInCents: number;
+  eventId?: string | null;
+}): number {
+  if (entry.balanceType === LedgerBalanceType.RECOVERABLE) {
+    return 5;
+  }
+  if (entry.eventId) {
+    return entry.amountInCents >= 0 ? 0 : 1;
+  }
+  if (entry.type === LedgerEntryType.TRANSFER_INITIATED) {
+    return 2;
+  }
+  if (
+    entry.type === LedgerEntryType.TRANSFER_FAILED ||
+    (entry.type === LedgerEntryType.ADJUSTMENT && entry.amountInCents > 0)
+  ) {
+    return 3;
+  }
+  if (entry.amountInCents < 0) {
+    return 4;
+  }
+  return 3;
+}
+
+/**
+ * Computes net unwithdrawn AVAILABLE earnings attributable to CANCELLED events of an organizer
+ * that have not yet been refunded or shadowed by unrecovered RECOVERABLE debt.
+ *
+ * Accounting Invariant:
+ * - Tracks per-event AVAILABLE pools strictly from AVAILABLE ledger entries so at every replay step:
+ *     sum(all eventPools) + unattributedPool === organizer AVAILABLE ledger sum.
+ * - Tracks RECOVERABLE liabilities separately in FIFO queue (`pendingLiabilities`) without
+ *   prematurely decrementing AVAILABLE pools on non-AVAILABLE entries (e.g. `DISPUTE_LOST`).
+ * - Pre-cancellation pooled withdrawals (`TRANSFER_INITIATED` at `t < event.cancelledAt`) deduct
+ *   proportionally across non-cancelled pools that existed at `t`, and record exact per-transfer
+ *   source attribution so subsequent `TRANSFER_FAILED` / reversal `ADJUSTMENT` entries restore
+ *   the originating event buckets. Post-cancellation withdrawals (`t >= event.cancelledAt`) never
+ *   drain a cancelled event's held pool.
+ * - Pooled liability-recovery `AVAILABLE` adjustments (`recoverOrganizerLiabilitiesInTx` with
+ *   `source = 'AVAILABLE_BALANCE'`) settle `pendingLiabilities` FIFO, deducting first from the
+ *   originating event's physical `AVAILABLE` pool when present (e.g., settling a cancelled event's
+ *   `DISPUTE_LOST` debt out of that event's own `AVAILABLE` earnings rather than an unrelated
+ *   cancelled event's earnings), and only falling back to other pools when the originating event's
+ *   AVAILABLE pool is already exhausted (e.g., `REFUND_POST_TRANSFER`).
+ * - At replay end, any remaining unrecovered liability attributable to a cancelled event `e`
+ *   shadows `min(pool[e], outstandingLiability[e])` so `totalRecoverable + cancelledEventHold`
+ *   never double-counts recoverable debt while preserving `NO_REFUND_NEEDED` holds intact.
+ */
+export async function computeCancelledEventHeldAvailableInCents(
+  db: Prisma.TransactionClient | typeof prisma,
+  organizerId: string
+): Promise<number> {
+  if (
+    typeof (db as any)?.event?.findMany !== 'function' ||
+    typeof (db as any)?.financialLedgerEntry?.findMany !== 'function'
+  ) {
+    return 0;
+  }
+
+  const cancelledEvents = await db.event.findMany({
+    where: {
+      organizerId,
+      status: EventStatus.CANCELLED,
+    },
+    select: {
+      id: true,
+      cancelledAt: true,
+    },
+  });
+
+  if (!Array.isArray(cancelledEvents) || cancelledEvents.length === 0) {
+    return 0;
+  }
+
+  const cancelledCutoffByEventId = new Map<string, number | null>();
+  for (const evt of cancelledEvents) {
+    const rawCancelledAt = (evt as { cancelledAt?: Date | string | null }).cancelledAt;
+    if (rawCancelledAt instanceof Date) {
+      cancelledCutoffByEventId.set(evt.id, rawCancelledAt.getTime());
+    } else if (typeof rawCancelledAt === 'string') {
+      const parsed = Date.parse(rawCancelledAt);
+      cancelledCutoffByEventId.set(evt.id, Number.isNaN(parsed) ? null : parsed);
+    } else {
+      // Null/unknown cancelledAt defaults conservatively to always-held unless refunded/offset
+      cancelledCutoffByEventId.set(evt.id, null);
+    }
+  }
+
+  const ledgerEntries = await db.financialLedgerEntry.findMany({
+    where: {
+      organizerId,
+      balanceType: {
+        in: [LedgerBalanceType.AVAILABLE, LedgerBalanceType.RECOVERABLE],
+      },
+    },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    select: {
+      id: true,
+      type: true,
+      balanceType: true,
+      amountInCents: true,
+      eventId: true,
+      transferId: true,
+      createdAt: true,
+    },
+  });
+
+  if (!Array.isArray(ledgerEntries) || ledgerEntries.length === 0) {
+    return 0;
+  }
+
+  const hasExplicitTimestamps = ledgerEntries.some(
+    (e) => (e as { createdAt?: Date | string | null }).createdAt != null
+  );
+
+  const indexedEntries = ledgerEntries.map((entry, idx) => {
+    const rawTs = (entry as { createdAt?: Date | string | null }).createdAt;
+    const ts =
+      rawTs instanceof Date
+        ? rawTs.getTime()
+        : typeof rawTs === 'string'
+        ? Date.parse(rawTs) || 0
+        : 0;
+    return { entry, idx, ts };
+  });
+
+  if (hasExplicitTimestamps) {
+    indexedEntries.sort((a, b) => {
+      if (a.ts !== b.ts) {
+        return a.ts - b.ts;
+      }
+      const rankA = getLedgerEntryCausalRank(a.entry);
+      const rankB = getLedgerEntryCausalRank(b.entry);
+      if (rankA !== rankB) {
+        return rankA - rankB;
+      }
+      if (a.entry.id && b.entry.id && a.entry.id !== b.entry.id) {
+        return a.entry.id.localeCompare(b.entry.id);
+      }
+      return a.idx - b.idx;
+    });
+  }
+
+  const eventPools = new Map<string, number>();
+  let unattributedPool = 0;
+  const transferAllocations = new Map<string, Map<string, number>>();
+  const pendingLiabilities: Array<{ eventId: string | null; remaining: number }> = [];
+  let pendingAvailableRecoveryOffset = 0;
+
+  const consumePendingLiabilitiesFifo = (
+    amount: number
+  ): Array<{ eventId: string | null; amount: number }> => {
+    let remaining = amount;
+    const consumed: Array<{ eventId: string | null; amount: number }> = [];
+    for (const item of pendingLiabilities) {
+      if (remaining <= 0) break;
+      if (item.remaining <= 0) continue;
+      const take = Math.min(item.remaining, remaining);
+      item.remaining -= take;
+      remaining -= take;
+      consumed.push({ eventId: item.eventId, amount: take });
+    }
+    return consumed;
+  };
+
+  const isCancelledAt = (eventId: string, entryTs: number): boolean => {
+    if (!cancelledCutoffByEventId.has(eventId)) {
+      return false;
+    }
+    const cutoff = cancelledCutoffByEventId.get(eventId) ?? null;
+    if (cutoff === null) {
+      // Unknown cancellation timestamp: never allow pooled transfers to drain this cancelled event
+      return true;
+    }
+    if (!hasExplicitTimestamps) {
+      return true;
+    }
+    return entryTs >= cutoff;
+  };
+
+  const getPool = (key: string): number =>
+    key === UNATTRIBUTED_POOL_KEY ? unattributedPool : eventPools.get(key) ?? 0;
+
+  const addToPool = (key: string, delta: number): void => {
+    if (delta === 0) return;
+    if (key === UNATTRIBUTED_POOL_KEY) {
+      unattributedPool += delta;
+    } else {
+      eventPools.set(key, (eventPools.get(key) ?? 0) + delta);
+    }
+  };
+
+  const deductAcrossBuckets = (
+    amount: number,
+    candidateKeys: string[],
+    recordOnTransferKey?: string
+  ): number => {
+    if (amount <= 0) return 0;
+    const buckets = candidateKeys
+      .map((key) => ({ key, available: getPool(key) }))
+      .filter((b) => b.available > 0);
+    const allocated = allocateProportionalDeduction(buckets, amount);
+    let totalDeducted = 0;
+    let transferMap = recordOnTransferKey ? transferAllocations.get(recordOnTransferKey) : undefined;
+    if (recordOnTransferKey && !transferMap) {
+      transferMap = new Map<string, number>();
+      transferAllocations.set(recordOnTransferKey, transferMap);
+    }
+    for (const [key, slice] of allocated.entries()) {
+      addToPool(key, -slice);
+      totalDeducted += slice;
+      if (transferMap) {
+        transferMap.set(key, (transferMap.get(key) ?? 0) + slice);
+      }
+    }
+    return totalDeducted;
+  };
+
+  const deductWithUnheldFallback = (amount: number, entryTs: number, preferredEventId?: string | null): void => {
+    let remaining = amount;
+    if (preferredEventId) {
+      const ownAvailable = Math.max(0, getPool(preferredEventId));
+      const fromOwn = Math.min(ownAvailable, remaining);
+      if (fromOwn > 0) {
+        addToPool(preferredEventId, -fromOwn);
+        remaining -= fromOwn;
+      }
+    }
+    if (remaining > 0) {
+      const unheldKeys = [
+        ...Array.from(eventPools.keys()).filter(
+          (eid) => eid !== preferredEventId && !isCancelledAt(eid, entryTs)
+        ),
+        UNATTRIBUTED_POOL_KEY,
+      ];
+      remaining -= deductAcrossBuckets(remaining, unheldKeys);
+    }
+    if (remaining > 0) {
+      const fallbackCancelledKeys = Array.from(eventPools.keys()).filter(
+        (eid) => eid !== preferredEventId && isCancelledAt(eid, entryTs)
+      );
+      remaining -= deductAcrossBuckets(remaining, fallbackCancelledKeys);
+    }
+    if (remaining > 0) {
+      addToPool(UNATTRIBUTED_POOL_KEY, -remaining);
+    }
+  };
+
+  for (const { entry, ts } of indexedEntries) {
+    const balanceType = entry.balanceType ?? LedgerBalanceType.AVAILABLE;
+
+    if (balanceType === LedgerBalanceType.RECOVERABLE) {
+      if (entry.amountInCents < 0) {
+        // Track recoverable liability separately from AVAILABLE pools so AVAILABLE pools still
+        // match actual OrganizerBalance.availableBalanceInCents until settled out of AVAILABLE.
+        pendingLiabilities.push({
+          eventId: entry.eventId ?? null,
+          remaining: Math.abs(entry.amountInCents),
+        });
+      } else if (entry.amountInCents > 0) {
+        // Pair AVAILABLE_BALANCE recovery ADJUSTMENT offsets cleanly; consume external recovery FIFO.
+        const paired = Math.min(entry.amountInCents, pendingAvailableRecoveryOffset);
+        pendingAvailableRecoveryOffset -= paired;
+        const externalOffset = entry.amountInCents - paired;
+        if (externalOffset > 0) {
+          consumePendingLiabilitiesFifo(externalOffset);
+        }
+      }
+      continue;
+    }
+
+    if (balanceType !== LedgerBalanceType.AVAILABLE) {
+      continue;
+    }
+
+    // Event-attributed AVAILABLE inflows/outflows (TICKET_SALE_CLEARED, REFUND_CLEARED, DISPUTE_HOLD/WON)
+    if (entry.eventId) {
+      if (entry.amountInCents >= 0) {
+        addToPool(entry.eventId, entry.amountInCents);
+      } else {
+        deductWithUnheldFallback(-entry.amountInCents, ts, entry.eventId);
+      }
+      continue;
+    }
+
+    // Organizer-level pooled AVAILABLE entries (eventId === null)
+    const transferKey = entry.transferId || entry.id;
+
+    if (entry.type === LedgerEntryType.TRANSFER_INITIATED && entry.amountInCents < 0) {
+      let remainingWithdrawal = -entry.amountInCents;
+      const eligibleNonCancelledKeys = [
+        ...Array.from(eventPools.keys()).filter((eid) => !isCancelledAt(eid, ts)),
+        UNATTRIBUTED_POOL_KEY,
+      ];
+      remainingWithdrawal -= deductAcrossBuckets(
+        remainingWithdrawal,
+        eligibleNonCancelledKeys,
+        transferKey
+      );
+      if (remainingWithdrawal > 0) {
+        // Never allow post-cancellation withdrawals to drain cancelled event holds
+        addToPool(UNATTRIBUTED_POOL_KEY, -remainingWithdrawal);
+        const map = transferAllocations.get(transferKey) ?? new Map<string, number>();
+        map.set(UNATTRIBUTED_POOL_KEY, (map.get(UNATTRIBUTED_POOL_KEY) ?? 0) + remainingWithdrawal);
+        transferAllocations.set(transferKey, map);
+      }
+      continue;
+    }
+
+    if (
+      entry.amountInCents > 0 &&
+      (entry.type === LedgerEntryType.TRANSFER_FAILED ||
+        entry.type === LedgerEntryType.ADJUSTMENT)
+    ) {
+      let remainingRestore = entry.amountInCents;
+      const sourceMap = entry.transferId ? transferAllocations.get(entry.transferId) : undefined;
+      if (sourceMap && sourceMap.size > 0) {
+        const restoreBuckets = Array.from(sourceMap.entries())
+          .filter(([, amt]) => amt > 0)
+          .map(([key, amt]) => ({ key, available: amt }));
+        const restored = allocateProportionalDeduction(restoreBuckets, remainingRestore);
+        for (const [key, slice] of restored.entries()) {
+          addToPool(key, slice);
+          sourceMap.set(key, (sourceMap.get(key) ?? 0) - slice);
+          remainingRestore -= slice;
+        }
+      }
+      if (remainingRestore > 0) {
+        addToPool(UNATTRIBUTED_POOL_KEY, remainingRestore);
+      }
+      continue;
+    }
+
+    if (entry.amountInCents < 0) {
+      // Pooled liability recovery ADJUSTMENT (recoverOrganizerLiabilitiesInTx AVAILABLE_BALANCE):
+      // Consume outstanding liabilities FIFO and deduct first from the originating event's
+      // physical AVAILABLE pool (e.g., settling DISPUTE_LOST out of that event's pool).
+      const recoveryAmount = -entry.amountInCents;
+      const settledSlices = consumePendingLiabilitiesFifo(recoveryAmount);
+      const consumedTotal = settledSlices.reduce((sum, s) => sum + s.amount, 0);
+      pendingAvailableRecoveryOffset += recoveryAmount;
+
+      for (const slice of settledSlices) {
+        deductWithUnheldFallback(slice.amount, ts, slice.eventId);
+      }
+      const unattributedRecovery = recoveryAmount - consumedTotal;
+      if (unattributedRecovery > 0) {
+        deductWithUnheldFallback(unattributedRecovery, ts, null);
+      }
+    }
+  }
+
+  // Remaining unrecovered RECOVERABLE debt per cancelled event shadows that event's AVAILABLE
+  // hold so totalRecoverable + cancelledEventHold never double-counts the same debt.
+  const outstandingLiabilityByEvent = new Map<string, number>();
+  for (const item of pendingLiabilities) {
+    if (item.remaining > 0 && item.eventId) {
+      outstandingLiabilityByEvent.set(
+        item.eventId,
+        (outstandingLiabilityByEvent.get(item.eventId) ?? 0) + item.remaining
+      );
+    }
+  }
+
+  let totalHold = 0;
+  for (const cancelledId of cancelledCutoffByEventId.keys()) {
+    const availablePool = Math.max(0, eventPools.get(cancelledId) ?? 0);
+    const shadowedByRecoverable = outstandingLiabilityByEvent.get(cancelledId) ?? 0;
+    const netHold = Math.max(0, availablePool - shadowedByRecoverable);
+    totalHold += netHold;
+  }
+  return totalHold;
+}
+
 /**
  * Returns organizer's financial summary:
  * - Authoritative OrganizerBalance record.
  * - Recoverable liabilities from ledger.
- * - Net available amount (available - recoverable).
+ * - Cancelled-event held balance from unsettled/unwithdrawn cancelled event sales.
+ * - Net available amount (available - recoverable - cancelledEventHold).
  * - Total pending, transferred, lifetime earnings.
  */
 export async function getOrganizerFinancialSummary(userId: string) {
@@ -1496,6 +1956,10 @@ export async function getOrganizerFinancialSummary(userId: string) {
     0
   );
   const totalRecoverableInCents = Math.max(0, -signedRecoverableInCents);
+  const cancelledEventHoldInCents = await computeCancelledEventHeldAvailableInCents(
+    prisma,
+    userId
+  );
 
   const earningsEntries = await prisma.financialLedgerEntry.findMany({
     where: {
@@ -1521,6 +1985,7 @@ export async function getOrganizerFinancialSummary(userId: string) {
       pendingInCents: 0,
       availableInCents: 0,
       netAvailableInCents: 0,
+      cancelledEventHoldInCents,
       transferredInCents: 0,
       lifetimeEarningsInCents,
       recoverableInCents: totalRecoverableInCents,
@@ -1528,13 +1993,17 @@ export async function getOrganizerFinancialSummary(userId: string) {
     };
   }
 
-  const netAvailableInCents = Math.max(0, balance.availableBalanceInCents - totalRecoverableInCents);
+  const netAvailableInCents = Math.max(
+    0,
+    balance.availableBalanceInCents - totalRecoverableInCents - cancelledEventHoldInCents
+  );
 
   return {
     currency: balance.currency.toUpperCase(),
     pendingInCents: balance.pendingBalanceInCents,
     availableInCents: balance.availableBalanceInCents,
     netAvailableInCents,
+    cancelledEventHoldInCents,
     transferredInCents: balance.transferredBalanceInCents,
     lifetimeEarningsInCents,
     recoverableInCents: totalRecoverableInCents,

@@ -1,10 +1,12 @@
 import {
+  EventStatus,
   Prisma,
   TicketStatus,
   WaitlistEntryStatus,
   WaitlistOfferStatus,
 } from '@prisma/client';
 import { nanoid } from 'nanoid';
+import { ConflictError } from '../../utils/errors.js';
 import {
   enqueueOrderConfirmationEmail,
   OrderSnapshotSource,
@@ -53,6 +55,20 @@ export async function fulfillOrderCompletionInTx(
 ): Promise<FulfillOrderCompletionResult> {
   const { order, linkedOffers = [] } = input;
   const now = input.now ?? new Date();
+
+  const eventStatusFromOrder = (order as any)?.event?.status;
+  if (eventStatusFromOrder === EventStatus.CANCELLED) {
+    throw new ConflictError('Cannot fulfill or issue tickets for a cancelled event.', 'EVENT_CANCELLED');
+  }
+  if (typeof (tx as any)?.event?.findUnique === 'function') {
+    const evt = await tx.event.findUnique({
+      where: { id: order.eventId },
+      select: { status: true },
+    });
+    if (evt?.status === EventStatus.CANCELLED) {
+      throw new ConflictError('Cannot fulfill or issue tickets for a cancelled event.', 'EVENT_CANCELLED');
+    }
+  }
 
   if (linkedOffers.length > 0) {
     const offerIds = linkedOffers.map((o) => o.id);
