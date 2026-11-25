@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { api } from './lib/api';
+import { api } from '../src/lib/api';
 
 describe('Event Creation Wizard & Recurring Schedule Preview', () => {
   // Helper mirroring client previewOccurrences calculation logic

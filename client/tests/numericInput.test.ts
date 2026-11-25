@@ -2,8 +2,8 @@ import { describe, it, expect } from 'vitest';
 import {
   parseNumericString,
   stepNumber,
-} from './components/common/NumericInput';
-import { calculateTierEarnings, calculateCombinedEarnings } from './lib/fees';
+} from '../src/components/common/NumericInput';
+import { calculateTierEarnings, calculateCombinedEarnings } from '../src/lib/fees';
 
 describe('Numeric & Currency Input Editing (Outside.vip)', () => {
   describe('1. Clearing a Value (Smart Clearing & Placeholder Preservation)', () => {

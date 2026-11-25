@@ -2,10 +2,10 @@ import { describe, it, expect, vi } from 'vitest';
 import { renderToString } from 'react-dom/server';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { AuthContext } from './context/AuthContext';
-import { RequireAuth } from './components/auth/RequireAuth';
-import { RequireRole } from './components/auth/RequireRole';
-import { User } from './types';
+import { AuthContext } from '../src/context/AuthContext';
+import { RequireAuth } from '../src/components/auth/RequireAuth';
+import { RequireRole } from '../src/components/auth/RequireRole';
+import { User } from '../src/types';
 import fs from 'fs';
 import path from 'path';
 
@@ -360,7 +360,7 @@ describe('Stage 3 Implementation 2: Centralized Route Guards', () => {
 
   describe('3. Route Inventory & App.tsx Configuration Audit', () => {
     const appSource = fs.readFileSync(
-      path.resolve(__dirname, './App.tsx'),
+      path.resolve(__dirname, '../src/App.tsx'),
       'utf-8'
     );
 

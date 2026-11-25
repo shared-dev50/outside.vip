@@ -10,7 +10,7 @@ import {
   SERVICE_FEE_CENTS,
   STRIPE_PERCENT,
   STRIPE_FIXED_CENTS,
-} from './lib/fees';
+} from '../src/lib/fees';
 
 describe('Client Fees & Organizer Earnings Breakdown', () => {
   it('defines correct fee rule constants', () => {

@@ -5,8 +5,8 @@ import {
   getPlatformShareDetails,
   SocialPlatform,
   copyTextToClipboard,
-} from './lib/socialSharing';
-import { SocialShareModal } from './components/promotions/SocialShareModal';
+} from '../src/lib/socialSharing';
+import { SocialShareModal } from '../src/components/promotions/SocialShareModal';
 
 describe('Outside.vip — Stage 5 Implementation 2: Social Sharing & Promotional URLs', () => {
   const mockEvent = {

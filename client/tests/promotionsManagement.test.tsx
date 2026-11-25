@@ -4,9 +4,9 @@ import path from 'path';
 import { renderToString } from 'react-dom/server';
 import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { EventPromotionsModal } from './components/promotions/EventPromotionsModal';
-import { api, setActiveCsrfToken } from './lib/api';
-import { OrganizerEventItem, PromotionLinkItem, EventPromotionalAnalytics } from './types';
+import { EventPromotionsModal } from '../src/components/promotions/EventPromotionsModal';
+import { api, setActiveCsrfToken } from '../src/lib/api';
+import { OrganizerEventItem, PromotionLinkItem, EventPromotionalAnalytics } from '../src/types';
 
 const mockEvent: OrganizerEventItem = {
   id: 'evt-promo-test-202',
@@ -551,7 +551,7 @@ describe('Stage 3 Implementation 2: Organizer Promotions & Campaign Analytics Fr
   describe('5. Strict Boundaries: Traffic Only, Dynamic Origins & Organizer Integration', () => {
     it('verifies promotional components contain zero sales, ticket orders, or revenue tracking', () => {
       const promotionsComponentCode = fs.readFileSync(
-        path.resolve(__dirname, 'components/promotions/EventPromotionsModal.tsx'),
+        path.resolve(__dirname, '../src/components/promotions/EventPromotionsModal.tsx'),
         'utf8'
       );
 
@@ -570,7 +570,7 @@ describe('Stage 3 Implementation 2: Organizer Promotions & Campaign Analytics Fr
 
     it('verifies promotional short URLs use dynamic window.location.origin instead of hardcoded outside.vip', () => {
       const promotionsComponentCode = fs.readFileSync(
-        path.resolve(__dirname, 'components/promotions/EventPromotionsModal.tsx'),
+        path.resolve(__dirname, '../src/components/promotions/EventPromotionsModal.tsx'),
         'utf8'
       );
 
@@ -580,7 +580,7 @@ describe('Stage 3 Implementation 2: Organizer Promotions & Campaign Analytics Fr
 
     it('verifies OrganizerDashboardPage mounts EventPromotionsModal and includes action button with TrendingUp icon', () => {
       const dashboardCode = fs.readFileSync(
-        path.resolve(__dirname, 'pages/OrganizerDashboardPage.tsx'),
+        path.resolve(__dirname, '../src/pages/OrganizerDashboardPage.tsx'),
         'utf8'
       );
 

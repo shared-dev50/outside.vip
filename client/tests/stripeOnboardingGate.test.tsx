@@ -3,17 +3,17 @@ import { createRoot, Root } from 'react-dom/client';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { CreateEventPage } from './pages/CreateEventPage';
-import { StripeOnboardingGateModal } from './components/events/StripeOnboardingGateModal';
-import { AuthContext } from './context/AuthContext';
-import { api, ApiError } from './lib/api';
+import { CreateEventPage } from '../src/pages/CreateEventPage';
+import { StripeOnboardingGateModal } from '../src/components/events/StripeOnboardingGateModal';
+import { AuthContext } from '../src/context/AuthContext';
+import { api, ApiError } from '../src/lib/api';
 import {
   isStripeReadyForPaidPublishing,
   hasVisiblePaidTicketTier,
   isStripeOnboardingIncompleteError,
   buildEventEditStripeUrls,
-} from './lib/stripeOnboardingGate';
-import { Event, StripeConnectedAccountStatus, User } from './types';
+} from '../src/lib/stripeOnboardingGate';
+import { Event, StripeConnectedAccountStatus, User } from '../src/types';
 
 // Minimal in-process DOM harness enabling real React 18 mounting & event dispatch in Vitest Node env
 class MiniEvent {

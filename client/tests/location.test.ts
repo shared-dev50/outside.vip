@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { LocationData } from './components/events/LocationAutocompleteInput';
-import { api } from './lib/api';
+import { LocationData } from '../src/components/events/LocationAutocompleteInput';
+import { api } from '../src/lib/api';
 
 describe('Event Location Autocomplete & Selection Logic', () => {
   describe('1. Location Clearing & State Isolation (Requirement 2)', () => {
@@ -236,7 +236,7 @@ describe('Event Location Autocomplete & Selection Logic', () => {
 
   describe('7. Timezone Prioritisation & Dynamic DST Display', () => {
     it('prioritizes US timezones first, followed by Africa and Europe', async () => {
-      const { TIMEZONE_GROUPS, DEFAULT_US_TIMEZONE } = await import('./lib/timezone');
+      const { TIMEZONE_GROUPS, DEFAULT_US_TIMEZONE } = await import('../src/lib/timezone');
       expect(DEFAULT_US_TIMEZONE).toBe('America/New_York');
 
       expect(TIMEZONE_GROUPS[0].groupName).toBe('United States');
@@ -254,7 +254,7 @@ describe('Event Location Autocomplete & Selection Logic', () => {
     });
 
     it('dynamically formats daylight saving time (DST) without hardcoded offsets', async () => {
-      const { formatTimezoneDisplay } = await import('./lib/timezone');
+      const { formatTimezoneDisplay } = await import('../src/lib/timezone');
       // Summer date (DST active in US)
       const summerDate = new Date('2026-07-15T18:00:00Z');
       const nySummer = formatTimezoneDisplay('America/New_York', summerDate);
@@ -274,7 +274,7 @@ describe('Event Location Autocomplete & Selection Logic', () => {
     });
 
     it('infers timezone reliably from venue coordinates or state', async () => {
-      const { inferTimezoneFromLocation } = await import('./lib/timezone');
+      const { inferTimezoneFromLocation } = await import('../src/lib/timezone');
 
       expect(inferTimezoneFromLocation({ stateCode: 'NY' })).toBe('America/New_York');
       expect(inferTimezoneFromLocation({ latitude: 40.7128, longitude: -74.006 })).toBe('America/New_York');

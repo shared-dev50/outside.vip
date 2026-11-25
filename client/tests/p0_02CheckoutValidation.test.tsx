@@ -4,23 +4,23 @@ import { createRoot, Root } from 'react-dom/client';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { TicketTierEditorSection } from './components/events/TicketTierEditorSection';
-import { CheckoutDialog } from './components/events/CheckoutDialog';
-import { OrderConfirmationPage } from './pages/OrderConfirmationPage';
+import { TicketTierEditorSection } from '../src/components/events/TicketTierEditorSection';
+import { CheckoutDialog } from '../src/components/events/CheckoutDialog';
+import { OrderConfirmationPage } from '../src/pages/OrderConfirmationPage';
 import {
   calculateDisplayPriceFromGross,
   calculateGrossPriceFromDisplay,
   MIN_PAID_DISPLAY_PRICE_CENTS,
-} from './lib/fees';
+} from '../src/lib/fees';
 import {
   FormTicketTier,
   TicketTierFieldErrors,
   createEmptyTicketTier,
   validateTicketTiers,
   buildTicketTierPayload,
-} from './lib/ticketCreation';
-import { api } from './lib/api';
-import { CheckoutSessionResult, Event, TicketTier } from './types';
+} from '../src/lib/ticketCreation';
+import { api } from '../src/lib/api';
+import { CheckoutSessionResult, Event, TicketTier } from '../src/types';
 
 const stripeMockState = vi.hoisted(() => ({
   confirmCardPayment: vi.fn(),
@@ -47,7 +47,7 @@ vi.mock('@stripe/react-stripe-js', () => ({
   }),
 }));
 
-vi.mock('./lib/stripe', () => ({
+vi.mock('../src/lib/stripe', () => ({
   getStripePromise: stripeMockState.getStripePromise,
 }));
 

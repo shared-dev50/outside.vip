@@ -7,7 +7,7 @@ import {
   buildApiUrl,
   getActiveCsrfToken,
   setActiveCsrfToken,
-} from './lib/api';
+} from '../src/lib/api';
 
 describe('Outside.vip Client Library', () => {
   it('should define public API service routes', () => {

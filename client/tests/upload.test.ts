@@ -6,9 +6,9 @@ import {
   clampPan,
   resolveAspectRatio,
   formatBytes,
-} from './lib/imageCrop';
-import { uploadImageWithProgress } from './lib/uploadService';
-import { api } from './lib/api';
+} from '../src/lib/imageCrop';
+import { uploadImageWithProgress } from '../src/lib/uploadService';
+import { api } from '../src/lib/api';
 
 describe('Image Crop & Optimization Utilities', () => {
   describe('validateImageFile', () => {

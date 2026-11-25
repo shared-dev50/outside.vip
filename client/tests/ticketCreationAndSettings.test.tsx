@@ -5,11 +5,11 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { TicketTierEditorSection } from './components/events/TicketTierEditorSection';
-import { EventDetailPage } from './pages/EventDetailPage';
-import { CreateEventPage } from './pages/CreateEventPage';
-import { AuthContext } from './context/AuthContext';
-import { api } from './lib/api';
+import { TicketTierEditorSection } from '../src/components/events/TicketTierEditorSection';
+import { EventDetailPage } from '../src/pages/EventDetailPage';
+import { CreateEventPage } from '../src/pages/CreateEventPage';
+import { AuthContext } from '../src/context/AuthContext';
+import { api } from '../src/lib/api';
 import {
   FormTicketTier,
   TicketTierFieldErrors,
@@ -18,9 +18,9 @@ import {
   validateTicketTiers,
   buildTicketTierPayload,
   computeVisibleMinDisplayPrice,
-} from './lib/ticketCreation';
-import { toInputValueInTimezone, toIsoValueInTimezone } from './lib/timezone';
-import { Event, TicketTier, User } from './types';
+} from '../src/lib/ticketCreation';
+import { toInputValueInTimezone, toIsoValueInTimezone } from '../src/lib/timezone';
+import { Event, TicketTier, User } from '../src/types';
 
 // Minimal in-process DOM harness for real React 18 mounting in Vitest Node environment
 class MiniEvent {

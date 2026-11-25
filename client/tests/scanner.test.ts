@@ -5,9 +5,9 @@ import {
   extractTicketToken,
   isDuplicateScan,
   getCameraErrorDetails,
-} from './lib/scanner';
-import { ScannerPage } from './pages/ScannerPage';
-import { api } from './lib/api';
+} from '../src/lib/scanner';
+import { ScannerPage } from '../src/pages/ScannerPage';
+import { api } from '../src/lib/api';
 
 describe('Outside.vip Organizer Scanner Utilities', () => {
   describe('extractTicketToken', () => {
@@ -178,7 +178,7 @@ describe('Outside.vip Organizer Scanner Utilities', () => {
 
     it('verifies handleLocalFallback is completely deleted from ScannerPage source', async () => {
       // Direct source inspection to ensure no hidden simulation fallbacks remain in the bundle
-      const scannerSource = await import('./pages/ScannerPage?raw').then((m) => m.default || '').catch(() => '');
+      const scannerSource = await import('../src/pages/ScannerPage?raw').then((m) => m.default || '').catch(() => '');
       if (scannerSource) {
         expect(scannerSource).not.toContain('handleLocalFallback');
         expect(scannerSource).not.toContain('Demo Simulation');
@@ -188,7 +188,7 @@ describe('Outside.vip Organizer Scanner Utilities', () => {
 
   describe('Phase 1.2: Scanner Idempotency & Retry State Lifecycle', () => {
     it('verifies ScannerPage source defines pendingScanRef and synchronous validation guard', async () => {
-      const scannerSource = await import('./pages/ScannerPage?raw').then((m) => m.default || '').catch(() => '');
+      const scannerSource = await import('../src/pages/ScannerPage?raw').then((m) => m.default || '').catch(() => '');
       expect(scannerSource).toBeTruthy();
 
       // Must have pendingScanRef tracking { token, gateId, idempotencyKey }
@@ -601,7 +601,7 @@ describe('Outside.vip Organizer Scanner Utilities', () => {
     });
 
     it('verifies ScannerPage source code guarantees zero public fallback for ATTENDEE', async () => {
-      const scannerSource = await import('./pages/ScannerPage?raw').then((m) => m.default || '').catch(() => '');
+      const scannerSource = await import('../src/pages/ScannerPage?raw').then((m) => m.default || '').catch(() => '');
       expect(scannerSource).toBeTruthy();
 
       expect(scannerSource).not.toContain('api.events.list');
@@ -628,7 +628,7 @@ describe('Outside.vip Organizer Scanner Utilities', () => {
     });
 
     it('verifies ScannerPage source code defines 10-minute heartbeat interval and lifecycle guards', async () => {
-      const scannerSource = await import('./pages/ScannerPage?raw').then((m) => m.default || '').catch(() => '');
+      const scannerSource = await import('../src/pages/ScannerPage?raw').then((m) => m.default || '').catch(() => '');
       expect(scannerSource).toBeTruthy();
 
       expect(scannerSource).toContain('HEARTBEAT_INTERVAL_MS = 10 * 60 * 1000');
@@ -840,7 +840,7 @@ describe('Outside.vip Organizer Scanner Utilities', () => {
     });
 
     it('renders session_expired UI with direct email-OTP sign-in action and zero invitation-link redirects', async () => {
-      const scannerSource = await import('./pages/ScannerPage?raw').then((m) => m.default || '').catch(() => '');
+      const scannerSource = await import('../src/pages/ScannerPage?raw').then((m) => m.default || '').catch(() => '');
 
       // Verify the session_expired UI block exists and uses direct email-OTP recovery
       expect(scannerSource).toContain("scanStatus === 'session_expired'");
@@ -853,7 +853,7 @@ describe('Outside.vip Organizer Scanner Utilities', () => {
     });
 
     it('renders distinct forbidden UI explaining permission revoked without offering OTP resumption', async () => {
-      const scannerSource = await import('./pages/ScannerPage?raw').then((m) => m.default || '').catch(() => '');
+      const scannerSource = await import('../src/pages/ScannerPage?raw').then((m) => m.default || '').catch(() => '');
 
       expect(scannerSource).toContain("scanStatus === 'forbidden'");
       expect(scannerSource).toContain('Unauthorized Gate Staff');
@@ -903,7 +903,7 @@ describe('Outside.vip Organizer Scanner Utilities', () => {
     });
 
     it('verifies ScannerPage source code performs URL sanitization with replaceState', async () => {
-      const scannerSource = await import('./pages/ScannerPage?raw').then((m) => m.default || '').catch(() => '');
+      const scannerSource = await import('../src/pages/ScannerPage?raw').then((m) => m.default || '').catch(() => '');
       expect(scannerSource).toBeTruthy();
 
       expect(scannerSource).toContain("url.searchParams.delete('invite')");
@@ -913,8 +913,8 @@ describe('Outside.vip Organizer Scanner Utilities', () => {
     });
 
     it('verifies Stage 2 zero invitation-token persistence in ScannerGuard and ScannerPage', async () => {
-      const scannerSource = await import('./pages/ScannerPage?raw').then((m) => m.default || '').catch(() => '');
-      const guardSource = await import('./components/auth/ScannerGuard?raw').then((m) => m.default || '').catch(() => '');
+      const scannerSource = await import('../src/pages/ScannerPage?raw').then((m) => m.default || '').catch(() => '');
+      const guardSource = await import('../src/components/auth/ScannerGuard?raw').then((m) => m.default || '').catch(() => '');
 
       expect(scannerSource).not.toContain("sessionStorage.setItem('outside_scanner_invite_token'");
       expect(guardSource).not.toContain("sessionStorage.setItem('outside_scanner_invite_token'");
@@ -1032,7 +1032,7 @@ describe('Outside.vip Organizer Scanner Utilities', () => {
       expect(ticketMeta.note).toContain('Staff assignment revoked');
 
       // Verify no OTP recovery or redirection is offered in forbidden state
-      const scannerSource = await import('./pages/ScannerPage?raw').then((m) => m.default || '').catch(() => '');
+      const scannerSource = await import('../src/pages/ScannerPage?raw').then((m) => m.default || '').catch(() => '');
       const forbiddenBlockMatch = scannerSource.match(/\{scanStatus === 'forbidden' && \([\s\S]*?\)\}/);
       expect(forbiddenBlockMatch).not.toBeNull();
       const forbiddenBlock = forbiddenBlockMatch![0];
@@ -1162,7 +1162,7 @@ describe('Outside.vip Organizer Scanner Utilities', () => {
     });
 
     it('verifies ScannerPage source code guarantees camera and heartbeat shutdown on 401 and 403 across heartbeat and check-in', async () => {
-      const scannerSource = await import('./pages/ScannerPage?raw').then((m) => m.default || '').catch(() => '');
+      const scannerSource = await import('../src/pages/ScannerPage?raw').then((m) => m.default || '').catch(() => '');
 
       // Verify stopCamera calls stopHeartbeat
       expect(scannerSource).toMatch(/const stopCamera = useCallback\(\(\) =>\s*\{[\s\S]*?stopHeartbeat\(\);/);

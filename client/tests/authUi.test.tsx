@@ -4,12 +4,12 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { renderToString } from 'react-dom/server';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { AuthProvider } from './context/AuthContext';
-import { Navbar } from './components/layout/Navbar';
-import { AuthPage } from './pages/AuthPage';
-import { AuthFormCard } from './components/auth/AuthFormCard';
-import { OrganizerDashboardPage } from './pages/OrganizerDashboardPage';
-import { CreateEventPage } from './pages/CreateEventPage';
+import { AuthProvider } from '../src/context/AuthContext';
+import { Navbar } from '../src/components/layout/Navbar';
+import { AuthPage } from '../src/pages/AuthPage';
+import { AuthFormCard } from '../src/components/auth/AuthFormCard';
+import { OrganizerDashboardPage } from '../src/pages/OrganizerDashboardPage';
+import { CreateEventPage } from '../src/pages/CreateEventPage';
 
 const FORBIDDEN_DEMO_STRINGS = [
   'Demo Sign In',
@@ -175,7 +175,7 @@ describe('Production Authentication UI & Removal of Demo Sign-In', () => {
     ];
 
     for (const relativeFile of filesToCheck) {
-      const fullPath = path.resolve(__dirname, relativeFile);
+      const fullPath = path.resolve(__dirname, '../src', relativeFile);
       const source = fs.readFileSync(fullPath, 'utf8');
       for (const forbidden of FORBIDDEN_DEMO_STRINGS) {
         expect(source).not.toContain(forbidden);
@@ -186,8 +186,8 @@ describe('Production Authentication UI & Removal of Demo Sign-In', () => {
     expect(typeof AuthPage).toBe('function');
 
     // Verify neither AuthContext.tsx nor lib/api.ts stores credentials/tokens in localStorage or sessionStorage
-    const authContextSrc = fs.readFileSync(path.resolve(__dirname, 'context/AuthContext.tsx'), 'utf8');
-    const apiSrc = fs.readFileSync(path.resolve(__dirname, 'lib/api.ts'), 'utf8');
+    const authContextSrc = fs.readFileSync(path.resolve(__dirname, '../src/context/AuthContext.tsx'), 'utf8');
+    const apiSrc = fs.readFileSync(path.resolve(__dirname, '../src/lib/api.ts'), 'utf8');
     expect(authContextSrc).not.toContain('localStorage');
     expect(authContextSrc).not.toContain('sessionStorage');
     expect(authContextSrc).not.toContain('outside_token');

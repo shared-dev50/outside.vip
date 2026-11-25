@@ -4,7 +4,7 @@ import { createRoot, Root } from 'react-dom/client';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { Event, TicketTier, CheckoutSessionResult } from './types';
+import { Event, TicketTier, CheckoutSessionResult } from '../src/types';
 
 const stripeMockState = vi.hoisted(() => ({
   elementsMountCount: 0,
@@ -35,13 +35,13 @@ vi.mock('@stripe/react-stripe-js', () => ({
   }),
 }));
 
-vi.mock('./lib/stripe', () => ({
+vi.mock('../src/lib/stripe', () => ({
   getStripePromise: stripeMockState.getStripePromise,
 }));
 
-import { EventDetailPage } from './pages/EventDetailPage';
-import { CheckoutDialog } from './components/events/CheckoutDialog';
-import { api, ApiError } from './lib/api';
+import { EventDetailPage } from '../src/pages/EventDetailPage';
+import { CheckoutDialog } from '../src/components/events/CheckoutDialog';
+import { api, ApiError } from '../src/lib/api';
 
 class MiniEvent {
   type: string;

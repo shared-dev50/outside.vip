@@ -2,10 +2,10 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import { renderToString } from 'react-dom/server';
 import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { AuthContext } from './context/AuthContext';
-import { ScannerGuard } from './components/auth/ScannerGuard';
-import { ScannerPage } from './pages/ScannerPage';
-import { User } from './types';
+import { AuthContext } from '../src/context/AuthContext';
+import { ScannerGuard } from '../src/components/auth/ScannerGuard';
+import { ScannerPage } from '../src/pages/ScannerPage';
+import { User } from '../src/types';
 
 describe('Stage 3 Implementation 3: Scanner Route Access & Authorization', () => {
   const queryClient = new QueryClient({
@@ -378,7 +378,7 @@ describe('Stage 3 Implementation 3: Scanner Route Access & Authorization', () =>
   // =========================================================================
   describe('6. Terminal Authorization States & Resource Cleanup', () => {
     it('verifies 401 response triggers direct email-OTP session expiry recovery without invitation links or organizer-only message', async () => {
-      const scannerSource = await import('./pages/ScannerPage?raw')
+      const scannerSource = await import('../src/pages/ScannerPage?raw')
         .then((m) => m.default || '')
         .catch(() => '');
 
@@ -392,7 +392,7 @@ describe('Stage 3 Implementation 3: Scanner Route Access & Authorization', () =>
     });
 
     it('verifies 403 response sets forbidden state, stops camera/heartbeat, and does not clear session or offer OTP recovery', async () => {
-      const scannerSource = await import('./pages/ScannerPage?raw')
+      const scannerSource = await import('../src/pages/ScannerPage?raw')
         .then((m) => m.default || '')
         .catch(() => '');
 
@@ -405,7 +405,7 @@ describe('Stage 3 Implementation 3: Scanner Route Access & Authorization', () =>
     });
 
     it('verifies camera and heartbeat are stopped on both 401 and 403 across gates, heartbeat, and check-in', async () => {
-      const scannerSource = await import('./pages/ScannerPage?raw')
+      const scannerSource = await import('../src/pages/ScannerPage?raw')
         .then((m) => m.default || '')
         .catch(() => '');
 
@@ -424,7 +424,7 @@ describe('Stage 3 Implementation 3: Scanner Route Access & Authorization', () =>
   // =========================================================================
   describe('7. Route Guard Integration & History Sanitization', () => {
     it('verifies App.tsx routes /scanner through dedicated ScannerGuard and not generic guards', async () => {
-      const appSource = await import('./App?raw')
+      const appSource = await import('../src/App?raw')
         .then((m) => m.default || '')
         .catch(() => '');
 
@@ -436,7 +436,7 @@ describe('Stage 3 Implementation 3: Scanner Route Access & Authorization', () =>
     });
 
     it('verifies ScannerPage sanitizes invite and token query parameters with replaceState without persisting tokens', async () => {
-      const scannerSource = await import('./pages/ScannerPage?raw')
+      const scannerSource = await import('../src/pages/ScannerPage?raw')
         .then((m) => m.default || '')
         .catch(() => '');
 
@@ -448,7 +448,7 @@ describe('Stage 3 Implementation 3: Scanner Route Access & Authorization', () =>
     });
 
     it('verifies startCamera blocks activation when loading, forbidden, session_expired, or ATTENDEE has 0 gates, with fresh dependencies', async () => {
-      const scannerSource = await import('./pages/ScannerPage?raw')
+      const scannerSource = await import('../src/pages/ScannerPage?raw')
         .then((m) => m.default || '')
         .catch(() => '');
 
@@ -461,10 +461,10 @@ describe('Stage 3 Implementation 3: Scanner Route Access & Authorization', () =>
     });
 
     it('S2R-01 & S2R-02: verifies AuthContext memoization, stable ScannerPage effect deps, and ref-backed scanLoop gate selection', async () => {
-      const authContextSource = await import('./context/AuthContext?raw')
+      const authContextSource = await import('../src/context/AuthContext?raw')
         .then((m) => m.default || '')
         .catch(() => '');
-      const scannerSource = await import('./pages/ScannerPage?raw')
+      const scannerSource = await import('../src/pages/ScannerPage?raw')
         .then((m) => m.default || '')
         .catch(() => '');
 
@@ -523,7 +523,7 @@ describe('Stage 3 Implementation 3: Scanner Route Access & Authorization', () =>
   // =========================================================================
   describe('8. Direct Scanner OTP API Client & ApiError retryAfter', () => {
     it('wires api.auth.requestLoginOtp and api.auth.verifyLoginOtp and parses retryAfter on 429', async () => {
-      const { api, ApiError, getActiveCsrfToken, setActiveCsrfToken } = await import('./lib/api');
+      const { api, ApiError, getActiveCsrfToken, setActiveCsrfToken } = await import('../src/lib/api');
       setActiveCsrfToken(null);
 
       const fetchSpy = vi.spyOn(globalThis, 'fetch');

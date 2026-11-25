@@ -4,12 +4,12 @@ import path from 'path';
 import { renderToString } from 'react-dom/server';
 import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { HostDashboardPage } from './pages/HostDashboardPage';
-import { api, setActiveCsrfToken } from './lib/api';
-import { HostAssignedEventItem, HostPromotionalAnalytics } from './types';
+import { HostDashboardPage } from '../src/pages/HostDashboardPage';
+import { api, setActiveCsrfToken } from '../src/lib/api';
+import { HostAssignedEventItem, HostPromotionalAnalytics } from '../src/types';
 
 // Mock AuthContext
-vi.mock('./context/AuthContext', () => ({
+vi.mock('../src/context/AuthContext', () => ({
   useAuth: () => ({
     user: {
       id: 'host-user-99',
@@ -446,7 +446,7 @@ describe('Stage 3 Implementation 3: Host Dashboard, Personal Promotional Links &
   describe('5. Strict Privacy Invariants & Dual-Role Support', () => {
     it('verifies HostDashboardPage source code contains zero financial or ticket sales concepts', () => {
       const hostComponentCode = fs.readFileSync(
-        path.resolve(__dirname, 'pages/HostDashboardPage.tsx'),
+        path.resolve(__dirname, '../src/pages/HostDashboardPage.tsx'),
         'utf8'
       );
 
@@ -467,7 +467,7 @@ describe('Stage 3 Implementation 3: Host Dashboard, Personal Promotional Links &
 
     it('verifies Navbar includes Host Workspace link alongside Organizer Dashboard for dual-role users', () => {
       const navbarCode = fs.readFileSync(
-        path.resolve(__dirname, 'components/layout/Navbar.tsx'),
+        path.resolve(__dirname, '../src/components/layout/Navbar.tsx'),
         'utf8'
       );
 
@@ -478,7 +478,7 @@ describe('Stage 3 Implementation 3: Host Dashboard, Personal Promotional Links &
     });
 
     it('verifies App.tsx routes /host protected with RequireAuth', () => {
-      const appCode = fs.readFileSync(path.resolve(__dirname, 'App.tsx'), 'utf8');
+      const appCode = fs.readFileSync(path.resolve(__dirname, '../src/App.tsx'), 'utf8');
 
       expect(appCode).toContain('path="/host"');
       expect(appCode).toContain('HostDashboardPage');

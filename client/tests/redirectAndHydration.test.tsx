@@ -2,12 +2,12 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderToString } from 'react-dom/server';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { sanitizeRedirectUrl } from './lib/utils';
-import { AuthPage } from './pages/AuthPage';
-import { OrganizerDashboardPage } from './pages/OrganizerDashboardPage';
-import { CreateEventPage } from './pages/CreateEventPage';
-import { AuthContext } from './context/AuthContext';
-import { User } from './types';
+import { sanitizeRedirectUrl } from '../src/lib/utils';
+import { AuthPage } from '../src/pages/AuthPage';
+import { OrganizerDashboardPage } from '../src/pages/OrganizerDashboardPage';
+import { CreateEventPage } from '../src/pages/CreateEventPage';
+import { AuthContext } from '../src/context/AuthContext';
+import { User } from '../src/types';
 
 describe('Stage 3 Implementation 1: Redirect Security & Authentication Hydration', () => {
   beforeEach(() => {

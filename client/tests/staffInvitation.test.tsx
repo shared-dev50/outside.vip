@@ -1,15 +1,15 @@
 import { describe, it, expect } from 'vitest';
-import { User } from './types';
+import { User } from '../src/types';
 import fs from 'fs';
 import path from 'path';
 
 describe('Door Staff Invitation & Account Mismatch Prevention', () => {
   const staffInvitationSource = fs.readFileSync(
-    path.resolve(__dirname, './pages/StaffInvitationPage.tsx'),
+    path.resolve(__dirname, '../src/pages/StaffInvitationPage.tsx'),
     'utf-8'
   );
   const scannerSource = fs.readFileSync(
-    path.resolve(__dirname, './pages/ScannerPage.tsx'),
+    path.resolve(__dirname, '../src/pages/ScannerPage.tsx'),
     'utf-8'
   );
 

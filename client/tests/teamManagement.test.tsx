@@ -12,14 +12,14 @@ import {
   countActiveDelegablePermissions,
   sanitizeAdminPermissions,
   computeSafeDefaultsForCaller,
-} from './components/team/AdminPermissionsModal';
-import { EventTeamModal } from './components/team/EventTeamModal';
-import { TeamInvitationPage } from './pages/TeamInvitationPage';
-import { OrganizerDashboardPage } from './pages/OrganizerDashboardPage';
-import { CreateEventPage } from './pages/CreateEventPage';
-import { EventPreviewPage } from './pages/EventPreviewPage';
-import { api, setActiveCsrfToken } from './lib/api';
-import { OrganizerEventItem, User } from './types';
+} from '../src/components/team/AdminPermissionsModal';
+import { EventTeamModal } from '../src/components/team/EventTeamModal';
+import { TeamInvitationPage } from '../src/pages/TeamInvitationPage';
+import { OrganizerDashboardPage } from '../src/pages/OrganizerDashboardPage';
+import { CreateEventPage } from '../src/pages/CreateEventPage';
+import { EventPreviewPage } from '../src/pages/EventPreviewPage';
+import { api, setActiveCsrfToken } from '../src/lib/api';
+import { OrganizerEventItem, User } from '../src/types';
 
 const mockEvent: OrganizerEventItem = {
   id: 'evt-team-test-101',
@@ -293,7 +293,7 @@ describe('Stage 3: Event Team Management & Admin Permissions Frontend', () => {
 
     it('uses masked invitation email strictly for display and delegates ownership validation to the backend', () => {
       const pageSource = fs.readFileSync(
-        path.resolve(__dirname, './pages/TeamInvitationPage.tsx'),
+        path.resolve(__dirname, '../src/pages/TeamInvitationPage.tsx'),
         'utf-8'
       );
 
@@ -311,11 +311,11 @@ describe('Stage 3: Event Team Management & Admin Permissions Frontend', () => {
 
     it('dynamically resolves window.location.origin and does not assume production hostname', () => {
       const pageSource = fs.readFileSync(
-        path.resolve(__dirname, './pages/TeamInvitationPage.tsx'),
+        path.resolve(__dirname, '../src/pages/TeamInvitationPage.tsx'),
         'utf-8'
       );
       const modalSource = fs.readFileSync(
-        path.resolve(__dirname, './components/team/EventTeamModal.tsx'),
+        path.resolve(__dirname, '../src/components/team/EventTeamModal.tsx'),
         'utf-8'
       );
 
@@ -724,7 +724,7 @@ describe('Stage 3: Event Team Management & Admin Permissions Frontend', () => {
 
     it('enforces strict architectural separation between api.staff and api.team in EventTeamModal', () => {
       const modalSource = fs.readFileSync(
-        path.resolve(__dirname, './components/team/EventTeamModal.tsx'),
+        path.resolve(__dirname, '../src/components/team/EventTeamModal.tsx'),
         'utf-8'
       );
 
@@ -749,11 +749,11 @@ describe('Stage 3: Event Team Management & Admin Permissions Frontend', () => {
 
     it('ensures TeamsPage enforces RequireAuth with event-scoped authorization and embeds unified EventTeamModal', () => {
       const appSource = fs.readFileSync(
-        path.resolve(__dirname, './App.tsx'),
+        path.resolve(__dirname, '../src/App.tsx'),
         'utf-8'
       );
       const teamsPageSource = fs.readFileSync(
-        path.resolve(__dirname, './pages/TeamsPage.tsx'),
+        path.resolve(__dirname, '../src/pages/TeamsPage.tsx'),
         'utf-8'
       );
 
@@ -777,7 +777,7 @@ describe('Stage 3: Event Team Management & Admin Permissions Frontend', () => {
   describe('6. Stage 3 Implementation 5.1: Unified Invitation Dropdown & Scanner Restrictions', () => {
     it('renders role dropdown with exactly Door Scanner, Event Admin, and Event Host without separate role cards', () => {
       const modalSource = fs.readFileSync(
-        path.resolve(__dirname, './components/team/EventTeamModal.tsx'),
+        path.resolve(__dirname, '../src/components/team/EventTeamModal.tsx'),
         'utf-8'
       );
 
@@ -795,7 +795,7 @@ describe('Stage 3: Event Team Management & Admin Permissions Frontend', () => {
 
     it('dynamically adapts form sections based on selected role', () => {
       const modalSource = fs.readFileSync(
-        path.resolve(__dirname, './components/team/EventTeamModal.tsx'),
+        path.resolve(__dirname, '../src/components/team/EventTeamModal.tsx'),
         'utf-8'
       );
 

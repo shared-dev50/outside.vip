@@ -2,21 +2,21 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderToString } from 'react-dom/server';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { AuthContext } from './context/AuthContext';
-import { AuthPage } from './pages/AuthPage';
-import { TeamInvitationPage } from './pages/TeamInvitationPage';
-import { TeamsPage } from './pages/TeamsPage';
-import { HostDashboardPage } from './pages/HostDashboardPage';
-import { OrganizerDashboardPage } from './pages/OrganizerDashboardPage';
-import { Navbar } from './components/layout/Navbar';
-import { RequireAuth } from './components/auth/RequireAuth';
+import { AuthContext } from '../src/context/AuthContext';
+import { AuthPage } from '../src/pages/AuthPage';
+import { TeamInvitationPage } from '../src/pages/TeamInvitationPage';
+import { TeamsPage } from '../src/pages/TeamsPage';
+import { HostDashboardPage } from '../src/pages/HostDashboardPage';
+import { OrganizerDashboardPage } from '../src/pages/OrganizerDashboardPage';
+import { Navbar } from '../src/components/layout/Navbar';
+import { RequireAuth } from '../src/components/auth/RequireAuth';
 import {
   HostAssignedEventItem,
   OrganizerEventItem,
   TeamInvitationMetadata,
   User,
-} from './types';
-import { DEFAULT_ADMIN_PERMISSIONS } from './components/team/AdminPermissionsModal';
+} from '../src/types';
+import { DEFAULT_ADMIN_PERMISSIONS } from '../src/components/team/AdminPermissionsModal';
 
 describe('Authentication Stage 4: Cross-Role Navigation, Unified OTP Login & Dashboard Permissions', () => {
   let queryClient: QueryClient;

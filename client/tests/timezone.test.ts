@@ -4,7 +4,7 @@ import {
   toInputValueInTimezone,
   formatTimezoneDisplay,
   DEFAULT_US_TIMEZONE,
-} from './lib/timezone';
+} from '../src/lib/timezone';
 
 describe('Timezone & Daylight Saving Time Conversion Utilities', () => {
   describe('toIsoValueInTimezone', () => {

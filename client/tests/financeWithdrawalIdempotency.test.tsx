@@ -3,10 +3,10 @@ import { createRoot, Root } from 'react-dom/client';
 import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { AuthContext } from './context/AuthContext';
-import { FinanceOrganizationPage } from './pages/FinanceOrganizationPage';
-import { api } from './lib/api';
-import { User } from './types';
+import { AuthContext } from '../src/context/AuthContext';
+import { FinanceOrganizationPage } from '../src/pages/FinanceOrganizationPage';
+import { api } from '../src/lib/api';
+import { User } from '../src/types';
 
 class MiniEvent {
   type: string;

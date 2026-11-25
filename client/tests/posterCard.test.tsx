@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { renderToString } from 'react-dom/server';
 import { MemoryRouter } from 'react-router-dom';
-import { PosterCard } from './components/home/PosterCard';
-import { Event } from './types';
+import { PosterCard } from '../src/components/home/PosterCard';
+import { Event } from '../src/types';
 
 describe('Homepage PosterCard UI & Event Title Component', () => {
   const mockBaseEvent: Event = {

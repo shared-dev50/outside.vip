@@ -4,22 +4,22 @@ import { createRoot, Root } from 'react-dom/client';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { AuthContext, AuthProvider, useAuth } from './context/AuthContext';
-import { HostDashboardPage } from './pages/HostDashboardPage';
-import { TeamsPage } from './pages/TeamsPage';
-import { OrganizerDashboardPage } from './pages/OrganizerDashboardPage';
-import { FinanceOrganizationPage } from './pages/FinanceOrganizationPage';
-import { OrdersPage } from './pages/OrdersPage';
-import { TeamInvitationPage } from './pages/TeamInvitationPage';
-import { EventTeamModal } from './components/team/EventTeamModal';
-import { EventPromotionsModal } from './components/promotions/EventPromotionsModal';
-import { api, getActiveCsrfToken, setActiveCsrfToken } from './lib/api';
+import { AuthContext, AuthProvider, useAuth } from '../src/context/AuthContext';
+import { HostDashboardPage } from '../src/pages/HostDashboardPage';
+import { TeamsPage } from '../src/pages/TeamsPage';
+import { OrganizerDashboardPage } from '../src/pages/OrganizerDashboardPage';
+import { FinanceOrganizationPage } from '../src/pages/FinanceOrganizationPage';
+import { OrdersPage } from '../src/pages/OrdersPage';
+import { TeamInvitationPage } from '../src/pages/TeamInvitationPage';
+import { EventTeamModal } from '../src/components/team/EventTeamModal';
+import { EventPromotionsModal } from '../src/components/promotions/EventPromotionsModal';
+import { api, getActiveCsrfToken, setActiveCsrfToken } from '../src/lib/api';
 import {
   HostAssignedEventItem,
   OrganizerEventItem,
   TeamInvitationMetadata,
   User,
-} from './types';
+} from '../src/types';
 
 /**
  * Minimal in-process DOM harness enabling real React 18 `createRoot` mounting,
