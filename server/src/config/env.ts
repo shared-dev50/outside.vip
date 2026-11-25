@@ -76,6 +76,7 @@ export function validateStripeWebhookProductionConfig(config: {
 
   const platformSecret = (config.STRIPE_WEBHOOK_SECRET || '').trim();
   const connectSecret = (config.STRIPE_CONNECT_WEBHOOK_SECRET || '').trim();
+  const whsecPattern = /^whsec_[A-Za-z0-9_]{8,}$/;
 
   if (!platformSecret || platformSecret === 'whsec_placeholder') {
     throw new Error(
@@ -83,9 +84,21 @@ export function validateStripeWebhookProductionConfig(config: {
     );
   }
 
+  if (!whsecPattern.test(platformSecret)) {
+    throw new Error(
+      'FATAL: STRIPE_WEBHOOK_SECRET must be a valid Stripe signing secret starting with whsec_ in production.'
+    );
+  }
+
   if (!connectSecret || connectSecret === 'whsec_placeholder') {
     throw new Error(
       'FATAL: STRIPE_CONNECT_WEBHOOK_SECRET must be independently configured with a non-placeholder signing secret in production.'
+    );
+  }
+
+  if (!whsecPattern.test(connectSecret)) {
+    throw new Error(
+      'FATAL: STRIPE_CONNECT_WEBHOOK_SECRET must be a valid Stripe signing secret starting with whsec_ in production.'
     );
   }
 
@@ -96,6 +109,38 @@ export function validateStripeWebhookProductionConfig(config: {
   }
 }
 
+export function validateStripeProductionConfig(config: {
+  NODE_ENV?: string;
+  STRIPE_SECRET_KEY?: string;
+  STRIPE_WEBHOOK_SECRET?: string;
+  STRIPE_CONNECT_WEBHOOK_SECRET?: string;
+}): void {
+  if (config.NODE_ENV !== 'production') {
+    return;
+  }
+
+  const stripeSecretKey = (config.STRIPE_SECRET_KEY || '').trim();
+  if (!stripeSecretKey || stripeSecretKey === 'sk_test_placeholder') {
+    throw new Error(
+      'FATAL: STRIPE_SECRET_KEY is required and must be a live secret key in production.'
+    );
+  }
+
+  if (stripeSecretKey.startsWith('sk_test_')) {
+    throw new Error(
+      'FATAL: STRIPE_SECRET_KEY must not be a test key (sk_test_) in production; a live key (sk_live_) is required.'
+    );
+  }
+
+  if (!/^sk_live_[A-Za-z0-9_]{16,}$/.test(stripeSecretKey)) {
+    throw new Error(
+      'FATAL: STRIPE_SECRET_KEY is malformed; expected a Stripe live secret key starting with sk_live_ in production.'
+    );
+  }
+
+  validateStripeWebhookProductionConfig(config);
+}
+
 if (parsed.data.NODE_ENV === 'production') {
   if (
     !parsed.data.PROMOTION_ATTRIBUTION_HMAC_KEY ||
@@ -104,7 +149,7 @@ if (parsed.data.NODE_ENV === 'production') {
   ) {
     throw new Error('FATAL: PROMOTION_ATTRIBUTION_HMAC_KEY is required and must be at least 32 characters in production');
   }
-  validateStripeWebhookProductionConfig(parsed.data);
+  validateStripeProductionConfig(parsed.data);
 }
 
 export const env = parsed.data;

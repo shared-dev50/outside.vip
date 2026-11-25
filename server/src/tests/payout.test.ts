@@ -47,6 +47,7 @@ describe('Outside.vip Payout & Organisation Details', () => {
           passwordHash,
           name: 'Second Organizer Test',
           role: 'ORGANIZER',
+          emailVerified: true,
         },
       });
       await prisma.organizerProfile.create({
@@ -55,6 +56,11 @@ describe('Outside.vip Payout & Organisation Details', () => {
           displayName: 'Second Org Group',
           slug: 'second-org-group-test',
         },
+      });
+    } else if (!otherUser.emailVerified) {
+      otherUser = await prisma.user.update({
+        where: { id: otherUser.id },
+        data: { emailVerified: true },
       });
     }
     otherOrganizerUserId = otherUser.id;
@@ -411,7 +417,7 @@ describe('Outside.vip Payout & Organisation Details', () => {
 
       expect(accessAttempt.status).toBe(403);
       expect(accessAttempt.body.success).toBe(false);
-      expect(accessAttempt.body.error?.message).toMatch(/do not have permission/i);
+      expect(accessAttempt.body.error?.message).toMatch(/not an authorized member of this event team/i);
     });
 
     it('Each organizer retrieves only their own payout details from /api/organizer/payout-details', async () => {

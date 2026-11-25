@@ -1,6 +1,6 @@
 import crypto from 'crypto';
 import Stripe from 'stripe';
-import { LedgerEntryType, Role, TransferStatus } from '@prisma/client';
+import { LedgerEntryType, PayoutStatus, Role, TransferStatus } from '@prisma/client';
 import { prisma } from '../../db/prisma.js';
 import { stripe } from '../../lib/stripe.js';
 import { env } from '../../config/env.js';
@@ -1431,7 +1431,8 @@ export async function getConnectedAccountPayouts(
     return { payouts: [] };
   }
 
-  if (!env.STRIPE_SECRET_KEY || env.STRIPE_SECRET_KEY === 'sk_test_placeholder') {
+  const effectiveStripeKey = (process.env.STRIPE_SECRET_KEY ?? env.STRIPE_SECRET_KEY ?? '').trim();
+  if (!effectiveStripeKey || effectiveStripeKey === 'sk_test_placeholder') {
     return { payouts: [] };
   }
 
@@ -1455,6 +1456,42 @@ export async function getConnectedAccountPayouts(
       failureCode: p.failure_code || null,
       failureMessage: p.failure_message || null,
     }));
+
+    // Reconcile delayed/missed payout.* webhooks into local ConnectedPayout snapshots
+    if (typeof (prisma as any)?.connectedPayout?.upsert === 'function') {
+      for (const p of payouts.data) {
+        let localStatus: PayoutStatus = PayoutStatus.PENDING;
+        if (p.status === 'paid') {
+          localStatus = PayoutStatus.PAID;
+        } else if (p.status === 'failed') {
+          localStatus = PayoutStatus.FAILED;
+        } else if (p.status === 'canceled') {
+          localStatus = PayoutStatus.CANCELLED;
+        }
+
+        const arrivalDate = p.arrival_date ? new Date(p.arrival_date * 1000) : null;
+        await prisma.connectedPayout.upsert({
+          where: { stripePayoutId: p.id },
+          update: {
+            status: localStatus,
+            arrivalDate,
+            failureCode: p.failure_code || null,
+            failureMessage: p.failure_message || null,
+          },
+          create: {
+            stripePayoutId: p.id,
+            organizerId: userId,
+            stripeAccountId: user.stripeAccountId,
+            amountInCents: p.amount,
+            currency: p.currency.toUpperCase(),
+            status: localStatus,
+            arrivalDate,
+            failureCode: p.failure_code || null,
+            failureMessage: p.failure_message || null,
+          },
+        });
+      }
+    }
 
     return { payouts: sanitized };
   } catch (error: any) {

@@ -1408,7 +1408,12 @@ export async function recordDisputeLedger(
   }
 
   if (!organizerId) {
-    console.warn(`[DisputeLedger] Could not locate organizer for dispute ${stripeDisputeId}`);
+    console.warn('[StripeWebhook][UnlinkedDispute]', {
+      stripeDisputeId,
+      stripeChargeId: stripeChargeId || null,
+      orderId: resolvedOrderId,
+      status,
+    });
     return;
   }
 
@@ -1467,10 +1472,13 @@ export async function recordDisputeLedger(
         0
       );
       const remainingEntitlement = Math.max(0, order.organizerNetInCents - totalPrevious);
-      const proportionalLiability = Math.min(
-        order.organizerNetInCents,
-        Math.round((amountInCents / order.totalInCents) * order.organizerNetInCents)
-      );
+      const proportionalLiability =
+        order.totalInCents > 0
+          ? Math.min(
+              order.organizerNetInCents,
+              Math.round((amountInCents / order.totalInCents) * order.organizerNetInCents)
+            )
+          : 0;
       organizerLiability = Math.min(remainingEntitlement, proportionalLiability);
     }
   }

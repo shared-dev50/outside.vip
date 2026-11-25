@@ -106,6 +106,150 @@ async function resolveChargeBalanceTransaction(
   return { balanceTx: null, retrievalFailure: null };
 }
 
+interface SessionPaymentIntentResolution {
+  paymentIntent: Stripe.PaymentIntent | null;
+  retrievalFailure: SettlementErrorClassification | null;
+  rawError?: any;
+}
+
+async function resolveCheckoutSessionPaymentIntent(
+  session: Stripe.Checkout.Session
+): Promise<SessionPaymentIntentResolution> {
+  if (session.payment_status !== 'paid') {
+    return { paymentIntent: null, retrievalFailure: null };
+  }
+
+  const sessionOrderId = session.metadata?.orderId;
+  if (typeof session.payment_intent === 'object' && session.payment_intent !== null) {
+    const piObj = session.payment_intent as Stripe.PaymentIntent;
+    return {
+      paymentIntent: {
+        ...piObj,
+        metadata: {
+          ...(session.metadata || {}),
+          ...(piObj.metadata || {}),
+          ...(piObj.metadata?.orderId ? {} : sessionOrderId ? { orderId: sessionOrderId } : {}),
+        },
+      },
+      retrievalFailure: null,
+    };
+  }
+
+  const piId = typeof session.payment_intent === 'string' ? session.payment_intent : null;
+  const effectiveStripeKey = process.env.STRIPE_SECRET_KEY ?? env.STRIPE_SECRET_KEY;
+  if (piId && effectiveStripeKey && effectiveStripeKey !== 'sk_test_placeholder') {
+    try {
+      const piObj = await stripe.paymentIntents.retrieve(piId);
+      return {
+        paymentIntent: {
+          ...piObj,
+          metadata: {
+            ...(session.metadata || {}),
+            ...(piObj.metadata || {}),
+            ...(piObj.metadata?.orderId ? {} : sessionOrderId ? { orderId: sessionOrderId } : {}),
+          },
+        },
+        retrievalFailure: null,
+      };
+    } catch (err: any) {
+      logStripeDiagnostic('resolveCheckoutSessionPaymentIntent', err, {
+        sessionId: session.id,
+        paymentIntentId: piId,
+      });
+      return {
+        paymentIntent: null,
+        retrievalFailure: classifyStripeSettlementRetrievalError(err),
+        rawError: err,
+      };
+    }
+  }
+
+  return { paymentIntent: null, retrievalFailure: null };
+}
+
+interface DisputeOrderHints {
+  metaOrderId: string | null;
+  paymentIntentId: string | null;
+  retrievalFailure: SettlementErrorClassification | null;
+  rawError?: any;
+}
+
+async function resolveDisputeOrderHints(dispute: Stripe.Dispute): Promise<DisputeOrderHints> {
+  const chargeObj =
+    typeof dispute.charge === 'object' && dispute.charge !== null
+      ? (dispute.charge as Stripe.Charge)
+      : null;
+  const chargeId =
+    typeof dispute.charge === 'string' ? dispute.charge : chargeObj?.id ?? null;
+
+  if (chargeObj) {
+    const piId =
+      typeof chargeObj.payment_intent === 'string'
+        ? chargeObj.payment_intent
+        : (chargeObj.payment_intent as Stripe.PaymentIntent | null)?.id ?? null;
+    return {
+      metaOrderId: (chargeObj.metadata?.orderId as string | undefined) ?? null,
+      paymentIntentId: piId,
+      retrievalFailure: null,
+    };
+  }
+
+  if (!chargeId) {
+    return { metaOrderId: null, paymentIntentId: null, retrievalFailure: null };
+  }
+
+  // Non-locking local linkage check before falling back to Stripe API outside any DB lock
+  const [ledgerMatch, settledOrderMatch, txMatch] = await Promise.all([
+    prisma.financialLedgerEntry.findFirst({
+      where: { stripeReferenceId: chargeId },
+      select: { orderId: true },
+    }),
+    prisma.order.findFirst({
+      where: { stripeSettledChargeId: chargeId },
+      select: { id: true },
+    }),
+    prisma.paymentTransaction.findFirst({
+      where: { providerTransactionId: chargeId },
+      select: { orderId: true },
+    }),
+  ]);
+
+  const localOrderId =
+    ledgerMatch?.orderId || settledOrderMatch?.id || txMatch?.orderId || null;
+  if (localOrderId) {
+    return { metaOrderId: localOrderId, paymentIntentId: null, retrievalFailure: null };
+  }
+
+  const effectiveStripeKey = process.env.STRIPE_SECRET_KEY ?? env.STRIPE_SECRET_KEY;
+  if (effectiveStripeKey && effectiveStripeKey !== 'sk_test_placeholder') {
+    try {
+      const stripeCharge = await stripe.charges.retrieve(chargeId);
+      const piId =
+        typeof stripeCharge.payment_intent === 'string'
+          ? stripeCharge.payment_intent
+          : (stripeCharge.payment_intent as Stripe.PaymentIntent | null)?.id ?? null;
+      return {
+        metaOrderId: (stripeCharge.metadata?.orderId as string | undefined) ?? null,
+        paymentIntentId: piId,
+        retrievalFailure: null,
+      };
+    } catch (err: any) {
+      logStripeDiagnostic('resolveDisputeOrderHints', err, {
+        disputeId: dispute.id,
+        chargeId,
+      });
+      return {
+        metaOrderId: null,
+        paymentIntentId: null,
+        retrievalFailure: classifyStripeSettlementRetrievalError(err),
+        rawError: err,
+      };
+    }
+  }
+
+  return { metaOrderId: null, paymentIntentId: null, retrievalFailure: null };
+}
+
 export async function processStripeWebhookEvent(
   event: Stripe.Event
 ): Promise<{ handled: boolean; duplicate?: boolean }> {
@@ -118,11 +262,21 @@ export async function processStripeWebhookEvent(
     return { handled: true, duplicate: true };
   }
 
-  // Retrieve Stripe BalanceTransaction strictly OUTSIDE Prisma transactions / row locks
+  // Retrieve external Stripe objects strictly OUTSIDE Prisma transactions / row locks
   let balanceResolution: ChargeBalanceResolution = {
     balanceTx: null,
     retrievalFailure: null,
   };
+  let sessionResolution: SessionPaymentIntentResolution = {
+    paymentIntent: null,
+    retrievalFailure: null,
+  };
+  let disputeHints: DisputeOrderHints = {
+    metaOrderId: null,
+    paymentIntentId: null,
+    retrievalFailure: null,
+  };
+
   if (event.type === 'charge.updated') {
     balanceResolution = await resolveChargeBalanceTransaction(
       event.data.object as Stripe.Charge
@@ -133,6 +287,28 @@ export async function processStripeWebhookEvent(
       throw (
         balanceResolution.rawError ??
         new Error(balanceResolution.retrievalFailure.message)
+      );
+    }
+  } else if (event.type === 'checkout.session.completed') {
+    sessionResolution = await resolveCheckoutSessionPaymentIntent(
+      event.data.object as Stripe.Checkout.Session
+    );
+    if (sessionResolution.retrievalFailure?.disposition === 'RETRY') {
+      throw (
+        sessionResolution.rawError ??
+        new Error(sessionResolution.retrievalFailure.message)
+      );
+    }
+  } else if (
+    event.type === 'charge.dispute.created' ||
+    event.type === 'charge.dispute.updated' ||
+    event.type === 'charge.dispute.closed'
+  ) {
+    disputeHints = await resolveDisputeOrderHints(event.data.object as Stripe.Dispute);
+    if (disputeHints.retrievalFailure?.disposition === 'RETRY') {
+      throw (
+        disputeHints.rawError ??
+        new Error(disputeHints.retrievalFailure.message)
       );
     }
   }
@@ -170,6 +346,34 @@ export async function processStripeWebhookEvent(
         let releasedWaitlistTierIds: string[] = [];
 
         switch (event.type) {
+          case 'checkout.session.completed': {
+            const session = event.data.object as Stripe.Checkout.Session;
+            if (sessionResolution.paymentIntent) {
+              const fulfillment = await handlePaymentIntentSucceeded(
+                tx,
+                sessionResolution.paymentIntent,
+                { throwOnAmountOrCurrencyMismatch: false }
+              );
+              shouldWakeOutbox = fulfillment.enqueuedEmail;
+              shouldWakeRefund = fulfillment.enqueuedRefund;
+            } else {
+              console.info('[StripeWebhook] checkout.session.completed ignored (unpaid or missing PaymentIntent)', {
+                eventId: event.id,
+                sessionId: session.id,
+                paymentStatus: session.payment_status,
+                orderId: session.metadata?.orderId || null,
+              });
+            }
+            break;
+          }
+
+          case 'checkout.session.expired': {
+            const session = event.data.object as Stripe.Checkout.Session;
+            const cancelResult = await handleCheckoutSessionExpired(tx, session);
+            releasedWaitlistTierIds = cancelResult.releasedTierIds;
+            break;
+          }
+
           case 'payment_intent.succeeded': {
             const paymentIntent = event.data.object as Stripe.PaymentIntent;
             const fulfillment = await handlePaymentIntentSucceeded(tx, paymentIntent, {
@@ -242,7 +446,7 @@ export async function processStripeWebhookEvent(
           case 'charge.dispute.updated':
           case 'charge.dispute.closed': {
             const dispute = event.data.object as Stripe.Dispute;
-            const dispRes = await handleDisputeEvent(tx, event.type, dispute);
+            const dispRes = await handleDisputeEvent(tx, event.type, dispute, disputeHints);
             shouldWakeSettlement = shouldWakeSettlement || dispRes.shouldWakeSettlement;
             break;
           }
@@ -275,7 +479,8 @@ export async function processStripeWebhookEvent(
           case 'payout.created':
           case 'payout.updated':
           case 'payout.paid':
-          case 'payout.failed': {
+          case 'payout.failed':
+          case 'payout.canceled': {
             const payout = event.data.object as Stripe.Payout;
             const stripeAccountId = (event as any).account as string | undefined;
             await handlePayoutEvent(tx, event.type, payout, stripeAccountId);
@@ -1112,20 +1317,7 @@ export async function handlePaymentIntentFailed(
   paymentIntent: Stripe.PaymentIntent
 ): Promise<void> {
   const orderId = paymentIntent.metadata?.orderId as string | undefined;
-
-  let order = orderId
-    ? await tx.order.findUnique({
-        where: { id: orderId },
-        include: { items: true },
-      })
-    : null;
-
-  if (!order && paymentIntent.id) {
-    order = await tx.order.findFirst({
-      where: { paymentReference: paymentIntent.id },
-      include: { items: true },
-    });
-  }
+  const order = await lockOrderByIdentifier(tx, orderId, paymentIntent.id);
 
   if (!order || order.status === OrderStatus.COMPLETED) {
     return;
@@ -1365,6 +1557,27 @@ export async function handlePaymentIntentCanceled(
   }
 
   return { cancelled: true, releasedTierIds: sortedTierIds };
+}
+
+async function handleCheckoutSessionExpired(
+  tx: Prisma.TransactionClient,
+  session: Stripe.Checkout.Session
+): Promise<{ cancelled: boolean; releasedTierIds: string[] }> {
+  const piId =
+    typeof session.payment_intent === 'string'
+      ? session.payment_intent
+      : (session.payment_intent as Stripe.PaymentIntent | null)?.id ?? null;
+  const metaOrderId = session.metadata?.orderId;
+
+  const syntheticPi = {
+    id: piId || `cs_expired_${session.id}`,
+    amount: session.amount_total ?? 0,
+    currency: session.currency || 'usd',
+    cancellation_reason: 'checkout_session_expired',
+    metadata: metaOrderId ? { orderId: metaOrderId } : {},
+  } as unknown as Stripe.PaymentIntent;
+
+  return handlePaymentIntentCanceled(tx, syntheticPi);
 }
 
 async function lockOrderByIdentifier(
@@ -1972,7 +2185,8 @@ async function handleRefundEvent(
 async function handleDisputeEvent(
   tx: Prisma.TransactionClient,
   eventType: string,
-  dispute: Stripe.Dispute
+  dispute: Stripe.Dispute,
+  preloadedHints?: Pick<DisputeOrderHints, 'metaOrderId' | 'paymentIntentId'>
 ): Promise<{ shouldWakeSettlement: boolean }> {
   const chargeId = typeof dispute.charge === 'string'
     ? dispute.charge
@@ -2007,32 +2221,25 @@ async function handleDisputeEvent(
         },
       });
     }
-
-    // 3. If still not found and Stripe key available, retrieve charge to inspect payment_intent
-    if (!order && env.STRIPE_SECRET_KEY && env.STRIPE_SECRET_KEY !== 'sk_test_placeholder') {
-      try {
-        const stripeCharge = await stripe.charges.retrieve(chargeId);
-        const piId = typeof stripeCharge.payment_intent === 'string'
-          ? stripeCharge.payment_intent
-          : (stripeCharge.payment_intent as Stripe.PaymentIntent)?.id;
-        const metaOrderId = stripeCharge.metadata?.orderId;
-        if (metaOrderId) {
-          order = await tx.order.findUnique({ where: { id: metaOrderId } });
-        }
-        if (!order && piId) {
-          order = await tx.order.findFirst({
-            where: { paymentReference: piId },
-          });
-        }
-      } catch (err: any) {
-        console.warn(`[Dispute] Could not retrieve charge ${chargeId}: ${err?.message}`);
-      }
-    }
   }
 
-  if (order?.id) {
+  // 3. Fall back to preloaded outside-transaction Stripe Charge hints (no Stripe API call inside tx)
+  if (!order && (preloadedHints?.metaOrderId || preloadedHints?.paymentIntentId)) {
+    order = await lockOrderByIdentifier(
+      tx,
+      preloadedHints.metaOrderId,
+      preloadedHints.paymentIntentId
+    );
+  } else if (order?.id) {
     await tx.$queryRaw`SELECT id FROM "Order" WHERE id = ${order.id} FOR UPDATE`;
     order = await tx.order.findUnique({ where: { id: order.id } });
+  }
+
+  if (order?.id && chargeId && !order.stripeSettledChargeId) {
+    await tx.order.update({
+      where: { id: order.id },
+      data: { stripeSettledChargeId: chargeId },
+    });
   }
 
   let status: 'needs_response' | 'under_review' | 'won' | 'lost' | 'warning_needs_response' = 'needs_response';
