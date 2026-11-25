@@ -1,6 +1,6 @@
 import crypto from 'crypto';
 import { Request, Response } from 'express';
-import { Role, AccountStatus } from '@prisma/client';
+import { Role, AccountStatus, Prisma } from '@prisma/client';
 import { env } from '../config/env.js';
 import { getRedisClient } from './redis.js';
 import { ServiceUnavailableError } from '../utils/errors.js';
@@ -10,17 +10,105 @@ export const SESSION_PREFIX = 'sess:';
 export const USER_SESSIONS_PREFIX = 'user_sessions:';
 export const USER_AUTH_CACHE_PREFIX = 'user_auth_cache:';
 export const USER_AUTH_VERSION_PREFIX = 'user_auth_ver:';
+export const USER_SESSION_VERSION_PREFIX = 'user_sess_ver:';
 
 export interface StoredSessionRecord {
   sessionId: string;
   userId: string;
   verifierHash: string;
   csrfToken: string;
+  sessionVersion?: number;
   createdAt: number;
   lastActiveAt: number;
   absoluteExpiresAt: number;
   ipAddress: string | null;
   userAgent: string | null;
+}
+
+const emergencySessionVersionFloor = new Map<string, { minVersion: number; recordedAt: number }>();
+
+export function recordEmergencySessionVersionFloor(userId: string, minVersion: number): void {
+  const existing = emergencySessionVersionFloor.get(userId);
+  if (!existing || minVersion > existing.minVersion) {
+    emergencySessionVersionFloor.set(userId, { minVersion, recordedAt: Date.now() });
+  }
+  if (emergencySessionVersionFloor.size > 1000) {
+    const cutoff = Date.now() - 60_000;
+    for (const [k, v] of emergencySessionVersionFloor.entries()) {
+      if (v.recordedAt < cutoff) {
+        emergencySessionVersionFloor.delete(k);
+      }
+    }
+  }
+}
+
+export function getEmergencySessionVersionFloor(userId: string): number | null {
+  const entry = emergencySessionVersionFloor.get(userId);
+  if (!entry) return null;
+  if (Date.now() - entry.recordedAt > 60_000) {
+    emergencySessionVersionFloor.delete(userId);
+    return null;
+  }
+  return entry.minVersion;
+}
+
+export function clearEmergencySessionVersionFloorForTests(): void {
+  emergencySessionVersionFloor.clear();
+}
+
+export async function getCachedUserSessionVersion(userId: string): Promise<number | null> {
+  try {
+    const redis = getRedisClient();
+    const raw = await redis.get(`${USER_SESSION_VERSION_PREFIX}${userId}`);
+    if (raw === null) return null;
+    const parsed = parseInt(raw, 10);
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+  } catch (err) {
+    wrapRedisError(err);
+  }
+}
+
+export async function setCachedUserSessionVersion(
+  userId: string,
+  sessionVersion: number
+): Promise<void> {
+  try {
+    const redis = getRedisClient();
+    const normalized = Number.isFinite(sessionVersion) && sessionVersion >= 0
+      ? Math.floor(sessionVersion)
+      : 0;
+    await redis.setPx(
+      `${USER_SESSION_VERSION_PREFIX}${userId}`,
+      String(normalized),
+      getUserAuthCacheTtlMs()
+    );
+  } catch (err) {
+    wrapRedisError(err);
+  }
+}
+
+/**
+ * Atomically persists a strictly monotonic durable session-version floor inside the
+ * same PostgreSQL transaction as a password reset or password change so every instance
+ * immediately rejects older sessions even if post-commit Redis invalidation fails.
+ */
+export async function recordDurableSessionInvalidationTx(
+  tx: Prisma.TransactionClient,
+  userId: string,
+  minSessionVersion: number
+): Promise<void> {
+  const normalized =
+    Number.isFinite(minSessionVersion) && minSessionVersion >= 0
+      ? Math.floor(minSessionVersion)
+      : 0;
+  await tx.$executeRaw`
+    INSERT INTO "SessionInvalidation" ("userId", "minSessionVersion", "updatedAt")
+    VALUES (${userId}, ${normalized}, NOW())
+    ON CONFLICT ("userId") DO UPDATE
+    SET
+      "minSessionVersion" = GREATEST("SessionInvalidation"."minSessionVersion", EXCLUDED."minSessionVersion"),
+      "updatedAt" = NOW()
+  `;
 }
 
 export interface IssuedSession {
@@ -96,6 +184,7 @@ function wrapRedisError(err: unknown): never {
  */
 export async function createSession(params: {
   userId: string;
+  sessionVersion?: number;
   ipAddress?: string | null;
   userAgent?: string | null;
   preserveCreatedAt?: number;
@@ -122,6 +211,10 @@ export async function createSession(params: {
       userId: params.userId,
       verifierHash,
       csrfToken,
+      sessionVersion:
+        typeof params.sessionVersion === 'number' && Number.isFinite(params.sessionVersion)
+          ? Math.floor(params.sessionVersion)
+          : 0,
       createdAt,
       lastActiveAt: now,
       absoluteExpiresAt,
@@ -226,6 +319,7 @@ export async function validateAndTouchSession(
 export async function rotateSession(params: {
   oldSessionId?: string | null;
   userId: string;
+  sessionVersion?: number;
   ipAddress?: string | null;
   userAgent?: string | null;
   preserveLifetime?: boolean;
@@ -234,6 +328,7 @@ export async function rotateSession(params: {
     const redis = getRedisClient();
     let preserveCreatedAt: number | undefined;
     let preserveAbsoluteExpiresAt: number | undefined;
+    let preserveSessionVersion: number | undefined = params.sessionVersion;
 
     if (params.oldSessionId) {
       const oldKey = `${SESSION_PREFIX}${params.oldSessionId}`;
@@ -241,6 +336,9 @@ export async function rotateSession(params: {
       if (existingRaw) {
         try {
           const parsed = JSON.parse(existingRaw) as StoredSessionRecord;
+          if (parsed.userId === params.userId && preserveSessionVersion === undefined) {
+            preserveSessionVersion = parsed.sessionVersion;
+          }
           if (params.preserveLifetime && parsed.userId === params.userId) {
             preserveCreatedAt = parsed.createdAt;
             preserveAbsoluteExpiresAt = parsed.absoluteExpiresAt;
@@ -256,6 +354,7 @@ export async function rotateSession(params: {
 
     return await createSession({
       userId: params.userId,
+      sessionVersion: preserveSessionVersion,
       ipAddress: params.ipAddress,
       userAgent: params.userAgent,
       preserveCreatedAt,
@@ -459,10 +558,14 @@ export async function populateUserAuthCacheAtomically(
 export async function invalidateUserAuthCache(userId: string): Promise<number> {
   try {
     const redis = getRedisClient();
-    return await redis.invalidateUserCacheAtomically(
-      `${USER_AUTH_CACHE_PREFIX}${userId}`,
-      `${USER_AUTH_VERSION_PREFIX}${userId}`
-    );
+    const [nextVer] = await Promise.all([
+      redis.invalidateUserCacheAtomically(
+        `${USER_AUTH_CACHE_PREFIX}${userId}`,
+        `${USER_AUTH_VERSION_PREFIX}${userId}`
+      ),
+      redis.del(`${USER_SESSION_VERSION_PREFIX}${userId}`),
+    ]);
+    return nextVer;
   } catch (err) {
     wrapRedisError(err);
   }

@@ -190,6 +190,8 @@ model User {
   id                   String        @id @default(uuid())
   email                String        @unique
   passwordHash         String?
+  passwordChangedAt    DateTime?
+  sessionVersion       Int           @default(0)
   name                 String
   role                 Role          @default(ATTENDEE)
   status               AccountStatus @default(ACTIVE)
@@ -227,8 +229,10 @@ model User {
   transfers          OrganizerTransfer[]     @relation("OrganizerTransfers")
   initiatedTransfers OrganizerTransfer[]     @relation("InitiatedTransfers")
   connectedPayouts   ConnectedPayout[]       @relation("OrganizerPayouts")
-  verificationCodes  EmailVerificationCode[]
-  adminAuditLogs     AdminAuditLog[]         @relation("AdminActorLogs")
+  verificationCodes    EmailVerificationCode[]
+  passwordResetTokens  PasswordResetToken[]
+  sessionInvalidation  SessionInvalidation?
+  adminAuditLogs       AdminAuditLog[]         @relation("AdminActorLogs")
 
   staffAssignments        EventStaff[]           @relation("StaffMemberAssignments")
   staffAssignmentsCreated EventStaff[]           @relation("StaffAssignmentsCreated")
@@ -257,6 +261,26 @@ model EmailVerificationCode {
 
   @@index([userId, createdAt])
   @@index([email, createdAt])
+}
+
+model PasswordResetToken {
+  id        String    @id @default(uuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId, usedAt, expiresAt])
+  @@index([expiresAt])
+}
+
+model SessionInvalidation {
+  userId            String   @id
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  minSessionVersion Int      @default(0)
+  updatedAt         DateTime @default(now()) @updatedAt
 }
 
 model AdminAuditLog {
@@ -1114,6 +1138,7 @@ enum EmailOutboxType {
   BUYER_REFUND_MANUAL_REVIEW
   EVENT_CANCELLED_BUYER
   EVENT_CANCELLED_ORGANIZER
+  PASSWORD_RESET
 }
 
 enum OrderRefundStatus {

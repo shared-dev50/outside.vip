@@ -47,6 +47,7 @@ export const AuthFormCard: React.FC<AuthFormCardProps> = ({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [recoverySent, setRecoverySent] = useState(false);
+  const [recoveryMessage, setRecoveryMessage] = useState<string | null>(null);
 
   // Unified passwordless OTP sign-in state (strictly for existing ACTIVE passwordless accounts)
   const [otpRequested, setOtpRequested] = useState(false);
@@ -58,6 +59,7 @@ export const AuthFormCard: React.FC<AuthFormCardProps> = ({
     setMode(effectiveInitialMode);
     setError(null);
     setRecoverySent(false);
+    setRecoveryMessage(null);
     setOtpRequested(false);
     setOtpCode('');
     setOtpInfoMessage(null);
@@ -75,6 +77,7 @@ export const AuthFormCard: React.FC<AuthFormCardProps> = ({
     setMode(nextMode);
     setError(null);
     setRecoverySent(false);
+    setRecoveryMessage(null);
     setOtpRequested(false);
     setOtpCode('');
     setOtpInfoMessage(null);
@@ -116,11 +119,27 @@ export const AuthFormCard: React.FC<AuthFormCardProps> = ({
     setError(null);
 
     if (mode === 'forgot-password') {
-      if (!email.trim()) {
+      const cleanEmail = email.trim();
+      if (!cleanEmail) {
         setError('Please enter the email address associated with your account.');
         return;
       }
-      setRecoverySent(true);
+
+      setIsSubmitting(true);
+      try {
+        const res = await api.auth.forgotPassword({ email: cleanEmail });
+        setRecoveryMessage(
+          res.message ||
+            'If an account with that email address exists, we have sent password reset instructions.'
+        );
+        setRecoverySent(true);
+      } catch (err: any) {
+        setError(
+          err?.message || 'Unable to process password reset request. Please try again.'
+        );
+      } finally {
+        setIsSubmitting(false);
+      }
       return;
     }
 
@@ -255,7 +274,8 @@ export const AuthFormCard: React.FC<AuthFormCardProps> = ({
             <div>
               <p className="font-semibold mb-1">Password recovery instructions requested</p>
               <p className="text-emerald-700 leading-relaxed">
-                If an account exists for <strong>{email}</strong>, password recovery instructions will be sent to that address.
+                {recoveryMessage ||
+                  'If an account with that email address exists, we have sent password reset instructions.'}
               </p>
             </div>
           </div>
@@ -449,7 +469,9 @@ export const AuthFormCard: React.FC<AuthFormCardProps> = ({
                     ? otpRequested
                       ? 'Verifying code...'
                       : 'Sending code...'
-                    : 'Creating account...'
+                    : mode === 'forgot-password'
+                      ? 'Sending instructions...'
+                      : 'Creating account...'
                 : mode === 'login'
                   ? 'Sign In'
                   : mode === 'otp-login'

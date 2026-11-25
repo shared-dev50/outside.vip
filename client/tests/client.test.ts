@@ -1,0 +1,910 @@
+import fs from 'fs';
+import path from 'path';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import {
+  api,
+  resolveApiBaseUrl,
+  buildApiUrl,
+  getActiveCsrfToken,
+  setActiveCsrfToken,
+} from '../src/lib/api';
+
+describe('Outside.vip Client Library', () => {
+  it('should define public API service routes', () => {
+    expect(api.events).toBeDefined();
+    expect(typeof api.events.list).toBe('function');
+    expect(typeof api.events.bySlug).toBe('function');
+    expect(typeof api.events.featured).toBe('function');
+    expect(typeof api.events.cities).toBe('function');
+    expect(api.auth).toBeDefined();
+    expect(typeof api.auth.login).toBe('function');
+    expect(typeof api.auth.register).toBe('function');
+    expect(typeof api.auth.logout).toBe('function');
+    expect(typeof api.auth.logoutAll).toBe('function');
+    expect(typeof api.auth.changePassword).toBe('function');
+    expect(typeof api.auth.csrf).toBe('function');
+    expect(typeof api.auth.me).toBe('function');
+    expect(typeof api.auth.verifyEmail).toBe('function');
+    expect(typeof api.auth.resendVerification).toBe('function');
+    expect(typeof api.organizer.getWorkspace).toBe('function');
+    expect(typeof api.organizer.upsertWorkspace).toBe('function');
+    expect(api.staff).toBeDefined();
+    expect(typeof api.staff.getTeam).toBe('function');
+    expect(typeof api.staff.invite).toBe('function');
+    expect(typeof api.staff.resendInvitation).toBe('function');
+    expect(typeof api.staff.revokeInvitation).toBe('function');
+    expect(typeof api.staff.revokeMember).toBe('function');
+  });
+
+  it('sends credentials: include and attaches X-CSRF-Token on state-changing requests without storing tokens in localStorage', async () => {
+    setActiveCsrfToken('csrf_test_token_256bit');
+    expect(getActiveCsrfToken()).toBe('csrf_test_token_256bit');
+
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementationOnce(() =>
+      Promise.resolve({
+        ok: true,
+        headers: { get: () => 'csrf_rotated_token_256bit' },
+        json: () =>
+          Promise.resolve({
+            success: true,
+            data: { message: 'Logged out' },
+          }),
+      } as any)
+    );
+
+    await api.auth.logout();
+
+    expect(fetchSpy).toHaveBeenCalledWith(
+      '/api/auth/logout',
+      expect.objectContaining({
+        method: 'POST',
+        credentials: 'include',
+        headers: expect.objectContaining({
+          'X-CSRF-Token': 'csrf_test_token_256bit',
+        }),
+      })
+    );
+    // Logout clears the in-memory CSRF token
+    expect(getActiveCsrfToken()).toBeNull();
+
+    fetchSpy.mockRestore();
+  });
+
+  it('api.events.list builds correct query string with filters and sorting', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementationOnce(() =>
+      Promise.resolve({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            success: true,
+            data: {
+              events: [],
+              pagination: { page: 1, limit: 12, total: 0, totalPages: 0, hasMore: false },
+            },
+          }),
+      } as any)
+    );
+
+    await api.events.list({
+      search: 'Warehouse',
+      category: 'NIGHTLIFE',
+      city: 'Nairobi',
+      timeFilter: 'this_weekend',
+      sortBy: 'price_asc',
+    });
+
+    expect(fetchSpy).toHaveBeenCalled();
+    const calledUrl = fetchSpy.mock.calls[0][0] as string;
+    expect(calledUrl).toContain('/api/events?');
+    expect(calledUrl).toContain('search=Warehouse');
+    expect(calledUrl).toContain('category=NIGHTLIFE');
+    expect(calledUrl).toContain('city=Nairobi');
+    expect(calledUrl).toContain('timeFilter=this_weekend');
+    expect(calledUrl).toContain('sortBy=price_asc');
+
+    fetchSpy.mockRestore();
+  });
+
+  it('api.events.featured calls /api/events/featured', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementationOnce(() =>
+      Promise.resolve({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            success: true,
+            data: { events: [] },
+          }),
+      } as any)
+    );
+
+    await api.events.featured();
+    expect(fetchSpy).toHaveBeenCalled();
+    const calledUrl = fetchSpy.mock.calls[0][0] as string;
+    expect(calledUrl).toContain('/api/events/featured');
+
+    fetchSpy.mockRestore();
+  });
+
+  it('api.events.cities calls /api/events/cities', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementationOnce(() =>
+      Promise.resolve({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            success: true,
+            data: { cities: ['Nairobi', 'Kilifi'] },
+          }),
+      } as any)
+    );
+
+    const res = await api.events.cities();
+    expect(fetchSpy).toHaveBeenCalled();
+    expect(res.cities).toEqual(['Nairobi', 'Kilifi']);
+
+    fetchSpy.mockRestore();
+  });
+
+  it('should define organizer API methods and invoke correct endpoints', async () => {
+    expect(api.organizer).toBeDefined();
+    expect(typeof api.organizer.getDashboard).toBe('function');
+    expect(typeof api.organizer.listEvents).toBe('function');
+    expect(typeof api.organizer.getEvent).toBe('function');
+    expect(typeof api.organizer.getPayoutDetails).toBe('function');
+    expect(typeof api.organizer.updatePayoutDetails).toBe('function');
+    expect(typeof api.organizer.createEvent).toBe('function');
+    expect(typeof api.organizer.updateEvent).toBe('function');
+    expect(typeof api.organizer.publishEvent).toBe('function');
+    expect(typeof api.organizer.unpublishEvent).toBe('function');
+    expect(typeof api.organizer.deleteEvent).toBe('function');
+
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(() =>
+      Promise.resolve({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            success: true,
+            data: {
+              totalEvents: 3,
+              publishedEvents: 2,
+              draftEvents: 1,
+              ticketsSold: 120,
+              grossRevenueInCents: 450000,
+              grossRevenueFormatted: '$4,500',
+              currency: 'USD',
+            },
+          }),
+      } as any)
+    );
+
+    await api.organizer.getDashboard();
+    expect(fetchSpy).toHaveBeenCalledWith(
+      '/api/organizer/dashboard',
+      expect.objectContaining({
+        headers: expect.any(Object),
+      })
+    );
+
+    await api.organizer.getPayoutDetails();
+    expect(fetchSpy).toHaveBeenCalledWith(
+      '/api/organizer/payout-details',
+      expect.objectContaining({
+        headers: expect.any(Object),
+      })
+    );
+
+    await api.organizer.updatePayoutDetails({
+      orgType: 'Company',
+      registeredName: 'Test Org Ltd',
+      country: 'Kenya',
+      contactPersonName: 'Test Contact',
+      contactEmail: 'contact@test.com',
+      accountHolderName: 'Test Org Ltd',
+      bankName: 'Test Bank',
+      bankCountry: 'Kenya',
+      accountCurrency: 'USD',
+      accountNumber: '12345678',
+      confirmAccountNumber: '12345678',
+    });
+    expect(fetchSpy).toHaveBeenCalledWith(
+      '/api/organizer/payout-details',
+      expect.objectContaining({
+        method: 'PUT',
+        headers: expect.any(Object),
+        body: expect.stringContaining('Test Org Ltd'),
+      })
+    );
+
+    await api.organizer.publishEvent('evt-123');
+    expect(fetchSpy).toHaveBeenCalledWith(
+      '/api/organizer/events/evt-123/publish',
+      expect.objectContaining({
+        method: 'POST',
+      })
+    );
+
+    await api.organizer.unpublishEvent('evt-123');
+    expect(fetchSpy).toHaveBeenCalledWith(
+      '/api/organizer/events/evt-123/unpublish',
+      expect.objectContaining({
+        method: 'POST',
+      })
+    );
+
+    await api.organizer.getOrders({ status: 'PAID,CANCELLED', page: 2, limit: 10 });
+    expect(fetchSpy).toHaveBeenCalledWith(
+      '/api/organizer/orders?status=PAID%2CCANCELLED&page=2&limit=10',
+      expect.objectContaining({
+        headers: expect.any(Object),
+      })
+    );
+
+    fetchSpy.mockRestore();
+  });
+
+  it('api.organizer.uploadCoverImage handles signed upload to Cloudinary', async () => {
+    const fakeFile = new File(['dummy-content'], 'flyer.png', { type: 'image/png' });
+
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((url) => {
+      if (typeof url === 'string' && url.includes('/organizer/upload/sign')) {
+        return Promise.resolve({
+          ok: true,
+          json: () =>
+            Promise.resolve({
+              success: true,
+              data: {
+                cloudName: 'test-cloud',
+                apiKey: 'test-key',
+                timestamp: 1234567890,
+                folder: 'outside-vip/event-covers',
+                signature: 'test-sig',
+                uploadUrl: 'https://api.cloudinary.com/v1_1/test-cloud/image/upload',
+              },
+            }),
+        } as any);
+      }
+
+      if (typeof url === 'string' && url.includes('cloudinary.com')) {
+        return Promise.resolve({
+          ok: true,
+          json: () =>
+            Promise.resolve({
+              secure_url: 'https://res.cloudinary.com/test-cloud/image/upload/v1234/outside-vip/event-covers/test.png',
+              public_id: 'outside-vip/event-covers/test',
+            }),
+        } as any);
+      }
+
+      return Promise.resolve({ ok: false } as any);
+    });
+
+    const res = await api.organizer.uploadCoverImage(fakeFile);
+    expect(res.secure_url).toContain('https://res.cloudinary.com/test-cloud/image/upload');
+    expect(res.public_id).toBe('outside-vip/event-covers/test');
+    expect(res.thumbnailUrl).toContain('c_fill,g_auto,w_600,h_400');
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+
+    fetchSpy.mockRestore();
+  });
+
+  it('api.checkout.createSession invokes POST /api/checkout/create-session', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementationOnce(() =>
+      Promise.resolve({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            success: true,
+            data: {
+              orderNumber: 'OUT-2026-99999',
+              orderAccessToken: 'oat_test_123',
+              clientSecret: 'pi_test_123_secret_xyz',
+              publishableKey: 'pk_test_sample',
+              totalInCents: 10000,
+              currency: 'USD',
+              expiresAt: new Date().toISOString(),
+            },
+          }),
+      } as any)
+    );
+
+    const res = await api.checkout.createSession({
+      eventId: 'evt-123',
+      items: [{ ticketTierId: 'tier-1', quantity: 2 }],
+      customerEmail: 'test@outside.vip',
+      customerName: 'Test Buyer',
+      customerPhone: '+15551234567',
+    });
+
+    expect(fetchSpy).toHaveBeenCalledWith(
+      '/api/checkout/create-session',
+      expect.objectContaining({
+        method: 'POST',
+        body: expect.stringContaining('"eventId":"evt-123"'),
+      })
+    );
+    expect(res.clientSecret).toBe('pi_test_123_secret_xyz');
+    expect(res.orderNumber).toBe('OUT-2026-99999');
+
+    fetchSpy.mockRestore();
+  });
+
+  it('api.orders.getByOrderNumber invokes GET /api/orders/:orderNumber with access token query', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementationOnce(() =>
+      Promise.resolve({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            success: true,
+            data: {
+              order: {
+                id: 'ord-123',
+                orderNumber: 'OUT-2026-99999',
+                status: 'COMPLETED',
+              },
+            },
+          }),
+      } as any)
+    );
+
+    const res = await api.orders.getByOrderNumber('OUT-2026-99999', 'oat_test_token_xyz');
+
+    expect(fetchSpy).toHaveBeenCalled();
+    const calledUrl = fetchSpy.mock.calls[0][0] as string;
+    expect(calledUrl).toBe('/api/orders/OUT-2026-99999?token=oat_test_token_xyz');
+    expect(res.order.orderNumber).toBe('OUT-2026-99999');
+
+    fetchSpy.mockRestore();
+  });
+
+  describe('Checkout validation and idempotency contracts', () => {
+    it('validates email format accurately', () => {
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      expect(emailRegex.test('attendee@outside.vip')).toBe(true);
+      expect(emailRegex.test('attendee+tag@sub.domain.com')).toBe(true);
+      expect(emailRegex.test('')).toBe(false);
+      expect(emailRegex.test('invalid-email')).toBe(false);
+      expect(emailRegex.test('invalid@')).toBe(false);
+      expect(emailRegex.test('@outside.vip')).toBe(false);
+      expect(emailRegex.test('attendee@vip')).toBe(false);
+    });
+
+    it('generates consistent snapshot keys for session reuse without creating duplicate orders', () => {
+      const selection1 = {
+        items: [['tier-1', 2], ['tier-2', 1]].sort(([a], [b]) => String(a).localeCompare(String(b))),
+        name: 'Jane Doe',
+        email: 'jane@example.com'.toLowerCase(),
+        phone: '+254700000000',
+      };
+
+      const selection2 = {
+        items: [['tier-2', 1], ['tier-1', 2]].sort(([a], [b]) => String(a).localeCompare(String(b))),
+        name: 'Jane Doe',
+        email: 'JANE@example.com'.toLowerCase(),
+        phone: '+254700000000',
+      };
+
+      const selection3 = {
+        items: [['tier-1', 3]].sort(([a], [b]) => String(a).localeCompare(String(b))),
+        name: 'Jane Doe',
+        email: 'jane@example.com'.toLowerCase(),
+        phone: '+254700000000',
+      };
+
+      const key1 = JSON.stringify(selection1);
+      const key2 = JSON.stringify(selection2);
+      const key3 = JSON.stringify(selection3);
+
+      expect(key1).toBe(key2); // Identical selection, normalized email, and phone reuse the session
+      expect(key1).not.toBe(key3); // Changed selection triggers a new session
+    });
+
+    it('supports required customerPhone and optional marketingConsent in api.checkout.createSession payload', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementationOnce(() =>
+        Promise.resolve({
+          ok: true,
+          json: () =>
+            Promise.resolve({
+              success: true,
+              data: {
+                orderNumber: 'OUT-2026-11111',
+                orderAccessToken: 'oat_test_phone_123',
+                clientSecret: 'pi_test_phone_secret',
+                publishableKey: 'pk_test_sample',
+                totalInCents: 5000,
+                currency: 'USD',
+                expiresAt: new Date().toISOString(),
+              },
+            }),
+        } as any)
+      );
+
+      const res = await api.checkout.createSession({
+        eventId: 'evt-456',
+        items: [{ ticketTierId: 'tier-1', quantity: 1 }],
+        customerEmail: 'buyer@outside.vip',
+        customerName: 'Buyer Name',
+        customerPhone: '+254712345678',
+        marketingConsent: true,
+      });
+
+      expect(fetchSpy).toHaveBeenCalledWith(
+        '/api/checkout/create-session',
+        expect.objectContaining({
+          body: expect.stringContaining('"customerPhone":"+254712345678"'),
+        })
+      );
+      expect(fetchSpy).toHaveBeenCalledWith(
+        '/api/checkout/create-session',
+        expect.objectContaining({
+          body: expect.stringContaining('"marketingConsent":true'),
+        })
+      );
+      expect(res.orderNumber).toBe('OUT-2026-11111');
+
+      fetchSpy.mockRestore();
+    });
+  });
+
+  describe('API base URL resolution and endpoint composition', () => {
+    it('routes proxied Render and custom domain URLs to relative /api so requests use the Vercel proxy', () => {
+      expect(resolveApiBaseUrl('https://outside-vip.onrender.com/api')).toBe('/api');
+      expect(resolveApiBaseUrl('https://outside-vip.onrender.com/api/')).toBe('/api');
+      expect(resolveApiBaseUrl('https://outside-vip.onrender.com')).toBe('/api');
+      expect(resolveApiBaseUrl('https://outside-vip.onrender.com/')).toBe('/api');
+      expect(resolveApiBaseUrl('https://outside.vip')).toBe('/api');
+      expect(resolveApiBaseUrl('https://www.outside.vip')).toBe('/api');
+      expect(resolveApiBaseUrl('https://outside-vip.vercel.app')).toBe('/api');
+    });
+
+    it('appends /api if an explicit non-proxied base URL is provided without /api', () => {
+      expect(resolveApiBaseUrl('http://localhost:4000')).toBe('http://localhost:4000/api');
+      expect(resolveApiBaseUrl('http://localhost:4000/')).toBe('http://localhost:4000/api');
+      expect(resolveApiBaseUrl('http://localhost:4000/api')).toBe('http://localhost:4000/api');
+    });
+
+    it('defaults to /api for relative path or undefined in local dev and production', () => {
+      expect(resolveApiBaseUrl('/api')).toBe('/api');
+      expect(resolveApiBaseUrl('/api/')).toBe('/api');
+      expect(resolveApiBaseUrl('')).toBe('/api');
+      expect(resolveApiBaseUrl(undefined)).toBe('/api');
+      expect(resolveApiBaseUrl('   ')).toBe('/api');
+    });
+
+    it('builds relative endpoint URLs for the /api proxy without duplicating /api', () => {
+      expect(buildApiUrl('/events', '/api')).toBe('/api/events');
+      expect(buildApiUrl('/api/events', '/api')).toBe('/api/events');
+      expect(buildApiUrl('events', '/api')).toBe('/api/events');
+      expect(buildApiUrl('/events?sortBy=date_asc&limit=12', '/api')).toBe(
+        '/api/events?sortBy=date_asc&limit=12'
+      );
+      expect(buildApiUrl('/orders/OUT-2026-99999/tickets/pdf?token=abc', '/api')).toBe(
+        '/api/orders/OUT-2026-99999/tickets/pdf?token=abc'
+      );
+    });
+
+    it('builds full endpoint URLs for explicit custom base without duplicating /api', () => {
+      const customBase = 'http://localhost:4000/api';
+      expect(buildApiUrl('/events', customBase)).toBe('http://localhost:4000/api/events');
+      expect(buildApiUrl('/api/events', customBase)).toBe('http://localhost:4000/api/events');
+      expect(buildApiUrl('events', customBase)).toBe('http://localhost:4000/api/events');
+    });
+
+    it('omits Content-Type: application/json on bodyless GET requests to avoid unnecessary CORS preflights', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementationOnce(() =>
+        Promise.resolve({
+          ok: true,
+          json: () =>
+            Promise.resolve({
+              success: true,
+              data: { events: [] },
+            }),
+        } as any)
+      );
+
+      await api.events.featured();
+
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      const requestInit = fetchSpy.mock.calls[0][1] as RequestInit;
+      const headers = (requestInit.headers || {}) as Record<string, string>;
+      expect(headers['Content-Type']).toBeUndefined();
+      expect(requestInit.credentials).toBe('include');
+
+      fetchSpy.mockRestore();
+    });
+  });
+
+  describe('Vercel production routing and SPA rewrite configuration', () => {
+    // Tests verify Vercel deployment rewrites prevent 404s on Stripe return & deep links
+    it('client/vercel.json and root vercel.json exist and are syntactically valid JSON', () => {
+      const clientConfigPath = path.resolve(__dirname, '../vercel.json');
+      const rootConfigPath = path.resolve(__dirname, '../../vercel.json');
+
+      expect(fs.existsSync(clientConfigPath)).toBe(true);
+      expect(fs.existsSync(rootConfigPath)).toBe(true);
+
+      const clientConfig = JSON.parse(fs.readFileSync(clientConfigPath, 'utf8'));
+      const rootConfig = JSON.parse(fs.readFileSync(rootConfigPath, 'utf8'));
+
+      expect(clientConfig.rewrites).toBeDefined();
+      expect(Array.isArray(clientConfig.rewrites)).toBe(true);
+      expect(rootConfig.rewrites).toBeDefined();
+      expect(Array.isArray(rootConfig.rewrites)).toBe(true);
+    });
+
+    it('contains /r short-link, crawler /events/:slug, API proxy, and SPA catch-all rules in order without (?i)', () => {
+      const clientConfigPath = path.resolve(__dirname, '../vercel.json');
+      const rootConfigPath = path.resolve(__dirname, '../../vercel.json');
+      const clientRaw = fs.readFileSync(clientConfigPath, 'utf8');
+      const rootRaw = fs.readFileSync(rootConfigPath, 'utf8');
+
+      // Unsupported PCRE inline (?i) flag must not appear in Vercel config
+      expect(clientRaw).not.toContain('(?i)');
+      expect(rootRaw).not.toContain('(?i)');
+
+      const clientConfig = JSON.parse(clientRaw);
+      const rootConfig = JSON.parse(rootRaw);
+      expect(clientConfig).toEqual(rootConfig);
+
+      const rewrites = clientConfig.rewrites as Array<{
+        source: string;
+        destination: string;
+        has?: Array<{ type: string; key: string; value: string }>;
+      }>;
+      expect(rewrites.length).toBeGreaterThanOrEqual(4);
+
+      const shortLinkRewrite = rewrites.find((r) => r.source === '/r/:path*');
+      expect(shortLinkRewrite).toBeDefined();
+      expect(shortLinkRewrite!.destination).toBe('https://outside-vip.onrender.com/r/:path*');
+
+      const crawlerRewrite = rewrites.find((r) => r.source === '/events/:slug');
+      expect(crawlerRewrite).toBeDefined();
+      expect(crawlerRewrite!.destination).toBe('https://outside-vip.onrender.com/events/:slug');
+      expect(crawlerRewrite!.has?.[0]?.type).toBe('header');
+      expect(crawlerRewrite!.has?.[0]?.key).toBe('user-agent');
+      const crawlerRegex = new RegExp(crawlerRewrite!.has![0].value);
+      expect(crawlerRegex.test('WhatsApp/2.21.12.21 A')).toBe(true);
+      expect(crawlerRegex.test('WHATSAPP/2.21.12.21 A')).toBe(true);
+      expect(crawlerRegex.test('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/120.0.0.0')).toBe(false);
+
+      // Rule 3: API requests route to Render backend
+      const apiRewrite = rewrites.find((r) => r.source === '/api/:path*');
+      expect(apiRewrite).toBeDefined();
+      expect(apiRewrite!.destination).toBe('https://outside-vip.onrender.com/api/:path*');
+
+      // Rule 4: SPA catch-all routes to /index.html
+      const spaCatchAll = rewrites.find((r) => r.source === '/(.*)');
+      expect(spaCatchAll).toBeDefined();
+      expect(spaCatchAll!.destination).toBe('/index.html');
+
+      // Crucial ordering: /r -> crawler /events/:slug -> /api -> SPA catch-all
+      const shortLinkIndex = rewrites.indexOf(shortLinkRewrite!);
+      const crawlerIndex = rewrites.indexOf(crawlerRewrite!);
+      const apiIndex = rewrites.indexOf(apiRewrite!);
+      const spaIndex = rewrites.indexOf(spaCatchAll!);
+      expect(shortLinkIndex).toBeLessThan(crawlerIndex);
+      expect(crawlerIndex).toBeLessThan(apiIndex);
+      expect(apiIndex).toBeLessThan(spaIndex);
+    });
+
+    it('matches Stripe onboarding return and refresh flows to /index.html', () => {
+      const clientConfigPath = path.resolve(__dirname, '../vercel.json');
+      const clientConfig = JSON.parse(fs.readFileSync(clientConfigPath, 'utf8'));
+      const rewrites = clientConfig.rewrites as Array<{ source: string; destination: string }>;
+
+      function resolveRewrite(requestPath: string): { destination: string; type: 'api' | 'spa' } {
+        for (const rule of rewrites) {
+          if (rule.source === '/api/:path*' && requestPath.startsWith('/api')) {
+            return { destination: rule.destination, type: 'api' };
+          }
+          if (rule.source === '/(.*)') {
+            return { destination: rule.destination, type: 'spa' };
+          }
+        }
+        return { destination: requestPath, type: 'spa' };
+      }
+
+      expect(resolveRewrite('/organizer/finance')).toEqual({
+        destination: '/index.html',
+        type: 'spa',
+      });
+
+      expect(resolveRewrite('/organizer/finance?stripe_return=true')).toEqual({
+        destination: '/index.html',
+        type: 'spa',
+      });
+
+      expect(resolveRewrite('/organizer/finance?stripe_refresh=true')).toEqual({
+        destination: '/index.html',
+        type: 'spa',
+      });
+
+      expect(resolveRewrite('/events')).toEqual({
+        destination: '/index.html',
+        type: 'spa',
+      });
+      expect(resolveRewrite('/events/outside-music-fest-2026')).toEqual({
+        destination: '/index.html',
+        type: 'spa',
+      });
+      expect(resolveRewrite('/scanner')).toEqual({
+        destination: '/index.html',
+        type: 'spa',
+      });
+      expect(resolveRewrite('/orders/OUT-2026-99999')).toEqual({
+        destination: '/index.html',
+        type: 'spa',
+      });
+
+      expect(resolveRewrite('/api/organizer/finance/account')).toEqual({
+        destination: 'https://outside-vip.onrender.com/api/:path*',
+        type: 'api',
+      });
+      expect(resolveRewrite('/api/events')).toEqual({
+        destination: 'https://outside-vip.onrender.com/api/:path*',
+        type: 'api',
+      });
+    });
+
+    it('routes /events/:slug crawlers to Render, /events/:slug humans and /events Discover to SPA, and preserves /r/:slug', () => {
+      const rootConfigPath = path.resolve(__dirname, '../../vercel.json');
+      const rootConfig = JSON.parse(fs.readFileSync(rootConfigPath, 'utf8'));
+      const rewrites = rootConfig.rewrites as Array<{
+        source: string;
+        destination: string;
+        has?: Array<{ type: string; key: string; value: string }>;
+      }>;
+
+      function simulateVercelRewrite(requestPath: string, userAgent: string): string {
+        for (const rule of rewrites) {
+          let pathMatches = false;
+          if (rule.source === '/r/:path*') {
+            pathMatches = /^\/r(?:\/.*)?$/.test(requestPath);
+          } else if (rule.source === '/events/:slug') {
+            pathMatches = /^\/events\/[^/]+$/.test(requestPath);
+          } else if (rule.source === '/api/:path*') {
+            pathMatches = /^\/api(?:\/.*)?$/.test(requestPath);
+          } else if (rule.source === '/(.*)') {
+            pathMatches = true;
+          }
+
+          if (!pathMatches) continue;
+
+          if (rule.has && rule.has.length > 0) {
+            const allMatch = rule.has.every((cond) => {
+              if (cond.type === 'header' && cond.key.toLowerCase() === 'user-agent') {
+                return new RegExp(cond.value).test(userAgent);
+              }
+              return false;
+            });
+            if (!allMatch) continue;
+          }
+
+          return rule.destination;
+        }
+        return requestPath;
+      }
+
+      const humanUA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36';
+      const crawlerUA = 'Twitterbot/1.0';
+      const upperCrawlerUA = 'FACEBOOKEXTERNALHIT/1.1';
+
+      // /events/:slug crawlers -> Render crawler endpoint
+      expect(simulateVercelRewrite('/events/sol-fest-2026', crawlerUA)).toBe(
+        'https://outside-vip.onrender.com/events/:slug'
+      );
+      expect(simulateVercelRewrite('/events/sol-fest-2026', upperCrawlerUA)).toBe(
+        'https://outside-vip.onrender.com/events/:slug'
+      );
+
+      // /events/:slug human browsers -> SPA index.html (no loop)
+      expect(simulateVercelRewrite('/events/sol-fest-2026', humanUA)).toBe('/index.html');
+
+      // /events (Discover page) -> SPA index.html even for crawlers
+      expect(simulateVercelRewrite('/events', crawlerUA)).toBe('/index.html');
+      expect(simulateVercelRewrite('/events', humanUA)).toBe('/index.html');
+
+      // /r/:slug short links preserved for both humans and crawlers
+      expect(simulateVercelRewrite('/r/vip-launch', humanUA)).toBe(
+        'https://outside-vip.onrender.com/r/:path*'
+      );
+      expect(simulateVercelRewrite('/r/vip-launch', crawlerUA)).toBe(
+        'https://outside-vip.onrender.com/r/:path*'
+      );
+    });
+  });
+
+  describe('api.staff Organizer Staff Management Routes', () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it('api.staff.invite dispatches POST /api/organizer/events/:eventId/team/invitations with JSON payload', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+        ok: true,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({
+          success: true,
+          data: {
+            invitation: { id: 'inv-123', email: 'scanner@outside.vip', status: 'PENDING' },
+          },
+        }),
+      } as any);
+
+      const eventId = 'evt-fest-1';
+      const email = 'scanner@outside.vip';
+      const res = await api.staff.invite(eventId, email);
+
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      const [url, options] = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('/api/organizer/events/evt-fest-1/team/invitations');
+      expect(options.method).toBe('POST');
+      expect(options.credentials).toBe('include');
+      expect(JSON.parse(options.body as string)).toEqual({ email: 'scanner@outside.vip' });
+      expect(res.invitation.email).toBe('scanner@outside.vip');
+    });
+
+    it('api.staff.getTeam dispatches GET /api/organizer/events/:eventId/team', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+        ok: true,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({
+          success: true,
+          data: { staff: [], invitations: [] },
+        }),
+      } as any);
+
+      await api.staff.getTeam('evt-fest-1');
+
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      const [url, options] = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('/api/organizer/events/evt-fest-1/team');
+      expect(options.method ?? 'GET').toBe('GET');
+      expect(options.credentials).toBe('include');
+    });
+
+    it('api.staff.resendInvitation dispatches POST /api/organizer/events/:eventId/team/invitations/:invitationId/resend', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+        ok: true,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({
+          success: true,
+          data: { success: true, message: 'Resent' },
+        }),
+      } as any);
+
+      await api.staff.resendInvitation('evt-fest-1', 'inv-789');
+
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      const [url, options] = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('/api/organizer/events/evt-fest-1/team/invitations/inv-789/resend');
+      expect(options.method).toBe('POST');
+      expect(options.credentials).toBe('include');
+    });
+
+    it('api.staff.revokeInvitation dispatches DELETE /api/organizer/events/:eventId/team/invitations/:invitationId', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+        ok: true,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({
+          success: true,
+          data: { success: true, message: 'Revoked' },
+        }),
+      } as any);
+
+      await api.staff.revokeInvitation('evt-fest-1', 'inv-789');
+
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      const [url, options] = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('/api/organizer/events/evt-fest-1/team/invitations/inv-789');
+      expect(options.method).toBe('DELETE');
+      expect(options.credentials).toBe('include');
+    });
+
+    it('api.staff.revokeMember dispatches DELETE /api/organizer/events/:eventId/team/members/:userId', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+        ok: true,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({
+          success: true,
+          data: { success: true, message: 'Staff member revoked' },
+        }),
+      } as any);
+
+      await api.staff.revokeMember('evt-fest-1', 'usr-staff-456');
+
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      const [url, options] = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('/api/organizer/events/evt-fest-1/team/members/usr-staff-456');
+      expect(options.method).toBe('DELETE');
+      expect(options.credentials).toBe('include');
+    });
+
+    it('api.staff.invite throws ApiError with code EMAIL_DELIVERY_FAILED on 503 response', async () => {
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+        ok: false,
+        status: 503,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({
+          success: false,
+          error: {
+            code: 'EMAIL_DELIVERY_FAILED',
+            message: 'Staff invitation created, but the invitation email could not be delivered. Please use the resend option to try again.',
+            statusCode: 503,
+          },
+        }),
+      } as any);
+
+      await expect(api.staff.invite('evt-fest-1', 'scanner@outside.vip')).rejects.toMatchObject({
+        code: 'EMAIL_DELIVERY_FAILED',
+        statusCode: 503,
+        message: 'Staff invitation created, but the invitation email could not be delivered. Please use the resend option to try again.',
+      });
+    });
+
+    it('api.staffInvitation.getMetadata resolves accepted invitation with returning staff properties', async () => {
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+        ok: true,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({
+          success: true,
+          data: {
+            invitation: {
+              id: 'inv-accepted-1',
+              status: 'ACCEPTED',
+              expiresAt: new Date(Date.now() + 600000).toISOString(),
+              maskedEmail: 'sc***@outside.vip',
+              hasPassword: false,
+              requiresLogin: false,
+              isCurrentAccount: true,
+              isAssignmentActive: true,
+              canResumeSession: false,
+            },
+            event: {
+              id: 'evt-1',
+              title: 'Sol Fest',
+              slug: 'sol-fest',
+              startAt: new Date().toISOString(),
+              endAt: new Date().toISOString(),
+              venueName: 'Park',
+              city: 'Nairobi',
+              country: 'Kenya',
+              organizerName: 'Sol Org',
+            },
+          },
+        }),
+      } as any);
+
+      const metadata = await api.staffInvitation.getMetadata('test-token-xyz');
+
+      expect(metadata.invitation.status).toBe('ACCEPTED');
+      expect(metadata.invitation.isCurrentAccount).toBe(true);
+      expect(metadata.invitation.isAssignmentActive).toBe(true);
+      expect(metadata.event.title).toBe('Sol Fest');
+    });
+
+    it('api.staffInvitation.verifyOtp successfully dispatches verify-otp request and receives session csrfToken', async () => {
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+        ok: true,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({
+          success: true,
+          data: {
+            user: { id: 'user-returning-1', email: 'doorperson@outside.vip', role: 'ATTENDEE' },
+            csrfToken: 'csrf-session-token-abc',
+            eventId: 'evt-1',
+            status: 'ACTIVE',
+            isReturningStaff: true,
+          },
+        }),
+      } as any);
+
+      const res = await api.staffInvitation.verifyOtp('test-token-xyz', '123456');
+
+      expect(res.csrfToken).toBe('csrf-session-token-abc');
+      expect(res.user.email).toBe('doorperson@outside.vip');
+      expect(res.status).toBe('ACTIVE');
+    });
+  });
+});
+
+
+

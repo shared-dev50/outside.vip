@@ -91,11 +91,13 @@ export const sentLatePaymentRefundEmails: LatePaymentRefundEmailMessage[] = [];
 export const sentBuyerRefundEmails: BuyerRefundEmailMessage[] = [];
 export const sentEventCancelledBuyerEmails: EventCancelledBuyerEmailMessage[] = [];
 export const sentEventCancelledOrganizerEmails: EventCancelledOrganizerEmailMessage[] = [];
+export const sentPasswordResetEmails: PasswordResetEmailMessage[] = [];
 
 export const ORDER_CONFIRMATION_TEMPLATE_VERSION = 1;
 export const LATE_PAYMENT_REFUND_TEMPLATE_VERSION = 1;
 export const BUYER_REFUND_TEMPLATE_VERSION = 1;
 export const EVENT_CANCELLED_TEMPLATE_VERSION = 1;
+export const PASSWORD_RESET_TEMPLATE_VERSION = 1;
 
 export interface EventCancelledBuyerContentSnapshot {
   templateVersion: 1;
@@ -315,6 +317,30 @@ export interface StaffInvitationEmailMessage {
   sentAt: Date;
 }
 
+export interface PasswordResetContentSnapshot {
+  templateVersion: 1;
+  clientOrigin: string;
+  fromEmail: string;
+  recipientName: string;
+  passwordResetTokenId: string;
+  expiresInMinutes: number;
+  expiresAtIso: string;
+}
+
+export interface PasswordResetEmailMessage {
+  to: string;
+  from: string;
+  subject: string;
+  text: string;
+  html: string;
+  resetUrl: string;
+  passwordResetTokenId: string;
+  idempotencyKey: string;
+  templateVersion: number;
+  expiresInMinutes: number;
+  sentAt: Date;
+}
+
 function getActiveNodeEnv(): string {
   return (process.env.NODE_ENV || env.NODE_ENV || 'development').trim().toLowerCase();
 }
@@ -341,6 +367,25 @@ export function resetSentOrderConfirmationEmails(): void {
 
 export function resetSentBuyerRefundEmails(): void {
   sentBuyerRefundEmails.length = 0;
+}
+
+export function resetSentPasswordResetEmails(): void {
+  sentPasswordResetEmails.length = 0;
+}
+
+export function getLatestPasswordResetEmail(
+  email: string
+): PasswordResetEmailMessage | undefined {
+  if (getActiveNodeEnv() !== 'test') {
+    return undefined;
+  }
+  const normalized = normalizeEmail(email);
+  for (let i = sentPasswordResetEmails.length - 1; i >= 0; i--) {
+    if (normalizeEmail(sentPasswordResetEmails[i].to) === normalized) {
+      return sentPasswordResetEmails[i];
+    }
+  }
+  return undefined;
 }
 
 export function getLatestOrderConfirmationEmail(
@@ -1635,6 +1680,17 @@ export function buildOrderTicketAccessUrl(
 }
 
 /**
+ * Builds the canonical frontend password-reset URL from CLIENT_URL (or snapshotted origin).
+ */
+export function buildPasswordResetUrl(
+  resetToken: string,
+  clientOrigin?: string | null
+): string {
+  const baseUrl = normalizeClientOrigin(clientOrigin);
+  return `${baseUrl}/reset-password?token=${encodeURIComponent(resetToken)}`;
+}
+
+/**
  * Pure deterministic renderer for buyer ticket confirmation emails.
  * Given an immutable fulfillment snapshot and canonical ticket-access URL, produces identical
  * subject, plain text, and HTML across retries to satisfy Resend idempotency payload rules.
@@ -2790,6 +2846,221 @@ export async function sendEventCancelledOrganizerEmail(params: {
     const safeDetail = sanitizeEmailLogMessage(
       deliveryError.providerDetail || deliveryError.message,
       sensitiveValues
+    );
+
+    throw new EmailDeliveryError(deliveryError.message, {
+      code: deliveryError.code,
+      providerStatusCode: deliveryError.providerStatusCode,
+      providerErrorName: deliveryError.providerErrorName,
+      retryable: deliveryError.retryable,
+      timedOut: deliveryError.timedOut,
+      providerDetail: safeDetail,
+    });
+  }
+}
+
+/**
+ * Deterministic renderer for Outside.vip password-reset emails.
+ * Produces identical subject/text/HTML across outbox retries for Resend idempotency.
+ */
+export function renderPasswordResetEmail(params: {
+  to: string;
+  from?: string;
+  snapshot: PasswordResetContentSnapshot;
+  resetUrl: string;
+}): {
+  to: string;
+  from: string;
+  subject: string;
+  text: string;
+  html: string;
+} {
+  const { snapshot } = params;
+  const from = sanitizeHeaderField(
+    params.from || snapshot.fromEmail || resolveEmailFrom() || DEFAULT_EMAIL_FROM
+  );
+  const to = sanitizeHeaderField(normalizeEmail(params.to));
+  const cleanName = sanitizeHeaderField(snapshot.recipientName || 'there') || 'there';
+  const cleanUrl = params.resetUrl.trim();
+  const expiresInMinutes = Math.max(1, snapshot.expiresInMinutes || 30);
+
+  const subject = 'Reset your Outside.vip password';
+
+  const text = [
+    `Hi ${cleanName},`,
+    '',
+    'We received a request to reset the password for your Outside.vip account.',
+    '',
+    'Open the secure link below to choose a new password:',
+    cleanUrl,
+    '',
+    `This link is single-use and expires in ${expiresInMinutes} minutes.`,
+    'For your security, do not share this link with anyone.',
+    '',
+    'If you did not request a password reset, you can safely ignore this email — your password will remain unchanged.',
+    '',
+    'Outside.vip',
+  ].join('\n');
+
+  const escapedName = escapeHtml(cleanName);
+  const escapedUrl = escapeHtml(cleanUrl);
+  const escapedExpiry = escapeHtml(String(expiresInMinutes));
+
+  const html = `<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en">
+  <head>
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>${escapeHtml(subject)}</title>
+  </head>
+  <body style="margin: 0; padding: 24px; background-color: #0A0A0C; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #F5F5F7;">
+    <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="max-width: 540px; margin: 0 auto; background: #121216; border: 1px solid #22222A; border-radius: 16px; overflow: hidden;">
+      <tr>
+        <td style="padding: 32px;">
+          <p style="font-size: 11px; text-transform: uppercase; letter-spacing: 0.14em; color: #FF5500; font-weight: 700; margin: 0 0 12px 0;">Outside.vip Security</p>
+          <h1 style="font-size: 24px; font-weight: 700; margin: 0 0 14px 0; color: #FFFFFF; line-height: 1.3;">Reset your password</h1>
+          <p style="font-size: 15px; line-height: 1.6; color: #B8B8C2; margin: 0 0 14px 0;">
+            Hi <strong style="color: #FFFFFF;">${escapedName}</strong>, we received a request to reset the password for your Outside.vip account.
+          </p>
+          <p style="font-size: 15px; line-height: 1.6; color: #B8B8C2; margin: 0 0 26px 0;">
+            Click the button below to choose a new password and regain access to your account.
+          </p>
+
+          <!-- Bulletproof Email CTA Button -->
+          <table role="presentation" border="0" cellpadding="0" cellspacing="0" style="margin: 0 auto 28px auto;">
+            <tr>
+              <td align="center" bgcolor="#FF5500" style="border-radius: 10px;">
+                <a href="${escapedUrl}" target="_blank" rel="noopener noreferrer" style="font-size: 15px; font-weight: 600; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: #FFFFFF; text-decoration: none; padding: 14px 32px; border-radius: 10px; border: 1px solid #FF5500; display: inline-block; mso-padding-alt: 0;">
+                  <!--[if mso]><i style="letter-spacing: 32px; mso-font-width: -100%; mso-text-raise: 20pt">&nbsp;</i><![endif]-->
+                  <span style="mso-text-raise: 10pt; font-weight: 600; color: #FFFFFF;">Reset Password</span>
+                  <!--[if mso]><i style="letter-spacing: 32px; mso-font-width: -100%">&nbsp;</i><![endif]-->
+                </a>
+              </td>
+            </tr>
+          </table>
+
+          <p style="font-size: 13px; line-height: 1.6; color: #8E8E99; margin: 0 0 12px 0; border-top: 1px solid #22222A; padding-top: 20px;">
+            This link is single-use and expires in <strong style="color: #FFFFFF;">${escapedExpiry} minutes</strong>.
+          </p>
+          <p style="font-size: 13px; line-height: 1.6; color: #8E8E99; margin: 0 0 16px 0;">
+            If you did not request a password reset, you can safely ignore this email &mdash; your password will remain unchanged.
+          </p>
+          <p style="font-size: 12px; line-height: 1.5; color: #6E6E78; margin: 0;">
+            If the button above does not work, copy and paste this link into your browser:<br />
+            <a href="${escapedUrl}" target="_blank" rel="noopener noreferrer" style="color: #FF5500; text-decoration: underline; word-break: break-all; font-size: 12px; display: inline-block; margin-top: 4px;">${escapedUrl}</a>
+          </p>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>`.trim();
+
+  return { to, from, subject, text, html };
+}
+
+/**
+ * Dispatches a single attempt of a password-reset email via Resend.
+ * Retries and backoff are managed by the PostgreSQL EmailOutbox service.
+ */
+export async function sendPasswordResetEmail(params: {
+  to: string;
+  snapshot: PasswordResetContentSnapshot;
+  resetUrl: string;
+  resetToken: string;
+  idempotencyKey: string;
+}): Promise<EmailDeliveryResult> {
+  const rendered = renderPasswordResetEmail({
+    to: params.to,
+    from: params.snapshot.fromEmail,
+    snapshot: params.snapshot,
+    resetUrl: params.resetUrl,
+  });
+
+  const sentAt = new Date();
+  const activeNodeEnv = getActiveNodeEnv();
+  const shouldUseResendInTest = env.NODE_ENV === 'test' && Boolean(testOptions.useResendInTest);
+
+  if (activeNodeEnv === 'test' && !shouldUseResendInTest) {
+    sentPasswordResetEmails.push({
+      to: rendered.to,
+      from: rendered.from,
+      subject: rendered.subject,
+      text: rendered.text,
+      html: rendered.html,
+      resetUrl: params.resetUrl,
+      passwordResetTokenId: params.snapshot.passwordResetTokenId,
+      idempotencyKey: params.idempotencyKey,
+      templateVersion: params.snapshot.templateVersion,
+      expiresInMinutes: params.snapshot.expiresInMinutes,
+      sentAt,
+    });
+
+    return {
+      sent: true,
+      status: 'recorded',
+      provider: 'test-recorder',
+      messageId: `test_rec_${crypto.randomUUID()}`,
+      from: rendered.from,
+      to: rendered.to,
+      expiresInMinutes: params.snapshot.expiresInMinutes,
+      sentAt,
+    };
+  }
+
+  const resendApiKey = resolveResendApiKey();
+  if (!resendApiKey) {
+    console.error(
+      `[EmailService] Password reset email aborted for ${maskEmailForLog(rendered.to)}: RESEND_API_KEY is not configured.`
+    );
+    throw new EmailDeliveryError(
+      'Email delivery service is not configured. RESEND_API_KEY is missing.',
+      {
+        code: 'EMAIL_SERVICE_UNCONFIGURED',
+        providerStatusCode: null,
+        retryable: false,
+      }
+    );
+  }
+
+  const resend = new Resend(resendApiKey);
+  const timeoutMs = getEffectiveTimeoutMs();
+  const sensitiveValues = [resendApiKey, params.resetToken, params.resetUrl];
+
+  try {
+    const { messageId } = await sendSingleResendAttempt({
+      resend,
+      from: rendered.from,
+      to: rendered.to,
+      subject: rendered.subject,
+      text: rendered.text,
+      html: rendered.html,
+      idempotencyKey: params.idempotencyKey,
+      timeoutMs,
+    });
+
+    return {
+      sent: true,
+      status: 'sent',
+      provider: 'resend',
+      messageId,
+      from: rendered.from,
+      to: rendered.to,
+      expiresInMinutes: params.snapshot.expiresInMinutes,
+      sentAt,
+    };
+  } catch (err) {
+    const deliveryError =
+      err instanceof EmailDeliveryError
+        ? err
+        : classifyProviderError({ message: err instanceof Error ? err.message : undefined });
+
+    const safeDetail = sanitizeEmailLogMessage(
+      deliveryError.providerDetail || deliveryError.message,
+      sensitiveValues
+    );
+
+    console.error(
+      `[EmailService] Password reset dispatch failed for ${maskEmailForLog(rendered.to)} (code=${deliveryError.code}, status=${deliveryError.providerStatusCode ?? 'network'}): ${safeDetail}`
     );
 
     throw new EmailDeliveryError(deliveryError.message, {

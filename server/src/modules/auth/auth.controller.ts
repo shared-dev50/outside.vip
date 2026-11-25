@@ -13,8 +13,17 @@ import {
   resendVerificationSchema,
   updateProfileSchema,
   changePasswordSchema,
+  forgotPasswordSchema,
+  validateResetTokenSchema,
+  resetPasswordSchema,
   updateUserStatusSchema,
 } from './auth.schema.js';
+import {
+  requestPasswordReset,
+  inspectPasswordResetToken,
+  completePasswordReset,
+  resetPasswordResetRateLimits,
+} from './passwordReset.service.js';
 import {
   BadRequestError,
   UnauthorizedError,
@@ -42,6 +51,9 @@ import {
   invalidateUserAuthCache,
   getUserAuthCacheVersion,
   populateUserAuthCacheAtomically,
+  recordDurableSessionInvalidationTx,
+  recordEmergencySessionVersionFloor,
+  setCachedUserSessionVersion,
   checkRedisRateLimit,
   checkRedisRateLimitWithRetryAfter,
   checkRedisSlidingWindowRateLimit,
@@ -113,6 +125,8 @@ export async function resetVerificationRateLimits(): Promise<void> {
   await resetSlidingWindowRateLimitsByPrefixForTests(OTP_RESEND_RATE_LIMIT_PREFIX);
 }
 
+export { resetPasswordResetRateLimits };
+
 export function hashVerificationCode(userId: string, code: string): string {
   return crypto
     .createHmac('sha256', env.JWT_SECRET)
@@ -149,6 +163,7 @@ async function syncUserToAuthCache(user: {
   role: Role;
   emailVerified: boolean;
   status?: AccountStatus;
+  sessionVersion?: number;
 }): Promise<void> {
   await invalidateUserAuthCache(user.id);
   const ver = await getUserAuthCacheVersion(user.id);
@@ -162,6 +177,9 @@ async function syncUserToAuthCache(user: {
     },
     ver
   );
+  if (typeof user.sessionVersion === 'number') {
+    await setCachedUserSessionVersion(user.id, user.sessionVersion);
+  }
 }
 
 async function issueVerificationCodeForUser(user: {
@@ -296,12 +314,13 @@ export async function register(req: Request, res: Response, next: NextFunction):
       throw deliveryError;
     }
 
-    await syncUserToAuthCache(user);
+    await syncUserToAuthCache({ ...user, sessionVersion: 0 });
 
     // Rotate any pre-existing session and issue a fresh Redis session
     const issuedSession = await rotateSession({
       oldSessionId: req.session?.sessionId ?? null,
       userId: user.id,
+      sessionVersion: 0,
       ipAddress: req.ip,
       userAgent: req.headers['user-agent'] || null,
     });
@@ -495,12 +514,16 @@ export async function verifyEmail(req: Request, res: Response, next: NextFunctio
     }
 
     // Immediately invalidate and update the 30-second Redis User Authorization Cache
-    await syncUserToAuthCache(updatedUser);
+    await syncUserToAuthCache({
+      ...updatedUser,
+      sessionVersion: (targetUser as { sessionVersion?: number }).sessionVersion ?? 0,
+    });
 
     // Rotate session ID on email verification / privilege elevation
     const rotatedSession = await rotateSession({
       oldSessionId: req.session?.sessionId ?? null,
       userId: updatedUser.id,
+      sessionVersion: (targetUser as { sessionVersion?: number }).sessionVersion ?? 0,
       ipAddress: req.ip,
       userAgent: req.headers['user-agent'] || null,
       preserveLifetime: true,
@@ -755,6 +778,7 @@ export async function login(req: Request, res: Response, next: NextFunction): Pr
     const issuedSession = await rotateSession({
       oldSessionId: req.session?.sessionId ?? null,
       userId: user.id,
+      sessionVersion: user.sessionVersion,
       ipAddress: req.ip,
       userAgent: req.headers['user-agent'] || null,
     });
@@ -1114,6 +1138,7 @@ export async function verifyLoginOtp(
     const issuedSession = await rotateSession({
       oldSessionId: req.session?.sessionId ?? null,
       userId: user.id,
+      sessionVersion: user.sessionVersion,
       ipAddress: req.ip,
       userAgent: req.headers['user-agent'] || null,
     });
@@ -1273,22 +1298,48 @@ export async function changePassword(
     }
 
     const newPasswordHash = await bcrypt.hash(input.newPassword, 10);
-    await prisma.user.update({
-      where: { id: dbUser.id },
-      data: { passwordHash: newPasswordHash },
+    const updatedUser = await prisma.$transaction(async (tx) => {
+      const userUpdate = await tx.user.update({
+        where: { id: dbUser.id },
+        data: {
+          passwordHash: newPasswordHash,
+          passwordChangedAt: new Date(),
+          sessionVersion: { increment: 1 },
+        },
+      });
+      await recordDurableSessionInvalidationTx(tx, dbUser.id, userUpdate.sessionVersion);
+      return userUpdate;
     });
 
-    // Immediately invalidate Redis user cache and revoke all existing sessions
-    await invalidateUserAuthCache(dbUser.id);
-    await revokeAllUserSessions(dbUser.id);
+    // Record in-process fail-safe floor immediately so stale sessions in this worker are
+    // rejected even if Redis cache invalidation or session revocation fails transiently
+    recordEmergencySessionVersionFloor(updatedUser.id, updatedUser.sessionVersion);
 
-    // Issue a fresh rotated session for the active client
+    // Best-effort Redis cache invalidation, version cache update, and prior session revocation
+    await invalidateUserAuthCache(updatedUser.id).catch((err) => {
+      const safeMsg = err instanceof Error ? err.message : 'Unknown error';
+      console.error(`[Auth] Post-changePassword auth cache invalidation failed: ${safeMsg}`);
+    });
+    await setCachedUserSessionVersion(updatedUser.id, updatedUser.sessionVersion).catch((err) => {
+      const safeMsg = err instanceof Error ? err.message : 'Unknown error';
+      console.error(`[Auth] Post-changePassword session version cache update failed: ${safeMsg}`);
+    });
+    await revokeAllUserSessions(updatedUser.id).catch((err) => {
+      const safeMsg = err instanceof Error ? err.message : 'Unknown error';
+      console.error(`[Auth] Post-changePassword session revocation failed: ${safeMsg}`);
+    });
+
+    // Issue a fresh rotated session for the active client with incremented sessionVersion
     const newSession = await createSession({
-      userId: dbUser.id,
+      userId: updatedUser.id,
+      sessionVersion: updatedUser.sessionVersion,
       ipAddress: req.ip,
       userAgent: req.headers['user-agent'] || null,
     });
-    await syncUserToAuthCache(dbUser);
+    await syncUserToAuthCache({
+      ...updatedUser,
+      sessionVersion: updatedUser.sessionVersion,
+    }).catch(() => {});
 
     setSessionCookie(res, newSession.rawCookieValue);
     res.setHeader('X-CSRF-Token', newSession.csrfToken);
@@ -1447,7 +1498,10 @@ export async function getCurrentUser(
       });
 
       // Immediately invalidate cache and rotate session ID on privilege elevation
-      await syncUserToAuthCache(user);
+      await syncUserToAuthCache({
+        ...user,
+        sessionVersion: req.session?.sessionVersion,
+      });
       if (req.session) {
         const rotated = await rotateSession({
           oldSessionId: req.session.sessionId,
@@ -1460,7 +1514,10 @@ export async function getCurrentUser(
         activeCsrfToken = rotated.csrfToken;
       }
     } else {
-      await syncUserToAuthCache(user);
+      await syncUserToAuthCache({
+        ...user,
+        sessionVersion: req.session?.sessionVersion,
+      });
     }
 
     if (activeCsrfToken) {
@@ -1558,6 +1615,74 @@ export async function forbidRolePromotion(
     throw new ForbiddenError(
       'Administrator privileges are managed strictly via the backend ADMIN_EMAILS allowlist and cannot be granted via API.'
     );
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function forgotPassword(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const input = forgotPasswordSchema.parse(req.body);
+    const result = await requestPasswordReset({
+      email: input.email,
+      ipAddress: req.ip || req.socket?.remoteAddress || 'unknown',
+    });
+
+    res.json({
+      success: true,
+      data: result,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function validateResetToken(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const input = validateResetTokenSchema.parse(req.body);
+    const result = await inspectPasswordResetToken({
+      rawToken: input.token,
+      ipAddress: req.ip || req.socket?.remoteAddress || 'unknown',
+    });
+
+    res.json({
+      success: true,
+      data: result,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function resetPassword(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const input = resetPasswordSchema.parse(req.body);
+    const result = await completePasswordReset({
+      rawToken: input.token,
+      newPassword: input.newPassword,
+      ipAddress: req.ip || req.socket?.remoteAddress || 'unknown',
+    });
+
+    clearSessionCookie(res);
+
+    res.json({
+      success: true,
+      data: {
+        message: result.message,
+      },
+    });
   } catch (error) {
     next(error);
   }

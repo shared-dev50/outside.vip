@@ -17,6 +17,7 @@ const FORBIDDEN_AUTH_PATHS = [
   '/signin',
   '/register',
   '/forgot-password',
+  '/reset-password',
 ];
 
 /**

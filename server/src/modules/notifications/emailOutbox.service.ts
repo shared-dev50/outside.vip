@@ -9,9 +9,11 @@ import {
   Prisma,
 } from '@prisma/client';
 import { prisma } from '../../db/prisma.js';
-import { normalizeEmail } from '../../config/env.js';
+import { env, normalizeEmail } from '../../config/env.js';
+import { getRedisClient } from '../../lib/redis.js';
 import {
   buildOrderTicketAccessUrl,
+  buildPasswordResetUrl,
   BUYER_REFUND_TEMPLATE_VERSION,
   BuyerRefundContentSnapshot,
   BuyerRefundNotificationKind,
@@ -27,6 +29,8 @@ import {
   ORDER_CONFIRMATION_TEMPLATE_VERSION,
   OrderConfirmationContentSnapshot,
   OrderConfirmationSnapshotItem,
+  PASSWORD_RESET_TEMPLATE_VERSION,
+  PasswordResetContentSnapshot,
   resolveEmailFrom,
   sanitizeEmailLogMessage,
   sendBuyerRefundEmail,
@@ -34,6 +38,7 @@ import {
   sendEventCancelledOrganizerEmail,
   sendLatePaymentRefundEmail,
   sendOrderConfirmationEmail,
+  sendPasswordResetEmail,
 } from '../../lib/email.service.js';
 
 export const EMAIL_OUTBOX_MAX_ATTEMPTS = 8;
@@ -123,6 +128,113 @@ export function buildOrderConfirmationDedupeKey(orderId: string): string {
 
 export function buildOrderConfirmationIdempotencyKey(orderId: string): string {
   return `order-confirmation:${orderId}`;
+}
+
+export const PASSWORD_RESET_DELIVERY_SECRET_PREFIX = 'pwreset_delivery:';
+
+function derivePasswordResetDeliveryKey(): Buffer {
+  const secret =
+    process.env.SESSION_SECRET?.trim() ||
+    env.SESSION_SECRET.trim() ||
+    env.JWT_SECRET.trim();
+  return crypto
+    .createHash('sha256')
+    .update(`outside_pwreset_delivery_v1:${secret}`, 'utf8')
+    .digest();
+}
+
+export function encryptPasswordResetDeliveryToken(rawToken: string): string {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', derivePasswordResetDeliveryKey(), iv);
+  const encrypted = Buffer.concat([cipher.update(rawToken, 'utf8'), cipher.final()]);
+  const authTag = cipher.getAuthTag();
+  return `${iv.toString('hex')}:${authTag.toString('hex')}:${encrypted.toString('hex')}`;
+}
+
+export function decryptPasswordResetDeliveryToken(cipherPayload: string): string | null {
+  try {
+    const parts = cipherPayload.split(':');
+    if (parts.length !== 3) return null;
+    const [ivHex, authTagHex, encryptedHex] = parts;
+    const iv = Buffer.from(ivHex, 'hex');
+    const authTag = Buffer.from(authTagHex, 'hex');
+    const decipher = crypto.createDecipheriv('aes-256-gcm', derivePasswordResetDeliveryKey(), iv);
+    decipher.setAuthTag(authTag);
+    const decrypted = Buffer.concat([
+      decipher.update(Buffer.from(encryptedHex, 'hex')),
+      decipher.final(),
+    ]);
+    return decrypted.toString('utf8');
+  } catch {
+    return null;
+  }
+}
+
+export function buildPasswordResetDedupeKey(passwordResetTokenId: string): string {
+  return `password_reset:${passwordResetTokenId}`;
+}
+
+export function buildPasswordResetIdempotencyKey(passwordResetTokenId: string): string {
+  return `password-reset:${passwordResetTokenId}`;
+}
+
+/**
+ * Enqueues a durable PASSWORD_RESET EmailOutbox record inside the caller's PostgreSQL
+ * transaction. Intentionally excludes any raw token or reset URL from the snapshot.
+ */
+export async function enqueuePasswordResetEmail(
+  tx: Prisma.TransactionClient,
+  params: {
+    outboxId?: string;
+    passwordResetTokenId: string;
+    recipientEmail: string;
+    recipientName: string;
+    expiresInMinutes: number;
+    expiresAt: Date;
+    clientOrigin?: string | null;
+    fromEmail?: string | null;
+  }
+): Promise<{ outboxId: string; dedupeKey: string; idempotencyKey: string }> {
+  const dedupeKey = buildPasswordResetDedupeKey(params.passwordResetTokenId);
+  const idempotencyKey = buildPasswordResetIdempotencyKey(params.passwordResetTokenId);
+  const resolvedFromEmail =
+    (typeof params.fromEmail === 'string'
+      ? params.fromEmail.replace(/[\r\n]+/g, ' ').trim().replace(/^["']+|["']+$/g, '').trim()
+      : '') || resolveEmailFrom();
+
+  const snapshot: PasswordResetContentSnapshot = {
+    templateVersion: PASSWORD_RESET_TEMPLATE_VERSION,
+    clientOrigin: normalizeClientOrigin(params.clientOrigin),
+    fromEmail: resolvedFromEmail,
+    recipientName: params.recipientName,
+    passwordResetTokenId: params.passwordResetTokenId,
+    expiresInMinutes: params.expiresInMinutes,
+    expiresAtIso: params.expiresAt.toISOString(),
+  };
+
+  const created = await tx.emailOutbox.create({
+    data: {
+      ...(params.outboxId ? { id: params.outboxId } : {}),
+      dedupeKey,
+      type: EmailOutboxType.PASSWORD_RESET,
+      status: EmailOutboxStatus.PENDING,
+      orderId: null,
+      recipientEmail: normalizeEmail(params.recipientEmail),
+      idempotencyKey,
+      templateVersion: snapshot.templateVersion,
+      contentSnapshot: snapshot as unknown as Prisma.InputJsonValue,
+      attempts: 0,
+      maxAttempts: EMAIL_OUTBOX_MAX_ATTEMPTS,
+      nextAttemptAt: new Date(),
+    },
+    select: { id: true },
+  });
+
+  return {
+    outboxId: created.id,
+    dedupeKey,
+    idempotencyKey,
+  };
 }
 
 export function buildLatePaymentRefundConfirmedDedupeKey(orderRefundId: string): string {
@@ -742,6 +854,33 @@ function isValidBuyerRefundSnapshot(
   );
 }
 
+function isValidPasswordResetSnapshot(
+  raw: unknown
+): raw is PasswordResetContentSnapshot {
+  if (!raw || typeof raw !== 'object') return false;
+  const candidate = raw as Record<string, unknown>;
+  if (
+    candidate.templateVersion !== PASSWORD_RESET_TEMPLATE_VERSION ||
+    typeof candidate.clientOrigin !== 'string' ||
+    candidate.clientOrigin.trim().length === 0 ||
+    typeof candidate.fromEmail !== 'string' ||
+    candidate.fromEmail.trim().length === 0 ||
+    typeof candidate.recipientName !== 'string' ||
+    typeof candidate.passwordResetTokenId !== 'string' ||
+    candidate.passwordResetTokenId.length === 0 ||
+    typeof candidate.expiresInMinutes !== 'number' ||
+    typeof candidate.expiresAtIso !== 'string'
+  ) {
+    return false;
+  }
+  try {
+    normalizeClientOrigin(candidate.clientOrigin);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function emitOperationalAlert(
   severity: 'CRITICAL' | 'ERROR',
   category: string,
@@ -774,6 +913,7 @@ export async function reapExpiredExhaustedLeases(): Promise<number> {
   const reaped = await prisma.$queryRaw<
     Array<{
       id: string;
+      type: EmailOutboxType;
       orderId: string | null;
       recipientEmail: string;
       attempts: number;
@@ -797,8 +937,20 @@ export async function reapExpiredExhaustedLeases(): Promise<number> {
       AND "lockedUntil" IS NOT NULL
       AND "lockedUntil" < NOW()
       AND attempts >= "maxAttempts"
-    RETURNING id, "orderId", "recipientEmail", attempts, "maxAttempts", "lastErrorCode"
+    RETURNING id, type, "orderId", "recipientEmail", attempts, "maxAttempts", "lastErrorCode"
   `;
+
+  const passwordResetDeliveryKeys = reaped
+    .filter((row) => row.type === EmailOutboxType.PASSWORD_RESET)
+    .map((row) => `${PASSWORD_RESET_DELIVERY_SECRET_PREFIX}${row.id}`);
+
+  if (passwordResetDeliveryKeys.length > 0) {
+    try {
+      await getRedisClient().del(...passwordResetDeliveryKeys);
+    } catch {
+      // Best-effort cleanup; Redis TTL bounds lifetime cleanly
+    }
+  }
 
   for (const row of reaped) {
     emitOperationalAlert('ERROR', 'LEASE_EXHAUSTED', {
@@ -1420,6 +1572,187 @@ export async function processClaimedEmailOutboxItem(
     }
   }
 
+  if (item.type === EmailOutboxType.PASSWORD_RESET) {
+    const deliveryKey = `${PASSWORD_RESET_DELIVERY_SECRET_PREFIX}${item.id}`;
+    const clearDeliverySecretBestEffort = async () => {
+      try {
+        await getRedisClient().del(deliveryKey);
+      } catch {
+        // Best-effort cleanup; key has a 30m TTL bounded by token lifetime
+      }
+    };
+
+    if (!isValidPasswordResetSnapshot(item.contentSnapshot)) {
+      await clearDeliverySecretBestEffort();
+      return markPermanentGuarded(
+        'INVALID_CONTENT_SNAPSHOT',
+        'Stored password-reset email content snapshot is invalid.',
+        'CRITICAL',
+        'SNAPSHOT_CORRUPT'
+      );
+    }
+
+    const snapshot = item.contentSnapshot;
+    const tokenRecord = await prisma.passwordResetToken.findUnique({
+      where: { id: snapshot.passwordResetTokenId },
+      select: {
+        id: true,
+        usedAt: true,
+        expiresAt: true,
+        user: {
+          select: {
+            id: true,
+            status: true,
+          },
+        },
+      },
+    });
+
+    if (
+      !tokenRecord ||
+      tokenRecord.usedAt !== null ||
+      tokenRecord.expiresAt.getTime() <= Date.now() ||
+      tokenRecord.user.status !== 'ACTIVE'
+    ) {
+      await clearDeliverySecretBestEffort();
+      return markCancelledGuarded(
+        'PASSWORD_RESET_TOKEN_INACTIVE',
+        'Superseded password-reset notification because the token is no longer active.'
+      );
+    }
+
+    const scheduleRetryGuarded = async (
+      code: string,
+      message: string
+    ): Promise<'retried' | 'leaseLost'> => {
+      const delayMs = computeNextRetryDelayMs(item.attempts, options?.randomFn);
+      const nextAttemptAt = new Date(Date.now() + delayMs);
+      const updated = await prisma.emailOutbox.updateMany({
+        where: {
+          id: item.id,
+          status: EmailOutboxStatus.PROCESSING,
+          lockedBy: workerId,
+        },
+        data: {
+          status: EmailOutboxStatus.PENDING,
+          nextAttemptAt,
+          lockedBy: null,
+          lockedUntil: null,
+          lastErrorCode: code,
+          lastErrorMessage: message,
+        },
+      });
+
+      if (updated.count === 0) {
+        console.warn(
+          `[EmailOutbox] Lease lost before scheduling retry for password-reset outbox=${item.id} (worker=${workerId})`
+        );
+        return 'leaseLost';
+      }
+
+      return 'retried';
+    };
+
+    let encryptedToken: string | null = null;
+    try {
+      encryptedToken = await getRedisClient().get(deliveryKey);
+    } catch (redisErr) {
+      const safeErr = sanitizeEmailLogMessage(
+        redisErr instanceof Error ? redisErr.message : String(redisErr ?? 'Redis read failure')
+      );
+
+      if (item.attempts >= item.maxAttempts) {
+        return markPermanentGuarded(
+          'REDIS_DELIVERY_READ_FAILED',
+          safeErr,
+          'ERROR',
+          'RETRIES_EXHAUSTED'
+        );
+      }
+
+      return scheduleRetryGuarded('REDIS_DELIVERY_READ_FAILED', safeErr);
+    }
+
+    const rawToken = encryptedToken ? decryptPasswordResetDeliveryToken(encryptedToken) : null;
+    if (!rawToken) {
+      await clearDeliverySecretBestEffort();
+      return markPermanentGuarded(
+        'RESET_DELIVERY_SECRET_UNAVAILABLE',
+        'Ephemeral password-reset delivery secret expired or is unavailable for dispatch.',
+        'ERROR',
+        'PASSWORD_RESET_DELIVERY_UNAVAILABLE'
+      );
+    }
+
+    const resetUrl = buildPasswordResetUrl(rawToken, snapshot.clientOrigin);
+
+    try {
+      const result = await sendPasswordResetEmail({
+        to: item.recipientEmail,
+        snapshot,
+        resetUrl,
+        resetToken: rawToken,
+        idempotencyKey: item.idempotencyKey,
+      });
+
+      const updated = await prisma.emailOutbox.updateMany({
+        where: {
+          id: item.id,
+          status: EmailOutboxStatus.PROCESSING,
+          lockedBy: workerId,
+        },
+        data: {
+          status: EmailOutboxStatus.SENT,
+          provider: result.provider,
+          providerMessageId: result.messageId,
+          sentAt: result.sentAt,
+          lockedBy: null,
+          lockedUntil: null,
+          lastErrorCode: null,
+          lastErrorMessage: null,
+        },
+      });
+
+      if (updated.count === 0) {
+        console.warn(
+          `[EmailOutbox] Lease lost before marking SENT for password-reset outbox=${item.id} (worker=${workerId})`
+        );
+        return 'leaseLost';
+      }
+
+      await clearDeliverySecretBestEffort();
+      return 'accepted';
+    } catch (err) {
+      const classification = classifyOutboxFailure(err, [rawToken, resetUrl]);
+
+      if (
+        classification.disposition === 'CONFIG_FAILURE' ||
+        classification.disposition === 'PAYLOAD_CONFLICT' ||
+        classification.disposition === 'PERMANENT' ||
+        item.attempts >= item.maxAttempts
+      ) {
+        await clearDeliverySecretBestEffort();
+        return markPermanentGuarded(
+          classification.code,
+          classification.message,
+          classification.disposition === 'CONFIG_FAILURE' ||
+            classification.disposition === 'PAYLOAD_CONFLICT'
+            ? 'CRITICAL'
+            : 'ERROR',
+          classification.disposition === 'CONFIG_FAILURE'
+            ? 'EMAIL_CONFIG_FAILURE'
+            : classification.disposition === 'PAYLOAD_CONFLICT'
+            ? 'RESEND_IDEMPOTENCY_PAYLOAD_CONFLICT'
+            : item.attempts >= item.maxAttempts
+            ? 'RETRIES_EXHAUSTED'
+            : 'PERMANENT_DELIVERY_FAILURE'
+        );
+      }
+
+      return scheduleRetryGuarded(classification.code, classification.message);
+    }
+  }
+
   if (item.type !== EmailOutboxType.ORDER_CONFIRMATION) {
     return markPermanentGuarded(
       'UNSUPPORTED_OUTBOX_TYPE',
@@ -1641,5 +1974,52 @@ export async function runEmailOutboxPass(options?: {
   }
 
   return stats;
+}
+
+/**
+ * Atomically claims and processes a single EmailOutbox record by ID using FOR UPDATE SKIP LOCKED.
+ * Used when immediate post-commit dispatch is desired outside a background worker poll cycle.
+ */
+export async function dispatchEmailOutboxItemById(
+  outboxId: string,
+  options?: {
+    workerId?: string;
+    leaseMs?: number;
+    randomFn?: () => number;
+  }
+): Promise<'accepted' | 'retried' | 'failedPermanent' | 'cancelled' | 'leaseLost' | 'notClaimed'> {
+  const workerId = options?.workerId || generateEmailOutboxWorkerId();
+  const leaseMs = Math.max(5_000, options?.leaseMs ?? EMAIL_OUTBOX_LEASE_MS);
+
+  const claimed = await prisma.$queryRaw<EmailOutbox[]>`
+    WITH claimable AS (
+      SELECT id
+      FROM "EmailOutbox"
+      WHERE id = ${outboxId}
+        AND status = 'PENDING'::"EmailOutboxStatus"
+        AND "nextAttemptAt" <= NOW()
+        AND attempts < "maxAttempts"
+      FOR UPDATE SKIP LOCKED
+    )
+    UPDATE "EmailOutbox" AS o
+    SET
+      status = 'PROCESSING'::"EmailOutboxStatus",
+      "lockedBy" = ${workerId},
+      "lockedUntil" = NOW() + (${leaseMs} * INTERVAL '1 millisecond'),
+      attempts = o.attempts + 1,
+      "lastAttemptAt" = NOW(),
+      "updatedAt" = NOW()
+    FROM claimable
+    WHERE o.id = claimable.id
+    RETURNING o.*
+  `;
+
+  if (claimed.length === 0) {
+    return 'notClaimed';
+  }
+
+  return processClaimedEmailOutboxItem(claimed[0], workerId, {
+    randomFn: options?.randomFn,
+  });
 }
 

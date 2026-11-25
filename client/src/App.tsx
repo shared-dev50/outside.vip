@@ -7,7 +7,6 @@ import { DiscoverPage } from './pages/DiscoverPage';
 import { EventDetailPage } from './pages/EventDetailPage';
 import { OrdersPage } from './pages/OrdersPage';
 import { TeamsPage } from './pages/TeamsPage';
-import { AtendeePage } from './pages/AtendeePage';
 import { OrganizerDashboardPage } from './pages/OrganizerDashboardPage';
 import { CreateEventPage } from './pages/CreateEventPage';
 import { EventPreviewPage } from './pages/EventPreviewPage';
@@ -15,6 +14,7 @@ import { ScannerPage } from './pages/ScannerPage';
 import { OrderConfirmationPage } from './pages/OrderConfirmationPage';
 import { FinanceOrganizationPage } from './pages/FinanceOrganizationPage';
 import { AuthPage } from './pages/AuthPage';
+import { ResetPasswordPage } from './pages/ResetPasswordPage';
 import { StaffInvitationPage } from './pages/StaffInvitationPage';
 import { TeamInvitationPage } from './pages/TeamInvitationPage';
 import { HostDashboardPage } from './pages/HostDashboardPage';
@@ -30,12 +30,12 @@ export const App: React.FC = () => {
     location.pathname.startsWith('/organizer') ||
     location.pathname.startsWith('/host') ||
     location.pathname.startsWith('/orders') ||
-    location.pathname.startsWith('/attendees') ||
     location.pathname.startsWith('/team') ||
     location.pathname.startsWith('/login') ||
     location.pathname.startsWith('/signin') ||
     location.pathname.startsWith('/register') ||
     location.pathname.startsWith('/forgot-password') ||
+    location.pathname.startsWith('/reset-password') ||
     location.pathname.startsWith('/teams') ||
     location.pathname.startsWith('/staff/invitations');
 
@@ -54,23 +54,16 @@ export const App: React.FC = () => {
           <Route path="/signin" element={<AuthPage />} />
           <Route path="/register" element={<AuthPage />} />
           <Route path="/forgot-password" element={<AuthPage />} />
+          <Route path="/reset-password" element={<ResetPasswordPage />} />
           <Route path="/events" element={<DiscoverPage />} />
           <Route path="/events/:slug" element={<EventDetailPage />} />
 
-          {/* Authenticated Orders & Attendees */}
+          {/* Authenticated Orders */}
           <Route
             path="/orders"
             element={
               <RequireAuth>
                 <OrdersPage />
-              </RequireAuth>
-            }
-          />
-          <Route
-            path="/atendees"
-            element={
-              <RequireAuth>
-                <AtendeePage />
               </RequireAuth>
             }
           />

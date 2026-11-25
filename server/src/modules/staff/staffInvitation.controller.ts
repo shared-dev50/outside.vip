@@ -23,6 +23,7 @@ import {
   invalidateUserAuthCache,
   getUserAuthCacheVersion,
   populateUserAuthCacheAtomically,
+  setCachedUserSessionVersion,
 } from '../../lib/session.service.js';
 import { sendStaffOtpEmail } from '../../lib/email.service.js';
 import {
@@ -727,9 +728,15 @@ export async function verifyInvitationOtp(
       ver
     );
 
+    await setCachedUserSessionVersion(
+      transactionResult.user.id,
+      transactionResult.user.sessionVersion
+    );
+
     const issuedSession = await rotateSession({
       oldSessionId: req.session?.sessionId ?? null,
       userId: transactionResult.user.id,
+      sessionVersion: transactionResult.user.sessionVersion,
       ipAddress: req.ip,
       userAgent: req.headers['user-agent'] || null,
     });
