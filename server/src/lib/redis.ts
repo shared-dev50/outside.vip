@@ -296,18 +296,30 @@ function assertRedisAvailable(): void {
   }
 }
 
-class IoRedisStoreAdapter implements RedisStoreClient {
+export class IoRedisStoreAdapter implements RedisStoreClient {
   private client: Redis;
 
-  constructor(redisUrl: string) {
+  constructor(
+    redisUrl: string,
+    testTimeoutOverrides?: { connectTimeoutMs?: number; commandTimeoutMs?: number }
+  ) {
     const isTls = redisUrl.startsWith('rediss://');
     const rejectUnauthorized =
       (process.env.REDIS_TLS_REJECT_UNAUTHORIZED ?? env.REDIS_TLS_REJECT_UNAUTHORIZED) !== 'false';
+    const isNonProd = (process.env.NODE_ENV || env.NODE_ENV) !== 'production';
+    const connectTimeout =
+      isNonProd && testTimeoutOverrides?.connectTimeoutMs
+        ? testTimeoutOverrides.connectTimeoutMs
+        : 5000;
+    const commandTimeout =
+      isNonProd && testTimeoutOverrides?.commandTimeoutMs
+        ? testTimeoutOverrides.commandTimeoutMs
+        : 3000;
 
     this.client = new Redis(redisUrl, {
       maxRetriesPerRequest: 2,
-      connectTimeout: 5000,
-      commandTimeout: 3000,
+      connectTimeout,
+      commandTimeout,
       enableReadyCheck: true,
       ...(isTls ? { tls: { rejectUnauthorized } } : {}),
     });
@@ -578,6 +590,59 @@ class IoRedisStoreAdapter implements RedisStoreClient {
       }
     } while (cursor !== '0');
     return deleted;
+  }
+
+  async disconnectForTests(): Promise<void> {
+    if ((process.env.NODE_ENV || env.NODE_ENV) === 'production') {
+      throw new Error('disconnectForTests is not permitted in production');
+    }
+    this.client.disconnect(false);
+  }
+
+  async waitUntilReadyForTests(timeoutMs = 20_000): Promise<void> {
+    if ((process.env.NODE_ENV || env.NODE_ENV) === 'production') {
+      throw new Error('waitUntilReadyForTests is not permitted in production');
+    }
+    if (this.client.status === 'ready') {
+      return;
+    }
+    await new Promise<void>((resolve, reject) => {
+      let lastErr: Error | null = null;
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(
+          lastErr ||
+            new Error(`Redis client did not become ready within ${timeoutMs}ms`)
+        );
+      }, timeoutMs);
+      const onReady = () => {
+        cleanup();
+        resolve();
+      };
+      const onError = (err: Error) => {
+        lastErr = err;
+        if (/WRONGPASS|NOAUTH|ENOTFOUND/i.test(err.message)) {
+          cleanup();
+          reject(err);
+        }
+      };
+      const cleanup = () => {
+        clearTimeout(timer);
+        this.client.off('ready', onReady);
+        this.client.off('error', onError);
+      };
+      this.client.once('ready', onReady);
+      this.client.on('error', onError);
+    });
+  }
+
+  async quitForTests(): Promise<void> {
+    if ((process.env.NODE_ENV || env.NODE_ENV) === 'production') {
+      throw new Error('quitForTests is not permitted in production');
+    }
+    if (this.client.status !== 'end') {
+      await this.client.quit();
+    }
   }
 }
 
@@ -1069,5 +1134,46 @@ export function getRedisClient(): RedisStoreClient {
   }
 
   return memoryFallbackClient;
+}
+
+export function createIoRedisClientForTests(
+  redisUrl?: string,
+  options?: { connectTimeoutMs?: number; commandTimeoutMs?: number }
+): IoRedisStoreAdapter {
+  if ((process.env.NODE_ENV || env.NODE_ENV) === 'production') {
+    throw new Error('createIoRedisClientForTests is not permitted in production');
+  }
+  const effectiveUrl = (redisUrl ?? process.env.REDIS_URL ?? env.REDIS_URL ?? '').trim();
+  if (!effectiveUrl) {
+    throw new Error('REDIS_URL is required to create a real IoRedisStoreAdapter client for tests');
+  }
+  return new IoRedisStoreAdapter(effectiveUrl, {
+    connectTimeoutMs: options?.connectTimeoutMs ?? 6_000,
+    commandTimeoutMs: options?.commandTimeoutMs ?? 10_000,
+  });
+}
+
+export async function resetActiveRedisClientForTests(): Promise<void> {
+  if ((process.env.NODE_ENV || env.NODE_ENV) === 'production') {
+    throw new Error('resetActiveRedisClientForTests is not permitted in production');
+  }
+  if (activeClient instanceof IoRedisStoreAdapter) {
+    try {
+      await activeClient.quitForTests();
+    } catch {
+      await activeClient.disconnectForTests().catch(() => {});
+    }
+  }
+  activeClient = null;
+}
+
+export async function initActiveRedisClientForTests(
+  redisUrl?: string,
+  options?: { connectTimeoutMs?: number; commandTimeoutMs?: number }
+): Promise<IoRedisStoreAdapter> {
+  await resetActiveRedisClientForTests();
+  const client = createIoRedisClientForTests(redisUrl, options);
+  activeClient = client;
+  return client;
 }
 
