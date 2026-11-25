@@ -2114,7 +2114,8 @@ export async function reconcileBuyerRefundsFromStripeWebhook(
 }
 
 /**
- * Controlled manual resolution helper for operators closing a MANUAL_REVIEW_REQUIRED OrderRefund.
+ * Controlled manual resolution helper for operators closing a LATE_PAYMENT MANUAL_REVIEW_REQUIRED OrderRefund.
+ * Rejects buyer ticket refund, event cancellation, and external reconciled refund kinds before mutation.
  * Atomically updates OrderRefund, Order (when refund confirmed manually), and AdminAuditLog.
  */
 export async function resolveManualOrderRefund(input: {
@@ -2149,11 +2150,21 @@ export async function resolveManualOrderRefund(input: {
   return await prisma.$transaction(async (tx) => {
     const preLookup = await tx.orderRefund.findUnique({
       where: { id: input.orderRefundId },
-      select: { id: true, orderId: true },
+      select: { id: true, orderId: true, refundKind: true },
     });
 
     if (!preLookup) {
       throw new NotFoundError(`OrderRefund '${input.orderRefundId}' not found.`);
+    }
+
+    if (
+      preLookup.refundKind !== undefined &&
+      preLookup.refundKind !== OrderRefundKind.LATE_PAYMENT
+    ) {
+      throw new ConflictError(
+        `OrderRefund '${preLookup.id}' has unsupported refundKind '${preLookup.refundKind}' for resolveManualOrderRefund; only LATE_PAYMENT refunds are supported.`,
+        'UNSUPPORTED_MANUAL_REFUND_KIND'
+      );
     }
 
     // Preserve canonical Order -> OrderRefund lock ordering
@@ -2173,6 +2184,13 @@ export async function resolveManualOrderRefund(input: {
     const refund = lockedRefundRows[0];
     if (!refund) {
       throw new NotFoundError(`OrderRefund '${input.orderRefundId}' not found.`);
+    }
+
+    if (refund.refundKind !== OrderRefundKind.LATE_PAYMENT) {
+      throw new ConflictError(
+        `OrderRefund '${refund.id}' has unsupported refundKind '${refund.refundKind}' for resolveManualOrderRefund; only LATE_PAYMENT refunds are supported.`,
+        'UNSUPPORTED_MANUAL_REFUND_KIND'
+      );
     }
 
     if (

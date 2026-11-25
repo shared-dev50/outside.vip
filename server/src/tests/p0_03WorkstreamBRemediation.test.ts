@@ -1,8 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
+  EmailOutboxStatus,
   OrderRefundKind,
   OrderRefundStatus,
   OrderStatus,
+  PaymentStatus,
   Role,
   TicketStatus,
 } from '@prisma/client';
@@ -13,7 +15,9 @@ import {
   evaluateExistingStripeRefunds,
   processClaimedOrderRefundItem,
   reconcileOrderRefundFromStripeWebhook,
+  resolveManualOrderRefund,
 } from '../modules/refunds/orderRefund.service.js';
+import { ConflictError } from '../utils/errors.js';
 import { processStripeWebhookEvent } from '../modules/webhooks/webhook.service.js';
 import * as ledgerService from '../modules/finance/ledger.service.js';
 import { checkInTicket } from '../modules/organizer/organizer.controller.js';
@@ -467,5 +471,200 @@ describe('Stage 4 P0-03 Workstream B — P2-04 Isolation & Explicit Check-In Sta
         );
       }
     });
+  });
+
+  describe('Manual refund resolution guard (resolveManualOrderRefund)', () => {
+    it('allows LATE_PAYMENT manual resolution and preserves P2-04 Order, PaymentTransaction, EmailOutbox, and AdminAuditLog behavior', async () => {
+      const lateRow = {
+        id: 'or_late_manual_1',
+        orderId: 'ord_late_1',
+        stripePaymentIntentId: 'pi_late_manual_1',
+        stripeRefundId: null,
+        refundKind: OrderRefundKind.LATE_PAYMENT,
+        amountInCents: 2394,
+        currency: 'USD',
+        status: OrderRefundStatus.MANUAL_REVIEW_REQUIRED,
+        requiresManualResolution: true,
+        resolvedAt: null,
+      };
+
+      const txMock: any = {
+        orderRefund: {
+          findUnique: vi.fn().mockResolvedValueOnce({
+            id: lateRow.id,
+            orderId: lateRow.orderId,
+            refundKind: OrderRefundKind.LATE_PAYMENT,
+          }),
+          update: vi.fn().mockResolvedValueOnce({
+            ...lateRow,
+            status: OrderRefundStatus.MANUALLY_RESOLVED,
+            requiresManualResolution: false,
+            stripeRefundId: 're_manual_late_1',
+            resolutionAction: 'REFUNDED_MANUALLY',
+          }),
+        },
+        $queryRaw: vi
+          .fn()
+          .mockResolvedValueOnce([
+            { id: lateRow.orderId, status: OrderStatus.EXPIRED, orderNumber: 'OUT-LATE-1' },
+          ])
+          .mockResolvedValueOnce([lateRow]),
+        order: {
+          update: vi.fn().mockResolvedValueOnce({ id: lateRow.orderId, status: OrderStatus.REFUNDED }),
+        },
+        paymentTransaction: {
+          updateMany: vi.fn().mockResolvedValueOnce({ count: 1 }),
+        },
+        emailOutbox: {
+          updateMany: vi.fn().mockResolvedValueOnce({ count: 1 }),
+        },
+        adminAuditLog: {
+          create: vi.fn().mockResolvedValueOnce({ id: 'audit_late_1' }),
+        },
+      };
+
+      vi.spyOn(prisma, '$transaction').mockImplementationOnce(async (cb: any) => cb(txMock));
+
+      const resolved = await resolveManualOrderRefund({
+        orderRefundId: lateRow.id,
+        actorUserId: 'admin_1',
+        actorEmail: 'Admin@Outside.vip',
+        action: 'REFUNDED_MANUALLY',
+        stripeRefundId: 're_manual_late_1',
+        notes: 'Refunded manually in Stripe Dashboard',
+        ipAddress: '127.0.0.1',
+      });
+
+      expect(resolved.status).toBe(OrderRefundStatus.MANUALLY_RESOLVED);
+      expect(resolved.requiresManualResolution).toBe(false);
+      expect(txMock.orderRefund.update).toHaveBeenCalledTimes(1);
+      expect(txMock.order.update).toHaveBeenCalledWith({
+        where: { id: lateRow.orderId },
+        data: { status: OrderStatus.REFUNDED },
+      });
+      expect(txMock.paymentTransaction.updateMany).toHaveBeenCalledWith({
+        where: {
+          orderId: lateRow.orderId,
+          providerTransactionId: lateRow.stripePaymentIntentId,
+          status: PaymentStatus.SUCCEEDED,
+        },
+        data: { status: PaymentStatus.REFUNDED },
+      });
+      expect(txMock.emailOutbox.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ status: EmailOutboxStatus.PENDING }),
+          data: expect.objectContaining({ status: EmailOutboxStatus.CANCELLED }),
+        })
+      );
+      expect(txMock.adminAuditLog.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            action: 'ORDER_REFUND_MANUALLY_RESOLVED',
+            targetId: lateRow.id,
+          }),
+        })
+      );
+    });
+
+    it.each([
+      OrderRefundKind.ORGANIZER_TICKET_REFUND,
+      OrderRefundKind.ADMIN_TICKET_REFUND,
+      OrderRefundKind.EVENT_CANCELLATION,
+      OrderRefundKind.EXTERNAL_STRIPE_RECONCILED,
+    ])(
+      'rejects %s before any Order, Ticket, lock, counter, ledger, email, or audit mutation (preLookup and locked checks)',
+      async (unsupportedKind) => {
+        for (const omitKindOnPreLookup of [false, true]) {
+          vi.restoreAllMocks();
+          const refundRow = {
+            id: `or_${unsupportedKind}`,
+            orderId: 'ord_buyer_1',
+            stripePaymentIntentId: 'pi_buyer_1',
+            stripeRefundId: null,
+            refundKind: unsupportedKind,
+            amountInCents: 2394,
+            currency: 'USD',
+            status: OrderRefundStatus.MANUAL_REVIEW_REQUIRED,
+            requiresManualResolution: true,
+            resolvedAt: null,
+          };
+
+          const txMock: any = {
+            orderRefund: {
+              findUnique: vi.fn().mockResolvedValueOnce(
+                omitKindOnPreLookup
+                  ? { id: refundRow.id, orderId: refundRow.orderId }
+                  : { id: refundRow.id, orderId: refundRow.orderId, refundKind: unsupportedKind }
+              ),
+              update: vi.fn(),
+            },
+            orderRefundTicket: {
+              update: vi.fn(),
+              updateMany: vi.fn(),
+            },
+            ticket: {
+              update: vi.fn(),
+              updateMany: vi.fn(),
+            },
+            order: {
+              update: vi.fn(),
+            },
+            paymentTransaction: {
+              updateMany: vi.fn(),
+            },
+            financialLedgerEntry: {
+              create: vi.fn(),
+            },
+            emailOutbox: {
+              updateMany: vi.fn(),
+            },
+            adminAuditLog: {
+              create: vi.fn(),
+            },
+            $queryRaw: omitKindOnPreLookup
+              ? vi
+                  .fn()
+                  .mockResolvedValueOnce([
+                    { id: refundRow.orderId, status: OrderStatus.COMPLETED, orderNumber: 'OUT-1' },
+                  ])
+                  .mockResolvedValueOnce([refundRow])
+              : vi.fn(),
+          };
+
+          vi.spyOn(prisma, '$transaction').mockImplementationOnce(async (cb: any) => cb(txMock));
+
+          let caught: unknown;
+          try {
+            await resolveManualOrderRefund({
+              orderRefundId: refundRow.id,
+              actorUserId: 'admin_1',
+              actorEmail: 'admin@outside.vip',
+              action: 'REFUNDED_MANUALLY',
+              stripeRefundId: 're_manual_unsupported_1',
+              notes: 'Attempted manual resolution on unsupported kind',
+            });
+          } catch (err) {
+            caught = err;
+          }
+
+          expect(caught).toBeInstanceOf(ConflictError);
+          expect((caught as ConflictError).statusCode).toBe(409);
+          expect((caught as ConflictError).code).toBe('UNSUPPORTED_MANUAL_REFUND_KIND');
+          expect((caught as ConflictError).message).toContain(unsupportedKind);
+          expect((caught as ConflictError).message).toContain('LATE_PAYMENT');
+
+          expect(txMock.orderRefund.update).not.toHaveBeenCalled();
+          expect(txMock.orderRefundTicket.update).not.toHaveBeenCalled();
+          expect(txMock.orderRefundTicket.updateMany).not.toHaveBeenCalled();
+          expect(txMock.ticket.update).not.toHaveBeenCalled();
+          expect(txMock.ticket.updateMany).not.toHaveBeenCalled();
+          expect(txMock.order.update).not.toHaveBeenCalled();
+          expect(txMock.paymentTransaction.updateMany).not.toHaveBeenCalled();
+          expect(txMock.financialLedgerEntry.create).not.toHaveBeenCalled();
+          expect(txMock.emailOutbox.updateMany).not.toHaveBeenCalled();
+          expect(txMock.adminAuditLog.create).not.toHaveBeenCalled();
+        }
+      }
+    );
   });
 });
