@@ -2,6 +2,26 @@ import { app } from './app.js';
 import { env } from './config/env.js';
 import { prisma } from './db/prisma.js';
 import { startWaitlistBackgroundWorker, stopWaitlistBackgroundWorker } from './modules/waitlist/waitlistWorker.js';
+import {
+  EMAIL_OUTBOX_POLL_INTERVAL_MS,
+  startEmailOutboxWorker,
+  stopEmailOutboxWorker,
+} from './modules/notifications/emailOutboxWorker.js';
+import {
+  ORDER_REFUND_POLL_INTERVAL_MS,
+  startOrderRefundWorker,
+  stopOrderRefundWorker,
+} from './modules/refunds/orderRefundWorker.js';
+import {
+  SETTLEMENT_RECOVERY_POLL_INTERVAL_MS,
+  startSettlementRecoveryWorker,
+  stopSettlementRecoveryWorker,
+} from './modules/finance/settlementRecoveryWorker.js';
+import {
+  TRANSFER_RECONCILIATION_POLL_INTERVAL_MS,
+  startTransferReconciliationWorker,
+  stopTransferReconciliationWorker,
+} from './modules/finance/transferReconciliationWorker.js';
 
 async function startServer() {
   try {
@@ -9,15 +29,26 @@ async function startServer() {
     console.log('⚡ Connected to Outside.vip PostgreSQL database successfully');
 
     startWaitlistBackgroundWorker(60_000);
+    startEmailOutboxWorker(EMAIL_OUTBOX_POLL_INTERVAL_MS);
+    startOrderRefundWorker(ORDER_REFUND_POLL_INTERVAL_MS);
+    startSettlementRecoveryWorker(SETTLEMENT_RECOVERY_POLL_INTERVAL_MS);
+    startTransferReconciliationWorker(TRANSFER_RECONCILIATION_POLL_INTERVAL_MS);
 
     const server = app.listen(env.PORT, () => {
       console.log(`🚀 Outside.vip API server listening on http://localhost:${env.PORT}`);
       console.log(`📡 Health check available at http://localhost:${env.PORT}/api/health`);
     });
 
+    let isShuttingDown = false;
     const shutdown = async (signal: string) => {
+      if (isShuttingDown) return;
+      isShuttingDown = true;
       console.log(`\n🛑 Received ${signal}. Gracefully terminating Outside.vip server...`);
-      stopWaitlistBackgroundWorker();
+      await stopWaitlistBackgroundWorker();
+      await stopEmailOutboxWorker();
+      await stopOrderRefundWorker();
+      await stopSettlementRecoveryWorker();
+      await stopTransferReconciliationWorker();
       server.close(async () => {
         await prisma.$disconnect();
         console.log('✅ PostgreSQL disconnected. Process exited.');

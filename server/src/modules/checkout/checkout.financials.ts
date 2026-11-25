@@ -46,6 +46,8 @@ export const PLATFORM_FEE_PERCENT = 10;
 export const SERVICE_FEE_CENTS = 95;
 export const STRIPE_PERCENT = 0.029;
 export const STRIPE_FIXED_CENTS = 30;
+export const MIN_POSITIVE_GROSS_PRICE_CENTS = 1;
+export const STRIPE_MIN_USD_CHARGE_CENTS = 50;
 
 export interface TierFeeBreakdown {
   ticketPriceInCents: number;
@@ -304,5 +306,76 @@ export function calculateCheckoutFeeBreakdown(
     organizerEarningsInCents,
     platformRevenueInCents,
   };
+}
+
+/**
+ * Minimum all-in buyer display price in cents for a paid ticket tier,
+ * derived strictly from the canonical gross-to-display formula (130 cents = $1.30 for 1-cent gross).
+ */
+export const MIN_PAID_DISPLAY_PRICE_CENTS = calculateDisplayPriceFromGross(
+  MIN_POSITIVE_GROSS_PRICE_CENTS
+);
+
+export interface TicketTierPricingInput {
+  priceInCents?: number | null;
+  displayPriceInCents?: number | null;
+}
+
+export interface TicketTierPricingValidationResult {
+  valid: boolean;
+  resolvedPriceInCents?: number;
+  field?: 'priceInCents' | 'displayPriceInCents';
+  message?: string;
+}
+
+/**
+ * Validates ticket-tier gross and display pricing inputs under the canonical formula
+ * and prevents silent conversion of positive sub-minimum display prices into free tiers.
+ */
+export function validateAndResolveTicketTierPricing(
+  input: TicketTierPricingInput
+): TicketTierPricingValidationResult {
+  const hasGross = input.priceInCents !== undefined && input.priceInCents !== null;
+  const hasDisplay = input.displayPriceInCents !== undefined && input.displayPriceInCents !== null;
+
+  if (hasDisplay) {
+    const display = input.displayPriceInCents!;
+    if (display > 0 && display < MIN_PAID_DISPLAY_PRICE_CENTS) {
+      return {
+        valid: false,
+        field: 'displayPriceInCents',
+        message: `Paid tickets require an all-in display price of at least $${(
+          MIN_PAID_DISPLAY_PRICE_CENTS / 100
+        ).toFixed(2)} (${MIN_PAID_DISPLAY_PRICE_CENTS} cents), or enter 0 for a free ticket.`,
+      };
+    }
+  }
+
+  if (hasGross && hasDisplay) {
+    const gross = input.priceInCents!;
+    const display = input.displayPriceInCents!;
+    const expectedDisplay = calculateDisplayPriceFromGross(gross);
+    if (display !== expectedDisplay) {
+      return {
+        valid: false,
+        field: 'displayPriceInCents',
+        message: `Ticket tier pricing mismatch: priceInCents (${gross}) corresponds to displayPriceInCents (${expectedDisplay}), received ${display}.`,
+      };
+    }
+    return { valid: true, resolvedPriceInCents: gross };
+  }
+
+  if (hasGross) {
+    return { valid: true, resolvedPriceInCents: input.priceInCents! };
+  }
+
+  if (hasDisplay) {
+    return {
+      valid: true,
+      resolvedPriceInCents: calculateGrossPriceFromDisplay(input.displayPriceInCents!),
+    };
+  }
+
+  return { valid: true, resolvedPriceInCents: 0 };
 }
 

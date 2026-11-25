@@ -152,6 +152,44 @@ end
 return 'INVALID:' .. tostring(nextAttempts)
 `;
 
+export const SLIDING_WINDOW_RATE_LIMIT_LUA = `
+local key = KEYS[1]
+local nowMs = tonumber(ARGV[1])
+local windowMs = tonumber(ARGV[2])
+local maxRequests = tonumber(ARGV[3])
+local memberId = ARGV[4]
+
+if not nowMs or not windowMs or not maxRequests or windowMs <= 0 or maxRequests <= 0 then
+  return {0, 0, math.max(1, math.floor(windowMs or 1000))}
+end
+
+local cutoff = nowMs - windowMs
+redis.call('ZREMRANGEBYSCORE', key, '-inf', cutoff)
+
+local count = tonumber(redis.call('ZCARD', key)) or 0
+if count >= maxRequests then
+  local oldest = redis.call('ZRANGE', key, 0, 0, 'WITHSCORES')
+  local retryAfterMs = windowMs
+  if oldest and #oldest >= 2 then
+    local oldestScore = tonumber(oldest[2])
+    if oldestScore then
+      retryAfterMs = math.max(1, math.floor((oldestScore + windowMs) - nowMs))
+    end
+  end
+  return {0, count, retryAfterMs}
+end
+
+redis.call('ZADD', key, nowMs, memberId)
+redis.call('PEXPIRE', key, math.max(1, math.floor(windowMs)))
+return {1, count + 1, 0}
+`;
+
+export interface SlidingWindowRateLimitResult {
+  allowed: boolean;
+  count: number;
+  retryAfterMs: number;
+}
+
 export type LoginOtpRollbackResult =
   | 'RESTORED_PRIOR'
   | 'DELETED'
@@ -231,6 +269,14 @@ export interface RedisStoreClient {
     versionTtlMs?: number
   ): Promise<number>;
   ping(): Promise<string>;
+  consumeSlidingWindowRateLimit(
+    key: string,
+    maxRequests: number,
+    windowMs: number,
+    nowMs?: number,
+    memberId?: string
+  ): Promise<SlidingWindowRateLimitResult>;
+  delByPrefixForTests?(prefix: string): Promise<number>;
   flushAllForTests?(): Promise<void>;
 }
 
@@ -250,18 +296,30 @@ function assertRedisAvailable(): void {
   }
 }
 
-class IoRedisStoreAdapter implements RedisStoreClient {
+export class IoRedisStoreAdapter implements RedisStoreClient {
   private client: Redis;
 
-  constructor(redisUrl: string) {
+  constructor(
+    redisUrl: string,
+    testTimeoutOverrides?: { connectTimeoutMs?: number; commandTimeoutMs?: number }
+  ) {
     const isTls = redisUrl.startsWith('rediss://');
     const rejectUnauthorized =
       (process.env.REDIS_TLS_REJECT_UNAUTHORIZED ?? env.REDIS_TLS_REJECT_UNAUTHORIZED) !== 'false';
+    const isNonProd = (process.env.NODE_ENV || env.NODE_ENV) !== 'production';
+    const connectTimeout =
+      isNonProd && testTimeoutOverrides?.connectTimeoutMs
+        ? testTimeoutOverrides.connectTimeoutMs
+        : 5000;
+    const commandTimeout =
+      isNonProd && testTimeoutOverrides?.commandTimeoutMs
+        ? testTimeoutOverrides.commandTimeoutMs
+        : 3000;
 
     this.client = new Redis(redisUrl, {
       maxRetriesPerRequest: 2,
-      connectTimeout: 5000,
-      commandTimeout: 3000,
+      connectTimeout,
+      commandTimeout,
       enableReadyCheck: true,
       ...(isTls ? { tls: { rejectUnauthorized } } : {}),
     });
@@ -483,6 +541,114 @@ class IoRedisStoreAdapter implements RedisStoreClient {
     assertRedisAvailable();
     return this.client.ping();
   }
+
+  async consumeSlidingWindowRateLimit(
+    key: string,
+    maxRequests: number,
+    windowMs: number,
+    nowMs = Date.now(),
+    memberId?: string
+  ): Promise<SlidingWindowRateLimitResult> {
+    assertRedisAvailable();
+    const effectiveNow = Math.floor(nowMs);
+    const effectiveWindow = Math.max(1, Math.floor(windowMs));
+    const effectiveMax = Math.max(0, Math.floor(maxRequests));
+    const uniqueMember = memberId ?? `${effectiveNow}:${crypto.randomUUID()}`;
+    const raw = (await this.client.eval(
+      SLIDING_WINDOW_RATE_LIMIT_LUA,
+      1,
+      key,
+      effectiveNow.toString(),
+      effectiveWindow.toString(),
+      effectiveMax.toString(),
+      uniqueMember
+    )) as unknown[];
+    const allowed = Number(Array.isArray(raw) ? raw[0] : 0) === 1;
+    const count = Number(Array.isArray(raw) ? raw[1] : 0) || 0;
+    const retryAfterMs = Number(Array.isArray(raw) ? raw[2] : 0) || 0;
+    return { allowed, count, retryAfterMs };
+  }
+
+  async delByPrefixForTests(prefix: string): Promise<number> {
+    if ((process.env.NODE_ENV || env.NODE_ENV) === 'production') {
+      throw new Error('delByPrefixForTests is not permitted in production');
+    }
+    assertRedisAvailable();
+    let cursor = '0';
+    let deleted = 0;
+    do {
+      const [nextCursor, keys] = await this.client.scan(
+        cursor,
+        'MATCH',
+        `${prefix}*`,
+        'COUNT',
+        100
+      );
+      cursor = nextCursor;
+      if (keys.length > 0) {
+        deleted += await this.client.del(...keys);
+      }
+    } while (cursor !== '0');
+    return deleted;
+  }
+
+  async disconnectForTests(): Promise<void> {
+    if ((process.env.NODE_ENV || env.NODE_ENV) === 'production') {
+      throw new Error('disconnectForTests is not permitted in production');
+    }
+    this.client.disconnect(false);
+  }
+
+  async waitUntilReadyForTests(timeoutMs = 20_000): Promise<void> {
+    if ((process.env.NODE_ENV || env.NODE_ENV) === 'production') {
+      throw new Error('waitUntilReadyForTests is not permitted in production');
+    }
+    if (this.client.status === 'ready') {
+      return;
+    }
+    await new Promise<void>((resolve, reject) => {
+      let lastErr: Error | null = null;
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(
+          lastErr ||
+            new Error(`Redis client did not become ready within ${timeoutMs}ms`)
+        );
+      }, timeoutMs);
+      const onReady = () => {
+        cleanup();
+        resolve();
+      };
+      const onError = (err: Error) => {
+        lastErr = err;
+        if (/WRONGPASS|NOAUTH|ENOTFOUND/i.test(err.message)) {
+          cleanup();
+          reject(err);
+        }
+      };
+      const cleanup = () => {
+        clearTimeout(timer);
+        this.client.off('ready', onReady);
+        this.client.off('error', onError);
+      };
+      this.client.once('ready', onReady);
+      this.client.on('error', onError);
+    });
+  }
+
+  async quitForTests(): Promise<void> {
+    if ((process.env.NODE_ENV || env.NODE_ENV) === 'production') {
+      throw new Error('quitForTests is not permitted in production');
+    }
+    if (this.client.status !== 'end') {
+      await this.client.quit();
+    }
+  }
+}
+
+interface MemoryZSetEntry {
+  entries: Map<string, number>;
+  expiresAt: number | null;
 }
 
 interface MemoryEntry {
@@ -503,9 +669,10 @@ interface MemorySetEntry {
 class AtomicMemoryRedisAdapter implements RedisStoreClient {
   private kv = new Map<string, MemoryEntry>();
   private sets = new Map<string, MemorySetEntry>();
+  private zsets = new Map<string, MemoryZSetEntry>();
 
-  private isExpired(expiresAt: number | null): boolean {
-    return expiresAt !== null && Date.now() >= expiresAt;
+  private isExpired(expiresAt: number | null, referenceNowMs = Date.now()): boolean {
+    return expiresAt !== null && referenceNowMs >= expiresAt;
   }
 
   private getValidStringEntry(key: string): MemoryEntry | null {
@@ -523,6 +690,16 @@ class AtomicMemoryRedisAdapter implements RedisStoreClient {
     if (!entry) return null;
     if (this.isExpired(entry.expiresAt)) {
       this.sets.delete(key);
+      return null;
+    }
+    return entry;
+  }
+
+  private getValidZSetEntry(key: string, referenceNowMs = Date.now()): MemoryZSetEntry | null {
+    const entry = this.zsets.get(key);
+    if (!entry) return null;
+    if (this.isExpired(entry.expiresAt, referenceNowMs)) {
+      this.zsets.delete(key);
       return null;
     }
     return entry;
@@ -712,6 +889,7 @@ class AtomicMemoryRedisAdapter implements RedisStoreClient {
     for (const k of keys) {
       if (this.kv.delete(k)) count++;
       if (this.sets.delete(k)) count++;
+      if (this.zsets.delete(k)) count++;
     }
     return count;
   }
@@ -725,6 +903,10 @@ class AtomicMemoryRedisAdapter implements RedisStoreClient {
     const setEntry = this.getValidSetEntry(key);
     if (setEntry) {
       return setEntry.expiresAt === null ? -1 : Math.max(0, setEntry.expiresAt - Date.now());
+    }
+    const zsetEntry = this.getValidZSetEntry(key);
+    if (zsetEntry) {
+      return zsetEntry.expiresAt === null ? -1 : Math.max(0, zsetEntry.expiresAt - Date.now());
     }
     return -2;
   }
@@ -740,6 +922,11 @@ class AtomicMemoryRedisAdapter implements RedisStoreClient {
     const setEntry = this.getValidSetEntry(key);
     if (setEntry) {
       setEntry.expiresAt = nextExpiresAt;
+      return 1;
+    }
+    const zsetEntry = this.getValidZSetEntry(key);
+    if (zsetEntry) {
+      zsetEntry.expiresAt = nextExpiresAt;
       return 1;
     }
     return 0;
@@ -837,9 +1024,92 @@ class AtomicMemoryRedisAdapter implements RedisStoreClient {
     return 'PONG';
   }
 
+  async consumeSlidingWindowRateLimit(
+    key: string,
+    maxRequests: number,
+    windowMs: number,
+    nowMs = Date.now(),
+    memberId?: string
+  ): Promise<SlidingWindowRateLimitResult> {
+    assertRedisAvailable();
+    if (!Number.isFinite(nowMs) || !Number.isFinite(windowMs) || !Number.isFinite(maxRequests) || windowMs <= 0 || maxRequests <= 0) {
+      return {
+        allowed: false,
+        count: 0,
+        retryAfterMs: Math.max(1, Math.floor(windowMs || 1000)),
+      };
+    }
+
+    const effectiveNow = Math.floor(nowMs);
+    const effectiveWindow = Math.max(1, Math.floor(windowMs));
+    const effectiveMax = Math.floor(maxRequests);
+    const cutoff = effectiveNow - effectiveWindow;
+
+    let entry = this.getValidZSetEntry(key, effectiveNow);
+    if (entry) {
+      for (const [m, score] of entry.entries.entries()) {
+        if (score <= cutoff) {
+          entry.entries.delete(m);
+        }
+      }
+      if (entry.entries.size === 0) {
+        this.zsets.delete(key);
+        entry = null;
+      }
+    }
+
+    const count = entry ? entry.entries.size : 0;
+    if (count >= effectiveMax && entry) {
+      let oldestScore: number | null = null;
+      for (const score of entry.entries.values()) {
+        if (oldestScore === null || score < oldestScore) {
+          oldestScore = score;
+        }
+      }
+      const retryAfterMs =
+        oldestScore !== null
+          ? Math.max(1, Math.floor(oldestScore + effectiveWindow - effectiveNow))
+          : effectiveWindow;
+      return { allowed: false, count, retryAfterMs };
+    }
+
+    const activeEntry: MemoryZSetEntry = entry ?? {
+      entries: new Map<string, number>(),
+      expiresAt: effectiveNow + effectiveWindow,
+    };
+    const uniqueMember = memberId ?? `${effectiveNow}:${crypto.randomUUID()}`;
+    activeEntry.entries.set(uniqueMember, effectiveNow);
+    activeEntry.expiresAt = effectiveNow + effectiveWindow;
+    this.zsets.set(key, activeEntry);
+
+    return {
+      allowed: true,
+      count: activeEntry.entries.size,
+      retryAfterMs: 0,
+    };
+  }
+
+  async delByPrefixForTests(prefix: string): Promise<number> {
+    if ((process.env.NODE_ENV || env.NODE_ENV) === 'production') {
+      throw new Error('delByPrefixForTests is not permitted in production');
+    }
+    let deleted = 0;
+    for (const k of Array.from(this.kv.keys())) {
+      if (k.startsWith(prefix) && this.kv.delete(k)) deleted++;
+    }
+    for (const k of Array.from(this.sets.keys())) {
+      if (k.startsWith(prefix) && this.sets.delete(k)) deleted++;
+    }
+    for (const k of Array.from(this.zsets.keys())) {
+      if (k.startsWith(prefix) && this.zsets.delete(k)) deleted++;
+    }
+    return deleted;
+  }
+
   async flushAllForTests(): Promise<void> {
     this.kv.clear();
     this.sets.clear();
+    this.zsets.clear();
   }
 }
 
@@ -864,5 +1134,46 @@ export function getRedisClient(): RedisStoreClient {
   }
 
   return memoryFallbackClient;
+}
+
+export function createIoRedisClientForTests(
+  redisUrl?: string,
+  options?: { connectTimeoutMs?: number; commandTimeoutMs?: number }
+): IoRedisStoreAdapter {
+  if ((process.env.NODE_ENV || env.NODE_ENV) === 'production') {
+    throw new Error('createIoRedisClientForTests is not permitted in production');
+  }
+  const effectiveUrl = (redisUrl ?? process.env.REDIS_URL ?? env.REDIS_URL ?? '').trim();
+  if (!effectiveUrl) {
+    throw new Error('REDIS_URL is required to create a real IoRedisStoreAdapter client for tests');
+  }
+  return new IoRedisStoreAdapter(effectiveUrl, {
+    connectTimeoutMs: options?.connectTimeoutMs ?? 6_000,
+    commandTimeoutMs: options?.commandTimeoutMs ?? 10_000,
+  });
+}
+
+export async function resetActiveRedisClientForTests(): Promise<void> {
+  if ((process.env.NODE_ENV || env.NODE_ENV) === 'production') {
+    throw new Error('resetActiveRedisClientForTests is not permitted in production');
+  }
+  if (activeClient instanceof IoRedisStoreAdapter) {
+    try {
+      await activeClient.quitForTests();
+    } catch {
+      await activeClient.disconnectForTests().catch(() => {});
+    }
+  }
+  activeClient = null;
+}
+
+export async function initActiveRedisClientForTests(
+  redisUrl?: string,
+  options?: { connectTimeoutMs?: number; commandTimeoutMs?: number }
+): Promise<IoRedisStoreAdapter> {
+  await resetActiveRedisClientForTests();
+  const client = createIoRedisClientForTests(redisUrl, options);
+  activeClient = client;
+  return client;
 }
 

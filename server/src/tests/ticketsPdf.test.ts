@@ -77,7 +77,14 @@ describe('Outside.vip Ticket PDF Generation & QR Credential Validation', () => {
       },
     });
     expect(event).toBeTruthy();
-    tier = event.ticketTiers.find((t: any) => t.priceInCents > 0);
+    tier = event.ticketTiers.find(
+      (t: any) =>
+        t.priceInCents > 0 &&
+        t.status === 'ACTIVE' &&
+        !t.isHidden &&
+        !t.isSalesDisabled &&
+        t.totalCapacity - t.soldQuantity - t.reservedQuantity >= 2
+    );
     expect(tier).toBeTruthy();
 
     // Create a clean test order with 2 tickets belonging to attendeeUser

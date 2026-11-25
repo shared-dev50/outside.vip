@@ -159,12 +159,12 @@ Make sure the Stripe CLI is authenticated to the **Outside.vip sandbox**, then r
 
 ```
 stripe listen \
-  --events checkout.session.completed,checkout.session.expired,checkout.session.async_payment_succeeded,checkout.session.async_payment_failed \
+  --events checkout.session.completed,checkout.session.expired,checkout.session.async_payment_succeeded,checkout.session.async_payment_failed,payment_intent.succeeded,payment_intent.payment_failed,charge.updated,charge.refunded,refund.created,refund.failed,refund.updated \
   --forward-to localhost:4000/api/webhooks/stripe
 ```
 ```
 stripe listen \
-  --events checkout.session.completed,checkout.session.expired,checkout.session.async_payment_succeeded,checkout.session.async_payment_failed \
+  --events account.updated,capability.updated,payout.canceled,payout.created,payout.failed,payout.paid,payout.updated,transfer.canceled,transfer.created,transfer.reversed \
   --forward-to localhost:4000/api/webhooks/stripe
   ```
 

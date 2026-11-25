@@ -1,18 +1,20 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../lib/api';
+import { resolveOrganizerEventUiPermissions } from '../lib/eventPermissions';
 import { useOptionalAuth } from '../context/AuthContext';
 import { EmailVerificationGate } from '../components/auth/EmailVerificationGate';
 import { AuthFormCard } from '../components/auth/AuthFormCard';
 import {
   EventCategory,
-  TicketTierStatus,
   RecurrenceFrequency,
   EventFeatureType,
   EventGalleryImage,
   EventFeature,
   User,
+  StripeConnectedAccountStatus,
+  StripeConnectCountry,
 } from '../types';
 import {
   ArrowLeft,
@@ -46,16 +48,24 @@ import {
   ArrowDown,
 } from 'lucide-react';
 import {
-  calculateTierEarnings,
   calculateCombinedEarnings,
   calculateDisplayPriceFromGross,
   calculateGrossPriceFromDisplay,
+  MIN_PAID_DISPLAY_PRICE_CENTS,
   formatCents,
 } from '../lib/fees';
 import { extractYouTubeVideoId, getYouTubeEmbedUrl } from '../lib/youtube';
 import { ImageCropModal } from '../components/events/ImageCropModal';
 import { UploadProgressCard, UploadProgressInfo } from '../components/events/UploadProgressCard';
 import { LocationAutocompleteInput } from '../components/events/LocationAutocompleteInput';
+import { TicketTierEditorSection } from '../components/events/TicketTierEditorSection';
+import { StripeOnboardingGateModal } from '../components/events/StripeOnboardingGateModal';
+import {
+  isStripeReadyForPaidPublishing,
+  hasVisiblePaidTicketTier,
+  isStripeOnboardingIncompleteError,
+  buildEventEditStripeUrls,
+} from '../lib/stripeOnboardingGate';
 import {
   TIMEZONE_GROUPS,
   formatTimezoneDisplay,
@@ -65,31 +75,17 @@ import {
 } from '../lib/timezone';
 import { validateImageFile } from '../lib/imageCrop';
 import { NumericInput } from '../components/common/NumericInput';
+import {
+  FormTicketTier,
+  TicketTierFieldErrors,
+  createEmptyTicketTier,
+  mapExistingTicketTierToForm,
+  validateTicketTiers,
+  buildTicketTierPayload,
+  computeVisibleMinDisplayPrice,
+} from '../lib/ticketCreation';
 
 export type WizardStep = 1 | 2 | 3 | 4;
-
-interface FormTicketTier {
-  id?: string;
-  tempId: string;
-  name: string;
-  description: string;
-  price: number | ''; // Gross price in USD (organiser earns before fees)
-  displayPrice: number | ''; // All-in Display price in USD (customer pays incl fees)
-  totalCapacity: number | '';
-  minPerOrder: number | '';
-  maxPerOrder: number | '';
-  hasSalesPeriod?: boolean;
-  salesStartAt: string;
-  salesEndAt: string;
-  hasTicketValidity?: boolean;
-  validityStartAt?: string;
-  validityEndAt?: string;
-  status: TicketTierStatus;
-  soldQuantity?: number;
-  waitlistEnabled?: boolean;
-  waitlistWaitingCount?: number;
-  waitlistOfferedCount?: number;
-}
 
 const PRESET_COVERS = [
   {
@@ -152,12 +148,15 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
   const { id } = useParams<{ id: string }>();
   const isEditing = Boolean(id);
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const queryClient = useQueryClient();
   const auth = useOptionalAuth();
   const user = initialUser !== undefined ? initialUser : auth?.user;
   const isLoading = initialIsLoading !== undefined ? initialIsLoading : (auth?.isLoading ?? false);
 
-  const [currentStep, setCurrentStep] = useState<WizardStep>(1);
+  const [currentStep, setCurrentStep] = useState<WizardStep>(
+    searchParams.get('step') === 'tickets' ? 3 : 1
+  );
 
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
@@ -196,6 +195,28 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
   });
   const galleryAbortControllerRef = useRef<AbortController | null>(null);
   const isSubmittingRef = useRef<boolean>(false);
+  const createdDraftIdRef = useRef<string | null>(null);
+  const handledStripeReturnRef = useRef<boolean>(false);
+  const isMountedRef = useRef<boolean>(true);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
+  const [isCheckingStripeReadiness, setIsCheckingStripeReadiness] = useState(false);
+  const [showStripeGateModal, setShowStripeGateModal] = useState(false);
+  const [stripeAccountStatus, setStripeAccountStatus] =
+    useState<StripeConnectedAccountStatus | null>(null);
+  const [stripeSupportedCountries, setStripeSupportedCountries] = useState<
+    StripeConnectCountry[]
+  >([]);
+  const [stripeSelectedCountry, setStripeSelectedCountry] = useState<string>('US');
+  const [isStartingStripeSetup, setIsStartingStripeSetup] = useState(false);
+  const [stripeGateError, setStripeGateError] = useState<string | null>(null);
+  const [stripeGateNotice, setStripeGateNotice] = useState<string | null>(null);
 
   const isAnyImageUploading = isUploadingImage || isUploadingGallery;
 
@@ -249,44 +270,10 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
   const [cancelReason, setCancelReason] = useState('');
   const [cancelSeriesMode, setCancelSeriesMode] = useState(false);
 
-  const [ticketTiers, setTicketTiers] = useState<FormTicketTier[]>([
-    {
-      tempId: 'default-1',
-      name: 'Early Bird General Admission',
-      description: 'Standard entrance with early arrival benefits before 10 PM.',
-      price: 25,
-      displayPrice: calculateDisplayPriceFromGross(2500) / 100,
-      totalCapacity: 250,
-      minPerOrder: 1,
-      maxPerOrder: 6,
-      hasSalesPeriod: false,
-      salesStartAt: '',
-      salesEndAt: '',
-      hasTicketValidity: false,
-      validityStartAt: '',
-      validityEndAt: '',
-      status: 'ACTIVE',
-      waitlistEnabled: false,
-    },
-    {
-      tempId: 'default-2',
-      name: 'VIP Deck & Lounge',
-      description: 'Expedited admission line, elevated sound deck, and complimentary welcome drink.',
-      price: 75,
-      displayPrice: calculateDisplayPriceFromGross(7500) / 100,
-      totalCapacity: 100,
-      minPerOrder: 1,
-      maxPerOrder: 4,
-      hasSalesPeriod: false,
-      salesStartAt: '',
-      salesEndAt: '',
-      hasTicketValidity: false,
-      validityStartAt: '',
-      validityEndAt: '',
-      status: 'ACTIVE',
-      waitlistEnabled: false,
-    },
-  ]);
+  const [ticketTiers, setTicketTiers] = useState<FormTicketTier[]>([]);
+  const [tierValidationErrors, setTierValidationErrors] = useState<
+    Record<string, TicketTierFieldErrors>
+  >({});
 
   const [notification, setNotification] = useState<{
     type: 'success' | 'error';
@@ -303,6 +290,29 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
     queryFn: () => api.organizer.getEvent(id!),
     enabled: isEditing,
   });
+
+  const existingEvent = existingData?.event;
+  const uiPerms = resolveOrganizerEventUiPermissions(
+    isEditing ? existingEvent : undefined,
+    user
+  );
+  const canEditDetails = !isEditing || uiPerms.canEditDetails;
+  const canManageTickets = !isEditing || uiPerms.canManageTickets;
+  const canPublishOrUnpublish = !isEditing || uiPerms.canPublishOrUnpublish;
+  const canCancelOccurrence = isEditing && uiPerms.canCancelOccurrence;
+  const canCancelSeries = isEditing && uiPerms.canCancelSeries;
+  const canAccessFinance = !isEditing || uiPerms.canAccessFinance;
+  const isTicketsOnlyMode = isEditing && canManageTickets && !canEditDetails;
+  const isDetailsOnlyMode = isEditing && canEditDetails && !canManageTickets;
+  const isReadOnlyEditor = isEditing && !canEditDetails && !canManageTickets;
+  const canSaveChanges = !isEditing || canEditDetails || canManageTickets;
+  const activeStep: WizardStep = isTicketsOnlyMode ? 3 : currentStep;
+
+  useEffect(() => {
+    if (isTicketsOnlyMode) {
+      setCurrentStep(3);
+    }
+  }, [isTicketsOnlyMode]);
 
   useEffect(() => {
     if (existingData?.event) {
@@ -332,41 +342,16 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
       }
 
       if (evt.ticketTiers && evt.ticketTiers.length > 0) {
+        const tierTz = evt.timezone || DEFAULT_US_TIMEZONE;
         setTicketTiers(
-          evt.ticketTiers.map((tier) => {
-            const grossPrice = tier.priceInCents / 100;
-            const displayPrice =
-              tier.displayPriceInCents !== undefined
-                ? tier.displayPriceInCents / 100
-                : calculateDisplayPriceFromGross(tier.priceInCents) / 100;
-            const hasSales = Boolean(tier.salesStartAt || tier.salesEndAt);
-            const hasValidity = Boolean(tier.validityStartAt || tier.validityEndAt);
-            const tierTz = evt.timezone || DEFAULT_US_TIMEZONE;
-            return {
-              id: tier.id,
-              tempId: tier.id,
-              name: tier.name,
-              description: tier.description || '',
-              price: grossPrice,
-              displayPrice,
-              totalCapacity: tier.totalCapacity,
-              minPerOrder: tier.minPerOrder,
-              maxPerOrder: tier.maxPerOrder,
-              hasSalesPeriod: hasSales,
-              salesStartAt: toInputValueInTimezone(tier.salesStartAt, tierTz),
-              salesEndAt: toInputValueInTimezone(tier.salesEndAt, tierTz),
-              hasTicketValidity: hasValidity,
-              validityStartAt: toInputValueInTimezone(tier.validityStartAt, tierTz),
-              validityEndAt: toInputValueInTimezone(tier.validityEndAt, tierTz),
-              status: tier.status,
-              soldQuantity: tier.soldQuantity,
-              waitlistEnabled: Boolean(tier.waitlistEnabled),
-              waitlistWaitingCount: tier.waitlistWaitingCount || 0,
-              waitlistOfferedCount: tier.waitlistOfferedCount || 0,
-            };
-          })
+          evt.ticketTiers.map((tier) =>
+            mapExistingTicketTierToForm(tier, tierTz, toInputValueInTimezone)
+          )
         );
+      } else {
+        setTicketTiers([]);
       }
+      setTierValidationErrors({});
       if (evt.galleryImages && Array.isArray(evt.galleryImages)) {
         setGalleryImages(evt.galleryImages);
       }
@@ -394,27 +379,7 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
   }, [startAt, isEditing]);
 
   const addTicketTier = () => {
-    setTicketTiers((prev) => [
-      ...prev,
-      {
-        tempId: Math.random().toString(36).substring(7),
-        name: 'General Admission',
-        description: 'Standard event entry pass.',
-        price: 40,
-        displayPrice: calculateDisplayPriceFromGross(4000) / 100,
-        totalCapacity: 300,
-        minPerOrder: 1,
-        maxPerOrder: 6,
-        hasSalesPeriod: false,
-        salesStartAt: '',
-        salesEndAt: '',
-        hasTicketValidity: false,
-        validityStartAt: '',
-        validityEndAt: '',
-        status: 'ACTIVE',
-        waitlistEnabled: false,
-      },
-    ]);
+    setTicketTiers((prev) => [...prev, createEmptyTicketTier()]);
     setHasUnsavedChanges(true);
   };
 
@@ -423,19 +388,27 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
     if (tier && tier.soldQuantity && tier.soldQuantity > 0) {
       showNotification(
         'error',
-        `Tier "${tier.name}" already has ${tier.soldQuantity} ticket sale(s) and cannot be deleted. You can mark it as HIDDEN or PAUSED instead.`
+        `Ticket "${tier.name}" already has ${tier.soldQuantity} ticket sale(s) and cannot be deleted. You can hide it or disable ticket sales under Additional settings instead.`
       );
       return;
     }
-    if (ticketTiers.length <= 1) {
-      showNotification('error', 'An event must have at least one ticket tier.');
-      return;
-    }
     setTicketTiers((prev) => prev.filter((t) => t.tempId !== tempId));
+    setTierValidationErrors((prev) => {
+      if (!prev[tempId]) return prev;
+      const next = { ...prev };
+      delete next[tempId];
+      return next;
+    });
     setHasUnsavedChanges(true);
   };
 
   const updateTier = (tempId: string, field: keyof FormTicketTier, value: any) => {
+    setTierValidationErrors((prev) => {
+      if (!prev[tempId]) return prev;
+      const next = { ...prev };
+      delete next[tempId];
+      return next;
+    });
     setTicketTiers((prev) =>
       prev.map((tier) => {
         if (tier.tempId !== tempId) return tier;
@@ -467,7 +440,12 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
             calculatedGross = 0;
           } else {
             const displayCents = Math.round(Number(displayVal) * 100);
-            calculatedGross = calculateGrossPriceFromDisplay(displayCents) / 100;
+            if (displayCents >= MIN_PAID_DISPLAY_PRICE_CENTS) {
+              calculatedGross = calculateGrossPriceFromDisplay(displayCents) / 100;
+            } else {
+              // Keep gross blank so positive sub-minimum display inputs (< $1.30) never coerce to $0 Free
+              calculatedGross = '';
+            }
           }
           return {
             ...tier,
@@ -996,56 +974,12 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
           }
         }
       }
-    } else if (stepNumber === 3) {
-      if (ticketTiers.length === 0) {
-        showNotification('error', 'At least one ticket tier is required.');
+    } else if (stepNumber === 3 && !isDetailsOnlyMode) {
+      const validation = validateTicketTiers(ticketTiers, { requireAtLeastOne: true });
+      setTierValidationErrors(validation.tierErrors);
+      if (!validation.isValid) {
+        showNotification('error', validation.summaryError || 'Please complete all required ticket fields.');
         return false;
-      }
-      for (const tier of ticketTiers) {
-        if (!tier.name.trim()) {
-          showNotification('error', 'All ticket tiers must have a valid tier name.');
-          return false;
-        }
-        if (tier.totalCapacity === '' || Number(tier.totalCapacity) < 1) {
-          showNotification('error', `Capacity for "${tier.name}" must be at least 1.`);
-          return false;
-        }
-        if (tier.price === '' || isNaN(Number(tier.price)) || Number(tier.price) < 0) {
-          showNotification('error', `Please provide a valid price for "${tier.name}" (enter 0 for free admission).`);
-          return false;
-        }
-        if (tier.minPerOrder !== '' && Number(tier.minPerOrder) < 1) {
-          showNotification('error', `Min per order for "${tier.name}" must be at least 1.`);
-          return false;
-        }
-        if (tier.maxPerOrder !== '' && Number(tier.maxPerOrder) < 1) {
-          showNotification('error', `Max per order for "${tier.name}" must be at least 1.`);
-          return false;
-        }
-        if (tier.minPerOrder !== '' && tier.maxPerOrder !== '' && Number(tier.maxPerOrder) < Number(tier.minPerOrder)) {
-          showNotification('error', `Max per order cannot be less than min per order for "${tier.name}".`);
-          return false;
-        }
-        if (tier.hasSalesPeriod) {
-          if (tier.salesStartAt && tier.salesEndAt) {
-            const startMs = new Date(tier.salesStartAt).getTime();
-            const endMs = new Date(tier.salesEndAt).getTime();
-            if (endMs <= startMs) {
-              showNotification('error', `Sales start time must precede sales end time for "${tier.name}".`);
-              return false;
-            }
-          }
-        }
-        if (tier.hasTicketValidity) {
-          if (tier.validityStartAt && tier.validityEndAt) {
-            const startMs = new Date(tier.validityStartAt).getTime();
-            const endMs = new Date(tier.validityEndAt).getTime();
-            if (endMs <= startMs) {
-              showNotification('error', `Ticket validity start time must precede validity end time for "${tier.name}".`);
-              return false;
-            }
-          }
-        }
       }
     }
     return true;
@@ -1069,30 +1003,17 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
 
   const buildPayload = (statusOverride?: 'DRAFT' | 'PUBLISHED') => {
     const eventTz = timezone || DEFAULT_US_TIMEZONE;
-    const formattedTiers = ticketTiers.map((tier) => {
-      const priceInCents = Math.round((Number(tier.price) || 0) * 100);
-      const displayPriceInCents = calculateDisplayPriceFromGross(priceInCents);
+    const formattedTiers = ticketTiers.map((tier) =>
+      buildTicketTierPayload(tier, eventTz, toIsoValueInTimezone)
+    );
+
+    // Ticket-only Event Admins submit strictly ticket tier updates without event detail fields
+    if (isTicketsOnlyMode) {
       return {
-        ...(tier.id ? { id: tier.id } : {}),
-        name: tier.name.trim() || 'General Admission',
-        description: tier.description.trim() || null,
-        priceInCents,
-        displayPriceInCents,
-        currency: 'USD',
-        totalCapacity: Math.max(1, Number(tier.totalCapacity) || 1),
-        minPerOrder: Math.max(1, Number(tier.minPerOrder) || 1),
-        maxPerOrder: Math.max(
-          Math.max(1, Number(tier.minPerOrder) || 1),
-          Number(tier.maxPerOrder) || 1
-        ),
-        salesStartAt: tier.hasSalesPeriod && tier.salesStartAt ? toIsoValueInTimezone(tier.salesStartAt, eventTz) : null,
-        salesEndAt: tier.hasSalesPeriod && tier.salesEndAt ? toIsoValueInTimezone(tier.salesEndAt, eventTz) : null,
-        validityStartAt: tier.hasTicketValidity && tier.validityStartAt ? toIsoValueInTimezone(tier.validityStartAt, eventTz) : null,
-        validityEndAt: tier.hasTicketValidity && tier.validityEndAt ? toIsoValueInTimezone(tier.validityEndAt, eventTz) : null,
-        status: tier.status,
-        waitlistEnabled: Boolean(tier.waitlistEnabled),
+        ticketTiers: formattedTiers,
+        ...((isEditing && existingData?.event?.seriesId) ? { applyToFuture } : {}),
       };
-    });
+    }
 
     const fullDescription = doorPolicy.trim() && !description.includes(doorPolicy.trim())
       ? (description.trim() ? `${description.trim()}\n\nDoor Policy: ${doorPolicy.trim()}` : `Door Policy: ${doorPolicy.trim()}`)
@@ -1107,7 +1028,7 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
       timezone: timezone || DEFAULT_US_TIMEZONE,
     } : undefined;
 
-    return {
+    const payload: Record<string, any> = {
       title: title.trim() || 'Untitled Experience Draft',
       description: fullDescription,
       category,
@@ -1125,8 +1046,8 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
       timezone: timezone || DEFAULT_US_TIMEZONE,
       ageRestriction: ageRestriction || '18+',
       dressCode: dressCode.trim() || null,
-      status: statusOverride || currentStatus,
-      ticketTiers: formattedTiers,
+      ...(canPublishOrUnpublish || !isEditing ? { status: statusOverride || currentStatus } : {}),
+      ...(!isDetailsOnlyMode ? { ticketTiers: formattedTiers } : {}),
       recurrence: recurrencePayload,
       applyToFuture: (isEditing && existingData?.event?.seriesId) ? applyToFuture : undefined,
       galleryImages: galleryImages.map((img, i) => ({
@@ -1148,6 +1069,151 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
       isPasswordProtected,
       ...(password.trim() ? { password: password.trim() } : {}),
     };
+
+    return payload;
+  };
+
+  const loadSupportedCountriesIfNeeded = async () => {
+    if (stripeSupportedCountries.length > 0) return;
+    try {
+      const res = await api.finance.getSupportedCountries();
+      if (res?.countries && res.countries.length > 0) {
+        setStripeSupportedCountries(res.countries);
+      }
+      if (res?.defaultCountry && !stripeAccountStatus?.country) {
+        setStripeSelectedCountry(res.defaultCountry);
+      }
+    } catch {
+      // Modal falls back cleanly to default supported countries list
+    }
+  };
+
+  useEffect(() => {
+    const isStripeReturn = searchParams.get('stripe_return') === 'true';
+    const isStripeRefresh = searchParams.get('stripe_refresh') === 'true';
+    if (!isStripeReturn && !isStripeRefresh) {
+      handledStripeReturnRef.current = false;
+      return;
+    }
+    if (!user || handledStripeReturnRef.current) {
+      return;
+    }
+
+    handledStripeReturnRef.current = true;
+    const nextParams = new URLSearchParams(searchParams);
+    nextParams.delete('stripe_return');
+    nextParams.delete('stripe_refresh');
+    setSearchParams(nextParams, { replace: true });
+    setCurrentStep(4);
+
+    const recheckStripeReadiness = async () => {
+      setIsCheckingStripeReadiness(true);
+      try {
+        const freshStatus = await api.finance.getStatus();
+        if (!isMountedRef.current) return;
+        setStripeAccountStatus(freshStatus);
+        if (freshStatus.country) {
+          setStripeSelectedCountry(freshStatus.country);
+        }
+        queryClient.invalidateQueries({ queryKey: ['finance-account-status'] });
+
+        if (isStripeReadyForPaidPublishing(freshStatus)) {
+          setShowStripeGateModal(false);
+          setStripeGateNotice(null);
+          setStripeGateError(null);
+          showNotification(
+            'success',
+            'Stripe setup complete! Your account is ready — click Publish Live whenever you are ready to publish your event.'
+          );
+        } else {
+          void loadSupportedCountriesIfNeeded();
+          const notice = isStripeRefresh
+            ? 'Your previous Stripe setup session expired before completion. Click Complete Stripe Setup to resume.'
+            : freshStatus.requirements?.pendingVerification &&
+              freshStatus.requirements.pendingVerification.length > 0
+            ? 'Stripe is still reviewing your submitted details. Check back shortly or keep your event saved as a draft.'
+            : 'Your Stripe setup is not complete yet. Finish the remaining Stripe verification steps to publish paid events, or keep your event saved as a draft.';
+          setStripeGateError(null);
+          setStripeGateNotice(notice);
+          setShowStripeGateModal(true);
+        }
+      } catch (err: any) {
+        if (!isMountedRef.current) return;
+        if ((err?.statusCode || err?.status) === 401) {
+          auth?.clearSessionState?.();
+          return;
+        }
+        showNotification(
+          'error',
+          'Returned from Stripe, but we could not verify your account readiness right now. Please click Publish Live again in a moment.'
+        );
+      } finally {
+        if (isMountedRef.current) {
+          setIsCheckingStripeReadiness(false);
+        }
+      }
+    };
+
+    void recheckStripeReadiness();
+  }, [user, searchParams, setSearchParams, queryClient, auth]);
+
+  const validateBeforeSaveOrPublish = (publish: boolean): string | null => {
+    if (isTicketsOnlyMode) {
+      const willBePublished = currentStatus === 'PUBLISHED';
+      const ticketValidation = validateTicketTiers(ticketTiers, {
+        requireAtLeastOne: willBePublished,
+        requireVisibleForPublish: willBePublished,
+      });
+      setTierValidationErrors(ticketValidation.tierErrors);
+      if (!ticketValidation.isValid) {
+        return ticketValidation.summaryError || 'Please complete all required ticket fields.';
+      }
+      return null;
+    }
+
+    if (isUploadingImage || isUploadingGallery) {
+      return 'Please wait for the image uploads to complete before saving.';
+    }
+
+    if (!coverImageUrl || !coverImageUrl.trim()) {
+      return 'A cover artwork image is required for the event.';
+    }
+
+    if (coverImageUrl.startsWith('data:image/') && coverImageUrl !== existingData?.event?.coverImageUrl) {
+      return 'Base64 image data cannot be newly uploaded. Please use the image upload option.';
+    }
+
+    const startMs = new Date(startAt).getTime();
+    const endMs = new Date(endAt).getTime();
+    if (endMs <= startMs) {
+      return 'Event end time must be after the start time.';
+    }
+
+    if (publish) {
+      if (!title.trim() || title.trim().length < 2) {
+        return 'Event title must be at least 2 characters long to publish.';
+      }
+      if (!venueName.trim()) {
+        return 'Venue name is required before publishing.';
+      }
+      if (!city.trim()) {
+        return 'City is required before publishing.';
+      }
+    }
+
+    if (!isDetailsOnlyMode) {
+      const willBePublished = publish || currentStatus === 'PUBLISHED';
+      const ticketValidation = validateTicketTiers(ticketTiers, {
+        requireAtLeastOne: willBePublished,
+        requireVisibleForPublish: willBePublished,
+      });
+      setTierValidationErrors(ticketValidation.tierErrors);
+      if (!ticketValidation.isValid) {
+        return ticketValidation.summaryError || 'Please complete all required ticket fields.';
+      }
+    }
+
+    return null;
   };
 
   const saveMutation = useMutation({
@@ -1158,51 +1224,25 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
       isSubmittingRef.current = true;
 
       try {
-        if (isUploadingImage || isUploadingGallery) {
-          throw new Error('Please wait for the image uploads to complete before saving.');
-        }
-
-        if (!coverImageUrl || !coverImageUrl.trim()) {
-          throw new Error('A cover artwork image is required for the event.');
-        }
-
-        if (coverImageUrl.startsWith('data:image/') && coverImageUrl !== existingData?.event?.coverImageUrl) {
-          throw new Error('Base64 image data cannot be newly uploaded. Please use the image upload option.');
-        }
-
-        const startMs = new Date(startAt).getTime();
-        const endMs = new Date(endAt).getTime();
-        if (endMs <= startMs) {
-          throw new Error('Event end time must be after the start time.');
-        }
-
-        if (publish) {
-          if (!title.trim() || title.trim().length < 2) {
-            throw new Error('Event title must be at least 2 characters long to publish.');
-          }
-          if (!venueName.trim()) {
-            throw new Error('Venue name is required before publishing.');
-          }
-          if (!city.trim()) {
-            throw new Error('City is required before publishing.');
-          }
-          if (ticketTiers.length === 0) {
-            throw new Error('At least one ticket tier is required to publish.');
-          }
+        const validationError = validateBeforeSaveOrPublish(publish);
+        if (validationError) {
+          throw new Error(validationError);
         }
 
         const payload = buildPayload(publish ? 'PUBLISHED' : undefined);
+        const targetEventId = id || createdDraftIdRef.current;
 
-        let savedEventId = id;
-        if (isEditing && id) {
-          const res = await api.organizer.updateEvent(id, payload);
+        let savedEventId = targetEventId || undefined;
+        if (targetEventId) {
+          const res = await api.organizer.updateEvent(targetEventId, payload);
           savedEventId = res.event.id;
           if (publish && res.event.status !== 'PUBLISHED') {
-            await api.organizer.publishEvent(savedEventId, applyToFuture);
+            await api.organizer.publishEvent(savedEventId, isEditing ? applyToFuture : isRecurring);
           }
         } else {
           const res = await api.organizer.createEvent(payload);
           savedEventId = res.event.id;
+          createdDraftIdRef.current = savedEventId;
           if (publish && res.event.status !== 'PUBLISHED') {
             await api.organizer.publishEvent(savedEventId, isRecurring);
           }
@@ -1216,6 +1256,9 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
     },
     onSuccess: ({ eventId, published }) => {
       setHasUnsavedChanges(false);
+      setShowStripeGateModal(false);
+      setStripeGateError(null);
+      setStripeGateNotice(null);
       queryClient.invalidateQueries({ queryKey: ['organizer-dashboard'] });
       queryClient.invalidateQueries({ queryKey: ['organizer-events'] });
       queryClient.invalidateQueries({ queryKey: ['organizer-event', eventId] });
@@ -1244,9 +1287,166 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
     },
     onError: (err: any) => {
       isSubmittingRef.current = false;
+      if ((err?.statusCode || err?.status) === 401) {
+        auth?.clearSessionState?.();
+        return;
+      }
+      if (isStripeOnboardingIncompleteError(err)) {
+        setStripeGateError(null);
+        setStripeGateNotice(null);
+        setShowStripeGateModal(true);
+        void loadSupportedCountriesIfNeeded();
+        void api.finance
+          .getStatus()
+          .then((status) => {
+            setStripeAccountStatus(status);
+            if (status.country) {
+              setStripeSelectedCountry(status.country);
+            }
+          })
+          .catch(() => {});
+        return;
+      }
       showNotification('error', err?.message || 'Failed to save event. Check fields and try again.');
     },
   });
+
+  const handlePublishClick = async () => {
+    if (
+      isSubmittingRef.current ||
+      saveMutation.isPending ||
+      isCheckingStripeReadiness ||
+      isAnyImageUploading
+    ) {
+      return;
+    }
+
+    const validationError = validateBeforeSaveOrPublish(true);
+    if (validationError) {
+      showNotification('error', validationError);
+      return;
+    }
+
+    // Free events (all visible tiers priced at $0) can publish without Stripe onboarding
+    if (!hasVisiblePaidTicketTier(ticketTiers)) {
+      saveMutation.mutate({ publish: true });
+      return;
+    }
+
+    setIsCheckingStripeReadiness(true);
+    try {
+      const status = await api.finance.getStatus();
+      setStripeAccountStatus(status);
+      if (status.country) {
+        setStripeSelectedCountry(status.country);
+      }
+
+      if (isStripeReadyForPaidPublishing(status)) {
+        setIsCheckingStripeReadiness(false);
+        saveMutation.mutate({ publish: true });
+        return;
+      }
+
+      setStripeGateError(null);
+      setStripeGateNotice(
+        status.connectionStatus === 'invalid_or_inaccessible'
+          ? 'Your connected Stripe account is no longer accessible and must be reconnected before publishing.'
+          : null
+      );
+      setShowStripeGateModal(true);
+      void loadSupportedCountriesIfNeeded();
+    } catch (err: any) {
+      if ((err?.statusCode || err?.status) === 401) {
+        auth?.clearSessionState?.();
+        return;
+      }
+      // Fall back to authoritative backend check on publish if preflight status read fails
+      setIsCheckingStripeReadiness(false);
+      saveMutation.mutate({ publish: true });
+      return;
+    } finally {
+      setIsCheckingStripeReadiness(false);
+    }
+  };
+
+  const handleCompleteStripeSetup = async () => {
+    if (isStartingStripeSetup || saveMutation.isPending || isSubmittingRef.current) {
+      return;
+    }
+
+    setIsStartingStripeSetup(true);
+    setStripeGateError(null);
+
+    let savedDraftId = id || createdDraftIdRef.current;
+
+    try {
+      // Preserve current event & ticket information as a draft before redirecting to Stripe
+      const draftPayload = buildPayload('DRAFT');
+      if (savedDraftId) {
+        const res = await api.organizer.updateEvent(savedDraftId, draftPayload);
+        savedDraftId = res.event.id;
+      } else {
+        const res = await api.organizer.createEvent(draftPayload);
+        savedDraftId = res.event.id;
+        createdDraftIdRef.current = savedDraftId;
+      }
+
+      setHasUnsavedChanges(false);
+      queryClient.invalidateQueries({ queryKey: ['organizer-dashboard'] });
+      queryClient.invalidateQueries({ queryKey: ['organizer-events'] });
+      queryClient.invalidateQueries({ queryKey: ['organizer-event', savedDraftId] });
+
+      const origin =
+        typeof window !== 'undefined' && window.location?.origin
+          ? window.location.origin
+          : 'https://outside.vip';
+      const { returnUrl, refreshUrl } = buildEventEditStripeUrls(origin, savedDraftId);
+
+      const isReconnect = stripeAccountStatus?.connectionStatus === 'invalid_or_inaccessible';
+      const needsCountry = !stripeAccountStatus?.connected || isReconnect;
+
+      const linkRes = await api.finance.createOnboardingLink({
+        returnUrl,
+        refreshUrl,
+        ...(isReconnect ? { reconnect: true } : {}),
+        ...(needsCountry ? { country: stripeSelectedCountry } : {}),
+      });
+
+      if (!linkRes?.url) {
+        throw new Error(
+          'Your event was saved as a draft, but we did not receive a Stripe setup link. Please try again.'
+        );
+      }
+
+      window.location.href = linkRes.url;
+    } catch (err: any) {
+      if ((err?.statusCode || err?.status) === 401) {
+        auth?.clearSessionState?.();
+        setIsStartingStripeSetup(false);
+        return;
+      }
+
+      let message = 'Could not start Stripe setup right now. Please try again.';
+      if (err?.code === 'STRIPE_CONFIGURATION_UNAVAILABLE') {
+        message =
+          'Stripe Connect is currently being configured for this platform. Your event has been saved as a draft so you can return later.';
+      } else if (err?.code === 'STRIPE_SERVICE_UNAVAILABLE') {
+        message =
+          'Stripe is temporarily unreachable. Your event has been saved as a draft — please try again in a moment.';
+      } else if (err?.message) {
+        message = err.message;
+      }
+      setStripeGateError(message);
+      setIsStartingStripeSetup(false);
+    }
+  };
+
+  const handleModalSaveAsDraft = () => {
+    if (isStartingStripeSetup || saveMutation.isPending || isSubmittingRef.current) {
+      return;
+    }
+    saveMutation.mutate({ publish: false });
+  };
 
   const unpublishMutation = useMutation({
     mutationFn: async ({ unpublishSeries }: { unpublishSeries?: boolean }) => {
@@ -1417,9 +1617,17 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
                 )}
               </div>
               <div className="text-[11px] text-stone-500 font-mono hidden sm:flex items-center gap-2">
-                <span>Four-Step Wizard</span>
-                <span>•</span>
-                <span>Step {currentStep} of 4: {wizardSteps[currentStep - 1].title}</span>
+                {isTicketsOnlyMode ? (
+                  <span>Ticket Management Mode</span>
+                ) : isReadOnlyEditor ? (
+                  <span>Read-Only Event Overview</span>
+                ) : (
+                  <>
+                    <span>Four-Step Wizard</span>
+                    <span>•</span>
+                    <span>Step {activeStep} of 4: {wizardSteps[activeStep - 1].title}</span>
+                  </>
+                )}
               </div>
             </div>
           </div>
@@ -1436,51 +1644,71 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
               </Link>
             )}
 
-            <button
-              type="button"
-              onClick={() => saveMutation.mutate({ publish: false })}
-              disabled={saveMutation.isPending || isAnyImageUploading || isSubmittingRef.current}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-white hover:bg-stone-100 text-stone-900 border border-stone-300 text-xs font-mono font-semibold transition-colors disabled:opacity-50 shadow-2xs"
-            >
-              <Save className="w-3.5 h-3.5 text-stone-500" />
-              <span>{saveMutation.isPending ? 'Saving...' : 'Save Draft'}</span>
-            </button>
-
-            {currentStatus === 'PUBLISHED' ? (
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => unpublishMutation.mutate({})}
-                  disabled={unpublishMutation.isPending || isAnyImageUploading}
-                  className="px-3 py-2 rounded-lg bg-stone-100 hover:bg-stone-200 text-stone-700 border border-stone-300 text-xs font-mono font-semibold transition-colors disabled:opacity-50 shadow-2xs"
-                >
-                  Unpublish
-                </button>
-                <button
-                  type="button"
-                  onClick={() => saveMutation.mutate({ publish: false })}
-                  disabled={saveMutation.isPending || isAnyImageUploading || isSubmittingRef.current}
-                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-stone-900 hover:bg-black text-white font-semibold text-xs font-mono uppercase tracking-wider transition-all duration-200 shadow-2xs disabled:opacity-50"
-                >
-                  Update Live
-                </button>
-              </div>
-            ) : (
+            {canSaveChanges && (
               <button
                 type="button"
-                onClick={() => saveMutation.mutate({ publish: true })}
+                onClick={() => saveMutation.mutate({ publish: false })}
                 disabled={saveMutation.isPending || isAnyImageUploading || isSubmittingRef.current}
-                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-stone-900 hover:bg-black text-white font-semibold text-xs font-mono uppercase tracking-wider transition-all duration-200 shadow-2xs disabled:opacity-50"
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-white hover:bg-stone-100 text-stone-900 border border-stone-300 text-xs font-mono font-semibold transition-colors disabled:opacity-50 shadow-2xs"
               >
-                <Globe className="w-3.5 h-3.5" />
+                <Save className="w-3.5 h-3.5 text-stone-500" />
                 <span>
                   {saveMutation.isPending
-                    ? 'Publishing...'
-                    : isRecurring && !isEditing
-                    ? 'Publish Series'
-                    : 'Publish Live'}
+                    ? 'Saving...'
+                    : isTicketsOnlyMode
+                    ? 'Save Tickets'
+                    : currentStatus === 'PUBLISHED' && !canPublishOrUnpublish
+                    ? 'Save Changes'
+                    : 'Save Draft'}
                 </span>
               </button>
+            )}
+
+            {canPublishOrUnpublish && (
+              currentStatus === 'PUBLISHED' ? (
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => unpublishMutation.mutate({})}
+                    disabled={unpublishMutation.isPending || isAnyImageUploading}
+                    className="px-3 py-2 rounded-lg bg-stone-100 hover:bg-stone-200 text-stone-700 border border-stone-300 text-xs font-mono font-semibold transition-colors disabled:opacity-50 shadow-2xs"
+                  >
+                    Unpublish
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => saveMutation.mutate({ publish: false })}
+                    disabled={saveMutation.isPending || isAnyImageUploading || isSubmittingRef.current}
+                    className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-stone-900 hover:bg-black text-white font-semibold text-xs font-mono uppercase tracking-wider transition-all duration-200 shadow-2xs disabled:opacity-50"
+                  >
+                    Update Live
+                  </button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  data-testid="header-publish-btn"
+                  onClick={handlePublishClick}
+                  disabled={
+                    saveMutation.isPending ||
+                    isCheckingStripeReadiness ||
+                    isAnyImageUploading ||
+                    isSubmittingRef.current
+                  }
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-stone-900 hover:bg-black text-white font-semibold text-xs font-mono uppercase tracking-wider transition-all duration-200 shadow-2xs disabled:opacity-50"
+                >
+                  <Globe className="w-3.5 h-3.5" />
+                  <span>
+                    {isCheckingStripeReadiness
+                      ? 'Checking...'
+                      : saveMutation.isPending
+                      ? 'Publishing...'
+                      : isRecurring && !isEditing
+                      ? 'Publish Series'
+                      : 'Publish Live'}
+                  </span>
+                </button>
+              )
             )}
           </div>
         </div>
@@ -1510,99 +1738,105 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
         </div>
       )}
 
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mt-6">
-        <div className="bg-white border border-stone-200 rounded-xl p-4 sm:p-5 shadow-xs">
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 sm:gap-4">
-            {wizardSteps.map((step) => {
-              const StepIcon = step.icon;
-              const isActive = currentStep === step.number;
-              const isPassed = currentStep > step.number;
-              return (
-                <button
-                  key={step.number}
-                  type="button"
-                  onClick={() => {
-                    if (isPassed || validateStep(currentStep)) {
-                      setCurrentStep(step.number);
-                    }
-                  }}
-                  className={`flex items-center gap-3 p-3 rounded-lg text-left transition-all ${
-                    isActive
-                      ? 'bg-stone-900 text-white shadow-xs'
-                      : isPassed
-                      ? 'bg-stone-100/80 hover:bg-stone-200/70 text-stone-900'
-                      : 'bg-transparent text-stone-400 hover:text-stone-600'
-                  }`}
-                >
-                  <div
-                    className={`w-7 h-7 rounded-full flex items-center justify-center shrink-0 text-xs font-mono font-bold transition-colors ${
+      {!isTicketsOnlyMode && !isReadOnlyEditor && (
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mt-6">
+          <div className="bg-white border border-stone-200 rounded-xl p-4 sm:p-5 shadow-xs">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 sm:gap-4">
+              {wizardSteps.map((step) => {
+                const StepIcon = step.icon;
+                const isActive = activeStep === step.number;
+                const isPassed = activeStep > step.number;
+                return (
+                  <button
+                    key={step.number}
+                    type="button"
+                    onClick={() => {
+                      if (isPassed || validateStep(activeStep)) {
+                        setCurrentStep(step.number);
+                      }
+                    }}
+                    className={`flex items-center gap-3 p-3 rounded-lg text-left transition-all ${
                       isActive
-                        ? 'bg-white text-stone-900'
+                        ? 'bg-stone-900 text-white shadow-xs'
                         : isPassed
-                        ? 'bg-emerald-600 text-white'
-                        : 'border border-stone-300 text-stone-500'
+                        ? 'bg-stone-100/80 hover:bg-stone-200/70 text-stone-900'
+                        : 'bg-transparent text-stone-400 hover:text-stone-600'
                     }`}
                   >
-                    {isPassed ? <Check className="w-4 h-4 stroke-[3]" /> : step.number}
-                  </div>
-                  <div className="min-w-0">
-                    <div className="text-xs font-mono font-bold uppercase tracking-wider truncate flex items-center gap-1.5">
-                      <StepIcon className="w-3.5 h-3.5 shrink-0 hidden sm:inline" />
-                      <span>{step.title}</span>
-                    </div>
                     <div
-                      className={`text-[10px] font-sans truncate hidden sm:block ${
-                        isActive ? 'text-stone-300' : 'text-stone-500'
+                      className={`w-7 h-7 rounded-full flex items-center justify-center shrink-0 text-xs font-mono font-bold transition-colors ${
+                        isActive
+                          ? 'bg-white text-stone-900'
+                          : isPassed
+                          ? 'bg-emerald-600 text-white'
+                          : 'border border-stone-300 text-stone-500'
                       }`}
                     >
-                      {step.subtitle}
+                      {isPassed ? <Check className="w-4 h-4 stroke-[3]" /> : step.number}
                     </div>
-                  </div>
-                </button>
-              );
-            })}
+                    <div className="min-w-0">
+                      <div className="text-xs font-mono font-bold uppercase tracking-wider truncate flex items-center gap-1.5">
+                        <StepIcon className="w-3.5 h-3.5 shrink-0 hidden sm:inline" />
+                        <span>{step.title}</span>
+                      </div>
+                      <div
+                        className={`text-[10px] font-sans truncate hidden sm:block ${
+                          isActive ? 'text-stone-300' : 'text-stone-500'
+                        }`}
+                      >
+                        {step.subtitle}
+                      </div>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
           </div>
         </div>
-      </div>
+      )}
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mt-6">
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
           <aside className="lg:col-span-3 space-y-4 lg:sticky lg:top-24 order-2 lg:order-1">
             <div className="bg-white rounded-xl border border-stone-200 p-5 space-y-4 shadow-xs">
-              <div className="text-[11px] font-mono uppercase tracking-wider text-stone-500 font-bold border-b border-stone-100 pb-2">
-                Wizard Navigation
-              </div>
+              {!isTicketsOnlyMode && !isReadOnlyEditor && (
+                <>
+                  <div className="text-[11px] font-mono uppercase tracking-wider text-stone-500 font-bold border-b border-stone-100 pb-2">
+                    Wizard Navigation
+                  </div>
 
-              <div className="space-y-1.5">
-                {wizardSteps.map((step) => {
-                  const Icon = step.icon;
-                  const isActive = currentStep === step.number;
-                  return (
-                    <button
-                      key={step.number}
-                      type="button"
-                      onClick={() => {
-                        if (currentStep > step.number || validateStep(currentStep)) {
-                          setCurrentStep(step.number);
-                        }
-                      }}
-                      className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-xs font-mono text-left transition-colors ${
-                        isActive
-                          ? 'bg-stone-900 text-white font-bold'
-                          : 'text-stone-600 hover:text-stone-900 hover:bg-stone-100'
-                      }`}
-                    >
-                      <div className="flex items-center gap-2.5">
-                        <Icon className={`w-3.5 h-3.5 ${isActive ? 'text-white' : 'text-stone-400'}`} />
-                        <span>{step.number}. {step.title}</span>
-                      </div>
-                      {currentStep > step.number && (
-                        <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
+                  <div className="space-y-1.5">
+                    {wizardSteps.map((step) => {
+                      const Icon = step.icon;
+                      const isActive = activeStep === step.number;
+                      return (
+                        <button
+                          key={step.number}
+                          type="button"
+                          onClick={() => {
+                            if (activeStep > step.number || validateStep(activeStep)) {
+                              setCurrentStep(step.number);
+                            }
+                          }}
+                          className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-xs font-mono text-left transition-colors ${
+                            isActive
+                              ? 'bg-stone-900 text-white font-bold'
+                              : 'text-stone-600 hover:text-stone-900 hover:bg-stone-100'
+                          }`}
+                        >
+                          <div className="flex items-center gap-2.5">
+                            <Icon className={`w-3.5 h-3.5 ${isActive ? 'text-white' : 'text-stone-400'}`} />
+                            <span>{step.number}. {step.title}</span>
+                          </div>
+                          {activeStep > step.number && (
+                            <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </>
+              )}
 
               <div className="pt-3 border-t border-stone-200/80 space-y-2 text-[11px] font-mono text-stone-500">
                 <div className="flex justify-between">
@@ -1624,17 +1858,11 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
                 <div className="flex justify-between">
                   <span>Display Price (From):</span>
                   <span className="text-stone-900 font-bold">
-                    {ticketTiers.length > 0
-                      ? (() => {
-                          const minDisplay = Math.min(
-                            ...ticketTiers.map((t) => {
-                              const p = Number(t.price) || 0;
-                              return p > 0 ? calculateDisplayPriceFromGross(Math.round(p * 100)) / 100 : 0;
-                            })
-                          );
-                          return minDisplay === 0 ? 'Free' : `$${minDisplay.toFixed(2)}`;
-                        })()
-                      : '$0.00'}
+                    {(() => {
+                      const minDisplay = computeVisibleMinDisplayPrice(ticketTiers);
+                      if (minDisplay === null) return '—';
+                      return minDisplay === 0 ? 'Free' : `$${minDisplay.toFixed(2)}`;
+                    })()}
                   </span>
                 </div>
                 <div className="flex justify-between">
@@ -1645,30 +1873,34 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
                 </div>
               </div>
 
-              <div className="pt-3 border-t border-stone-200/80">
-                <Link
-                  to="/organizer/finance"
-                  className="flex items-center justify-between text-[11px] font-mono text-stone-600 hover:text-stone-900 p-2 rounded-lg bg-stone-50 hover:bg-stone-100 transition-colors"
-                >
-                  <span className="font-semibold">Finance & Payout Settings</span>
-                  <ChevronRight className="w-3.5 h-3.5 text-stone-400" />
-                </Link>
-              </div>
-
-              {isEditing && currentStatus !== 'CANCELLED' && (
-                <div className="pt-2 border-t border-stone-200/80">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setCancelSeriesMode(false);
-                      setCancelReason('');
-                      setShowCancelModal(true);
-                    }}
-                    className="w-full py-1.5 text-center text-[11px] font-mono text-rose-600 hover:text-rose-800 hover:bg-rose-50 rounded transition-colors"
+              {canAccessFinance && (
+                <div className="pt-3 border-t border-stone-200/80">
+                  <Link
+                    to="/organizer/finance"
+                    className="flex items-center justify-between text-[11px] font-mono text-stone-600 hover:text-stone-900 p-2 rounded-lg bg-stone-50 hover:bg-stone-100 transition-colors"
                   >
-                    Cancel Event Occurrence
-                  </button>
-                  {existingData?.event?.seriesId && (
+                    <span className="font-semibold">Finance & Payout Settings</span>
+                    <ChevronRight className="w-3.5 h-3.5 text-stone-400" />
+                  </Link>
+                </div>
+              )}
+
+              {isEditing && currentStatus !== 'CANCELLED' && (canCancelOccurrence || canCancelSeries) && (
+                <div className="pt-2 border-t border-stone-200/80">
+                  {canCancelOccurrence && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCancelSeriesMode(false);
+                        setCancelReason('');
+                        setShowCancelModal(true);
+                      }}
+                      className="w-full py-1.5 text-center text-[11px] font-mono text-rose-600 hover:text-rose-800 hover:bg-rose-50 rounded transition-colors"
+                    >
+                      Cancel Event Occurrence
+                    </button>
+                  )}
+                  {canCancelSeries && (
                     <button
                       type="button"
                       onClick={() => {
@@ -1687,7 +1919,42 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
           </aside>
 
           <main className="lg:col-span-9 space-y-6 order-1 lg:order-2">
-            {currentStep === 1 && (
+            {isReadOnlyEditor && (
+              <div className="bg-white rounded-xl border border-stone-200/90 p-6 sm:p-8 space-y-4 shadow-xs">
+                <div className="flex items-start gap-3">
+                  <Shield className="w-5 h-5 text-stone-700 shrink-0 mt-0.5" />
+                  <div className="space-y-1">
+                    <h2 className="text-lg font-display font-black text-stone-900 uppercase tracking-tight">
+                      Event Actions Only
+                    </h2>
+                    <p className="text-xs text-stone-600 font-sans leading-relaxed">
+                      You do not have permission to edit event details or ticket tiers for this event.
+                      {canCancelOccurrence && currentStatus !== 'CANCELLED'
+                        ? ' You can cancel this event occurrence using the action below.'
+                        : ''}
+                    </p>
+                  </div>
+                </div>
+                {canCancelOccurrence && currentStatus !== 'CANCELLED' && (
+                  <div className="pt-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCancelSeriesMode(false);
+                        setCancelReason('');
+                        setShowCancelModal(true);
+                      }}
+                      className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-mono text-xs font-semibold uppercase tracking-wider transition-colors shadow-2xs"
+                    >
+                      <Ban className="w-4 h-4" />
+                      <span>Cancel Event Occurrence</span>
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {!isReadOnlyEditor && canEditDetails && activeStep === 1 && (
               <div className="bg-white rounded-xl border border-stone-200/90 p-6 sm:p-8 space-y-6 shadow-xs">
                 <div>
                   <div className="flex items-center gap-2 text-stone-500 text-xs font-mono uppercase tracking-wider font-semibold">
@@ -2105,7 +2372,7 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
               </div>
             )}
 
-            {currentStep === 2 && (
+            {!isReadOnlyEditor && canEditDetails && activeStep === 2 && (
               <div className="bg-white rounded-xl border border-stone-200/90 p-6 sm:p-8 space-y-6 shadow-xs">
                 <div>
                   <div className="flex items-center gap-2 text-stone-500 text-xs font-mono uppercase tracking-wider font-semibold">
@@ -2491,533 +2758,154 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
               </div>
             )}
 
-            {currentStep === 3 && (
+            {!isReadOnlyEditor && activeStep === 3 && (
               <div className="bg-white rounded-xl border border-stone-200/90 p-6 sm:p-8 space-y-6 shadow-xs">
                 <div>
                   <div className="flex items-center gap-2 text-stone-500 text-xs font-mono uppercase tracking-wider font-semibold">
-                    <span>Step 3 of 4</span>
-                    <span>•</span>
-                    <span>Pricing, Capacity & Door Policies</span>
+                    {isTicketsOnlyMode ? (
+                      <span>Ticket Tier Management</span>
+                    ) : (
+                      <>
+                        <span>Step 3 of 4</span>
+                        <span>•</span>
+                        <span>Pricing, Capacity & Door Policies</span>
+                      </>
+                    )}
                   </div>
                   <h2 className="text-xl sm:text-2xl font-display font-black text-stone-900 uppercase tracking-tight mt-1">
-                    Tickets & Policies
+                    {isTicketsOnlyMode ? 'Ticket Tiers' : 'Tickets & Policies'}
                   </h2>
                   <p className="text-xs text-stone-500 mt-1 font-sans">
-                    Configure ticket tiers, prices, inventory limits, and attendee admission policies.
+                    {isTicketsOnlyMode
+                      ? 'Configure ticket tiers, pricing, inventory limits, and tier visibility. Event details, schedule, and publishing controls require additional permissions.'
+                      : 'Configure ticket tiers, prices, inventory limits, and attendee admission policies.'}
                   </p>
                 </div>
 
-                <div className="space-y-4">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <h3 className="text-sm font-display font-black text-stone-900 uppercase tracking-tight">
-                        Ticket Tiers & Capacity
-                      </h3>
-                      <p className="text-xs text-stone-500 font-sans">
-                        Each tier supports independent pricing, inventory reservation, and per-order restrictions. Free tickets ($0) supported.
-                      </p>
+                {canManageTickets ? (
+                  <TicketTierEditorSection
+                    ticketTiers={ticketTiers}
+                    timezone={timezone || DEFAULT_US_TIMEZONE}
+                    tierErrors={tierValidationErrors}
+                    onAddTier={addTicketTier}
+                    onRemoveTier={removeTicketTier}
+                    onUpdateTier={updateTier}
+                  />
+                ) : (
+                  <div className="p-4 rounded-xl border border-stone-200 bg-stone-50 text-xs text-stone-600 font-sans space-y-1">
+                    <div className="font-mono uppercase font-bold text-stone-800 text-[11px]">
+                      Ticket Tiers Locked ({ticketTiers.length} existing)
                     </div>
-                    <button
-                      type="button"
-                      onClick={addTicketTier}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-stone-900 hover:bg-black text-white font-mono text-xs font-semibold uppercase tracking-wider transition-colors shadow-2xs shrink-0"
-                    >
-                      <Plus className="w-3.5 h-3.5" />
-                      <span>Add Tier</span>
-                    </button>
-                  </div>
-
-                  <div className="space-y-4">
-                    {ticketTiers.map((tier, idx) => {
-                      const tierEarnings = calculateTierEarnings(
-                        Math.round((Number(tier.price) || 0) * 100),
-                        Math.max(0, Number(tier.totalCapacity) || 0)
-                      );
-
-                      return (
-                        <div
-                          key={tier.tempId}
-                          className="rounded-xl border border-stone-200 bg-[#FAF8F5] p-5 space-y-4"
-                        >
-                          <div className="flex items-center justify-between gap-3">
-                            <div className="flex items-center gap-2">
-                              <span className="w-6 h-6 rounded-full bg-stone-200 text-stone-700 font-mono text-xs font-bold flex items-center justify-center">
-                                {idx + 1}
-                              </span>
-                              <span className="font-display font-black text-base text-stone-900 uppercase">
-                                {tier.name || 'Untitled Tier'}
-                              </span>
-                              {tier.soldQuantity && tier.soldQuantity > 0 ? (
-                                <span className="px-2 py-0.5 rounded text-[10px] font-mono uppercase bg-emerald-50 text-emerald-700 border border-emerald-300 font-bold">
-                                  {tier.soldQuantity} Sold
-                                </span>
-                              ) : null}
-                            </div>
-                            <button
-                              type="button"
-                              onClick={() => removeTicketTier(tier.tempId)}
-                              className="p-1.5 rounded-md hover:bg-stone-200/80 text-stone-400 hover:text-rose-600 transition-colors"
-                              title="Delete Tier"
-                            >
-                              <Trash2 className="w-4 h-4" />
-                            </button>
-                          </div>
-
-                          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                            <div className="sm:col-span-2">
-                              <label className="block text-[11px] font-mono uppercase text-stone-700 font-bold mb-1">
-                                Tier Name <span className="text-rose-600">*</span>
-                              </label>
-                              <input
-                                type="text"
-                                value={tier.name}
-                                onChange={(e) => updateTier(tier.tempId, 'name', e.target.value)}
-                                className="w-full px-3 py-2 rounded-lg bg-white border border-stone-300 text-stone-900 text-xs focus:outline-none focus:border-stone-900"
-                              />
-                            </div>
-                            <div>
-                              <label className="block text-[11px] font-mono uppercase text-stone-700 font-bold mb-1">
-                                Status
-                              </label>
-                              <select
-                                value={tier.status}
-                                onChange={(e) => updateTier(tier.tempId, 'status', e.target.value as TicketTierStatus)}
-                                className="w-full px-3 py-2 rounded-lg bg-white border border-stone-300 text-stone-900 text-xs focus:outline-none focus:border-stone-900"
-                              >
-                                <option value="ACTIVE">ACTIVE (On Sale)</option>
-                                <option value="PAUSED">PAUSED (Paused)</option>
-                                <option value="HIDDEN">HIDDEN (Secret)</option>
-                              </select>
-                            </div>
-                          </div>
-
-                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 p-3.5 rounded-lg bg-stone-100/70 border border-stone-200">
-                            <div>
-                              <div className="flex items-center justify-between mb-1">
-                                <label className="text-[11px] font-mono uppercase text-stone-800 font-bold">
-                                  Gross Price (You Receive) <span className="text-rose-600">*</span>
-                                </label>
-                                <span className="text-[10px] text-stone-500 font-sans">Before fees</span>
-                              </div>
-                              <NumericInput
-                                value={tier.price}
-                                onChange={(val) => updateTier(tier.tempId, 'price', val)}
-                                min={0}
-                                step={1}
-                                allowDecimals={true}
-                                decimalPlaces={2}
-                                prefix="$"
-                                placeholder="20.00"
-                                className="w-full px-3 py-2 rounded-lg bg-white border border-stone-300 text-stone-900 text-xs font-mono font-semibold focus:outline-none focus:border-stone-900"
-                              />
-                              <p className="text-[10px] text-stone-500 mt-1 leading-tight">
-                                Amount you earn per ticket sold before fees.
-                              </p>
-                            </div>
-                            <div>
-                              <div className="flex items-center justify-between mb-1">
-                                <label className="text-[11px] font-mono uppercase text-stone-800 font-bold">
-                                  Display Price (Customer Pays) <span className="text-rose-600">*</span>
-                                </label>
-                                <span className="text-[10px] text-stone-500 font-sans">All-in</span>
-                              </div>
-                              <NumericInput
-                                value={tier.displayPrice}
-                                onChange={(val) => updateTier(tier.tempId, 'displayPrice', val)}
-                                min={0}
-                                step={1}
-                                allowDecimals={true}
-                                decimalPlaces={2}
-                                prefix="$"
-                                placeholder="23.94"
-                                className="w-full px-3 py-2 rounded-lg bg-white border border-stone-300 text-stone-900 text-xs font-mono font-semibold focus:outline-none focus:border-stone-900"
-                              />
-                              <p className="text-[10px] text-stone-500 mt-1 leading-tight">
-                                All-in price advertised to fans (includes all platform & processing fees).
-                              </p>
-                            </div>
-                          </div>
-
-                          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                            <div>
-                              <label className="block text-[11px] font-mono uppercase text-stone-700 font-bold mb-1">
-                                Capacity <span className="text-rose-600">*</span>
-                              </label>
-                              <NumericInput
-                                value={tier.totalCapacity}
-                                onChange={(val) => updateTier(tier.tempId, 'totalCapacity', val)}
-                                min={1}
-                                step={10}
-                                allowDecimals={false}
-                                placeholder="100"
-                                className="w-full px-3 py-2 rounded-lg bg-white border border-stone-300 text-stone-900 text-xs font-mono focus:outline-none focus:border-stone-900"
-                              />
-                            </div>
-                            <div>
-                              <label className="block text-[11px] font-mono uppercase text-stone-700 font-bold mb-1">
-                                Min / Order
-                              </label>
-                              <NumericInput
-                                value={tier.minPerOrder}
-                                onChange={(val) => updateTier(tier.tempId, 'minPerOrder', val)}
-                                min={1}
-                                step={1}
-                                allowDecimals={false}
-                                placeholder="1"
-                                className="w-full px-3 py-2 rounded-lg bg-white border border-stone-300 text-stone-900 text-xs font-mono focus:outline-none focus:border-stone-900"
-                              />
-                            </div>
-                            <div>
-                              <label className="block text-[11px] font-mono uppercase text-stone-700 font-bold mb-1">
-                                Max / Order
-                              </label>
-                              <NumericInput
-                                value={tier.maxPerOrder}
-                                onChange={(val) => updateTier(tier.tempId, 'maxPerOrder', val)}
-                                min={1}
-                                step={1}
-                                allowDecimals={false}
-                                placeholder="6"
-                                className="w-full px-3 py-2 rounded-lg bg-white border border-stone-300 text-stone-900 text-xs font-mono focus:outline-none focus:border-stone-900"
-                              />
-                            </div>
-                          </div>
-
-                          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 rounded-lg bg-white border border-stone-200">
-                            <div className="space-y-0.5 max-w-md">
-                              <div className="flex items-center gap-2">
-                                <label className="text-xs font-mono uppercase font-bold text-stone-900 cursor-pointer">
-                                  Enable Waitlist
-                                </label>
-                                {tier.waitlistEnabled ? (
-                                  <span className="px-2 py-0.5 rounded text-[10px] font-mono uppercase bg-amber-50 text-amber-800 border border-amber-300 font-bold">
-                                    Queue Active When Sold Out
-                                  </span>
-                                ) : (
-                                  <span className="px-2 py-0.5 rounded text-[10px] font-mono uppercase bg-stone-100 text-stone-500 font-bold">
-                                    Off
-                                  </span>
-                                )}
-                              </div>
-                              <p className="text-[11px] text-stone-500 leading-snug">
-                                Automatically queue fans when sold out. If tickets become available through cancellations or capacity increases, purchase offers are automatically issued in FIFO order.
-                              </p>
-                              {tier.id && (tier.waitlistWaitingCount !== undefined || tier.waitlistOfferedCount !== undefined) ? (
-                                <div className="flex items-center gap-3 pt-1 text-[11px] font-mono text-stone-700">
-                                  <span>Waiting: <strong className="text-stone-900">{tier.waitlistWaitingCount || 0}</strong></span>
-                                  <span>Active Offers: <strong className="text-amber-700">{tier.waitlistOfferedCount || 0}</strong></span>
-                                </div>
-                              ) : null}
-                            </div>
-                            <button
-                              type="button"
-                              role="switch"
-                              aria-checked={Boolean(tier.waitlistEnabled)}
-                              onClick={() => {
-                                updateTier(tier.tempId, 'waitlistEnabled', !tier.waitlistEnabled);
-                              }}
-                              className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
-                                tier.waitlistEnabled ? 'bg-amber-600' : 'bg-stone-300'
-                              }`}
-                            >
-                              <span
-                                className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
-                                  tier.waitlistEnabled ? 'translate-x-5' : 'translate-x-0'
-                                }`}
-                              />
-                            </button>
-                          </div>
-
-                          <div className="p-3.5 rounded-lg bg-white border border-stone-200 space-y-3">
-                            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                              <div className="space-y-0.5 max-w-md">
-                                <div className="flex items-center gap-2">
-                                  <label className="text-xs font-mono uppercase font-bold text-stone-900 cursor-pointer">
-                                    Limit Ticket Sales Period
-                                  </label>
-                                  {tier.hasSalesPeriod ? (
-                                    <span className="px-2 py-0.5 rounded text-[10px] font-mono uppercase bg-emerald-50 text-emerald-800 border border-emerald-300 font-bold">
-                                      Active Window
-                                    </span>
-                                  ) : (
-                                    <span className="px-2 py-0.5 rounded text-[10px] font-mono uppercase bg-stone-100 text-stone-500 font-bold">
-                                      Open Sales
-                                    </span>
-                                  )}
-                                </div>
-                                <p className="text-[11px] text-stone-500 leading-snug">
-                                  Restrict when fans can purchase this ticket. Before the start time or after the end time, this tier will not be available for checkout.
-                                </p>
-                              </div>
-                              <button
-                                type="button"
-                                role="switch"
-                                aria-checked={Boolean(tier.hasSalesPeriod)}
-                                onClick={() => {
-                                  updateTier(tier.tempId, 'hasSalesPeriod', !tier.hasSalesPeriod);
-                                }}
-                                className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
-                                  tier.hasSalesPeriod ? 'bg-stone-900' : 'bg-stone-300'
-                                }`}
-                              >
-                                <span
-                                  className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
-                                    tier.hasSalesPeriod ? 'translate-x-5' : 'translate-x-0'
-                                  }`}
-                                />
-                              </button>
-                            </div>
-
-                            {tier.hasSalesPeriod && (
-                              <div className="pt-2 border-t border-stone-100 space-y-2">
-                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                                  <div>
-                                    <label className="block text-[10px] font-mono uppercase text-stone-700 font-bold mb-1">
-                                      Sales Start Date & Time
-                                    </label>
-                                    <input
-                                      type="datetime-local"
-                                      value={tier.salesStartAt || ''}
-                                      onChange={(e) => updateTier(tier.tempId, 'salesStartAt', e.target.value)}
-                                      className="w-full px-3 py-2 rounded-lg bg-stone-50 border border-stone-300 text-stone-900 text-xs focus:outline-none focus:border-stone-900"
-                                    />
-                                    <span className="text-[10px] text-stone-400 mt-0.5 block">
-                                      Before this time, ticket cannot be purchased.
-                                    </span>
-                                  </div>
-                                  <div>
-                                    <label className="block text-[10px] font-mono uppercase text-stone-700 font-bold mb-1">
-                                      Sales End Date & Time
-                                    </label>
-                                    <input
-                                      type="datetime-local"
-                                      value={tier.salesEndAt || ''}
-                                      onChange={(e) => updateTier(tier.tempId, 'salesEndAt', e.target.value)}
-                                      className="w-full px-3 py-2 rounded-lg bg-stone-50 border border-stone-300 text-stone-900 text-xs focus:outline-none focus:border-stone-900"
-                                    />
-                                    <span className="text-[10px] text-stone-400 mt-0.5 block">
-                                      After this time, sales will close automatically.
-                                    </span>
-                                  </div>
-                                </div>
-                                <div className="text-[10px] font-mono text-stone-500">
-                                  Timezone: <strong>{timezone || DEFAULT_US_TIMEZONE}</strong>
-                                </div>
-                              </div>
-                            )}
-                          </div>
-
-                          <div className="p-3.5 rounded-lg bg-white border border-stone-200 space-y-3">
-                            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                              <div className="space-y-0.5 max-w-md">
-                                <div className="flex items-center gap-2">
-                                  <label className="text-xs font-mono uppercase font-bold text-stone-900 cursor-pointer">
-                                    Limit Ticket Validity
-                                  </label>
-                                  {tier.hasTicketValidity ? (
-                                    <span className="px-2 py-0.5 rounded text-[10px] font-mono uppercase bg-indigo-50 text-indigo-800 border border-indigo-300 font-bold">
-                                      Entry Restricted
-                                    </span>
-                                  ) : (
-                                    <span className="px-2 py-0.5 rounded text-[10px] font-mono uppercase bg-stone-100 text-stone-500 font-bold">
-                                      Full Event Window
-                                    </span>
-                                  )}
-                                </div>
-                                <p className="text-[11px] text-stone-500 leading-snug">
-                                  Restrict when an already-purchased ticket can be used for door entry. Gate scanners will reject passes scanned outside this designated window.
-                                </p>
-                              </div>
-                              <button
-                                type="button"
-                                role="switch"
-                                aria-checked={Boolean(tier.hasTicketValidity)}
-                                onClick={() => {
-                                  updateTier(tier.tempId, 'hasTicketValidity', !tier.hasTicketValidity);
-                                }}
-                                className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
-                                  tier.hasTicketValidity ? 'bg-stone-900' : 'bg-stone-300'
-                                }`}
-                              >
-                                <span
-                                  className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
-                                    tier.hasTicketValidity ? 'translate-x-5' : 'translate-x-0'
-                                  }`}
-                                />
-                              </button>
-                            </div>
-
-                            {tier.hasTicketValidity && (
-                              <div className="pt-2 border-t border-stone-100 space-y-2">
-                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                                  <div>
-                                    <label className="block text-[10px] font-mono uppercase text-stone-700 font-bold mb-1">
-                                      Validity Start Date & Time
-                                    </label>
-                                    <input
-                                      type="datetime-local"
-                                      value={tier.validityStartAt || ''}
-                                      onChange={(e) => updateTier(tier.tempId, 'validityStartAt', e.target.value)}
-                                      className="w-full px-3 py-2 rounded-lg bg-stone-50 border border-stone-300 text-stone-900 text-xs focus:outline-none focus:border-stone-900"
-                                    />
-                                    <span className="text-[10px] text-stone-400 mt-0.5 block">
-                                      Pass cannot be scanned before this time.
-                                    </span>
-                                  </div>
-                                  <div>
-                                    <label className="block text-[10px] font-mono uppercase text-stone-700 font-bold mb-1">
-                                      Validity End Date & Time
-                                    </label>
-                                    <input
-                                      type="datetime-local"
-                                      value={tier.validityEndAt || ''}
-                                      onChange={(e) => updateTier(tier.tempId, 'validityEndAt', e.target.value)}
-                                      className="w-full px-3 py-2 rounded-lg bg-stone-50 border border-stone-300 text-stone-900 text-xs focus:outline-none focus:border-stone-900"
-                                    />
-                                    <span className="text-[10px] text-stone-400 mt-0.5 block">
-                                      Pass expires for entry after this time.
-                                    </span>
-                                  </div>
-                                </div>
-                                <div className="text-[10px] font-mono text-stone-500">
-                                  Timezone: <strong>{timezone || DEFAULT_US_TIMEZONE}</strong>. Appears on attendee passes and ticket PDFs.
-                                </div>
-                              </div>
-                            )}
-                          </div>
-
-                          <div className="p-3.5 rounded-lg bg-white border border-stone-200 text-[11px] font-mono space-y-1.5">
-                            <div className="flex items-center justify-between text-stone-700">
-                              <span>Gross Ticket Earnings:</span>
-                              <span className="font-bold text-emerald-600">{formatCents(tierEarnings.organizerEarningsInCents)}</span>
-                            </div>
-                            {tierEarnings.organizerEarningsInCents > 0 ? (
-                              <>
-                                <div className="flex items-center justify-between text-stone-500 text-[10px]">
-                                  <span>· Platform Fee (10%):</span>
-                                  <span>{formatCents(tierEarnings.platformFeeInCents)}</span>
-                                </div>
-                                <div className="flex items-center justify-between text-stone-500 text-[10px]">
-                                  <span>· Fixed Service Fee ($0.95):</span>
-                                  <span>{formatCents(tierEarnings.serviceFeeInCents)}</span>
-                                </div>
-                                <div className="flex items-center justify-between text-stone-500 text-[10px]">
-                                  <span>· Payment Processing (est. 2.9% + $0.30):</span>
-                                  <span>{formatCents(tierEarnings.processingFeeInCents)}</span>
-                                </div>
-                                <div className="flex items-center justify-between text-stone-600 font-semibold pt-0.5">
-                                  <span>Combined Service Fee:</span>
-                                  <span>{formatCents(tierEarnings.customerServiceFeeInCents)}</span>
-                                </div>
-                              </>
-                            ) : (
-                              <div className="text-[10px] text-stone-400 italic">
-                                Free ticket tier — no platform or processing fees charged.
-                              </div>
-                            )}
-                            <div className="flex items-center justify-between pt-1.5 border-t border-stone-200 text-stone-900 font-bold">
-                              <span>All-In Display Price (Fan Pays):</span>
-                              <span className="font-extrabold text-stone-900">
-                                {tierEarnings.displayPriceInCents === 0 ? 'Free ($0.00)' : formatCents(tierEarnings.displayPriceInCents)}
-                              </span>
-                            </div>
-                            <div className="flex items-center justify-between pt-1 border-t border-stone-100 text-stone-900 font-bold">
-                              <span>Projected Sold Out Earnings ({tierEarnings.capacity} tickets):</span>
-                              <span className="text-emerald-700 font-extrabold">{formatCents(tierEarnings.projectedEarningsInCents)}</span>
-                            </div>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                <div className="pt-6 border-t border-stone-200 space-y-4">
-                  <div>
-                    <h3 className="text-sm font-display font-black text-stone-900 uppercase tracking-tight">
-                      Attendee Guidelines & Door Policies
-                    </h3>
-                    <p className="text-xs text-stone-500 mt-0.5 font-sans">
-                      Clear admission rules displayed to attendees on the checkout and event pages.
+                    <p>
+                      Editing ticket tiers requires the Manage Ticket Tiers permission. Your changes to event details and policies will preserve existing ticket tiers unchanged.
                     </p>
                   </div>
+                )}
 
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                {canEditDetails && (
+                  <div className="pt-6 border-t border-stone-200 space-y-4">
                     <div>
-                      <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5">
-                        Age Restriction
-                      </label>
-                      <select
-                        value={ageRestriction}
-                        onChange={(e) => {
-                          setAgeRestriction(e.target.value);
-                          setHasUnsavedChanges(true);
-                        }}
-                        className="w-full px-3.5 py-2.5 rounded-lg bg-[#FAF8F5] border border-stone-300 text-stone-900 text-sm focus:outline-none focus:border-stone-900 cursor-pointer"
-                      >
-                        <option value="All Ages">All Ages</option>
-                        <option value="18+">18+ (Valid Photo ID Required)</option>
-                        <option value="21+">21+ (Strict ID Enforcement)</option>
-                      </select>
+                      <h3 className="text-sm font-display font-black text-stone-900 uppercase tracking-tight">
+                        Attendee Guidelines & Door Policies
+                      </h3>
+                      <p className="text-xs text-stone-500 mt-0.5 font-sans">
+                        Clear admission rules displayed to attendees on the checkout and event pages.
+                      </p>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5">
+                          Age Restriction
+                        </label>
+                        <select
+                          value={ageRestriction}
+                          onChange={(e) => {
+                            setAgeRestriction(e.target.value);
+                            setHasUnsavedChanges(true);
+                          }}
+                          className="w-full px-3.5 py-2.5 rounded-lg bg-[#FAF8F5] border border-stone-300 text-stone-900 text-sm focus:outline-none focus:border-stone-900 cursor-pointer"
+                        >
+                          <option value="All Ages">All Ages</option>
+                          <option value="18+">18+ (Valid Photo ID Required)</option>
+                          <option value="21+">21+ (Strict ID Enforcement)</option>
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5">
+                          Dress Code Guideline
+                        </label>
+                        <input
+                          type="text"
+                          placeholder="e.g. Minimalist Black / Cocktail Attire"
+                          value={dressCode}
+                          onChange={(e) => {
+                            setDressCode(e.target.value);
+                            setHasUnsavedChanges(true);
+                          }}
+                          className="w-full px-3.5 py-2.5 rounded-lg bg-[#FAF8F5] border border-stone-300 text-stone-900 placeholder-stone-400 text-sm focus:outline-none focus:border-stone-900"
+                        />
+                      </div>
                     </div>
 
                     <div>
                       <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5">
-                        Dress Code Guideline
+                        Door Policy & Entry Rules
                       </label>
                       <input
                         type="text"
-                        placeholder="e.g. Minimalist Black / Cocktail Attire"
-                        value={dressCode}
+                        placeholder="e.g. Valid government ID required, strict 10 PM gate lock, no outside drinks"
+                        value={doorPolicy}
                         onChange={(e) => {
-                          setDressCode(e.target.value);
+                          setDoorPolicy(e.target.value);
                           setHasUnsavedChanges(true);
                         }}
                         className="w-full px-3.5 py-2.5 rounded-lg bg-[#FAF8F5] border border-stone-300 text-stone-900 placeholder-stone-400 text-sm focus:outline-none focus:border-stone-900"
                       />
                     </div>
                   </div>
-
-                  <div>
-                    <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5">
-                      Door Policy & Entry Rules
-                    </label>
-                    <input
-                      type="text"
-                      placeholder="e.g. Valid government ID required, strict 10 PM gate lock, no outside drinks"
-                      value={doorPolicy}
-                      onChange={(e) => {
-                        setDoorPolicy(e.target.value);
-                        setHasUnsavedChanges(true);
-                      }}
-                      className="w-full px-3.5 py-2.5 rounded-lg bg-[#FAF8F5] border border-stone-300 text-stone-900 placeholder-stone-400 text-sm focus:outline-none focus:border-stone-900"
-                    />
-                  </div>
-                </div>
+                )}
 
                 <div className="pt-6 border-t border-stone-200 flex items-center justify-between">
-                  <button
-                    type="button"
-                    onClick={handlePrevStep}
-                    className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg border border-stone-300 bg-white hover:bg-stone-100 text-stone-700 font-mono text-xs font-semibold transition-colors shadow-2xs"
-                  >
-                    <ChevronLeft className="w-4 h-4" />
-                    <span>Back: Date & Location</span>
-                  </button>
+                  {isTicketsOnlyMode ? (
+                    <div className="w-full flex items-center justify-end">
+                      <button
+                        type="button"
+                        onClick={() => saveMutation.mutate({ publish: false })}
+                        disabled={saveMutation.isPending || isSubmittingRef.current}
+                        className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg bg-stone-900 hover:bg-black text-white font-mono text-xs font-semibold uppercase tracking-wider transition-colors shadow-2xs disabled:opacity-50"
+                      >
+                        <Save className="w-4 h-4" />
+                        <span>{saveMutation.isPending ? 'Saving...' : 'Save Ticket Changes'}</span>
+                      </button>
+                    </div>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        onClick={handlePrevStep}
+                        className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg border border-stone-300 bg-white hover:bg-stone-100 text-stone-700 font-mono text-xs font-semibold transition-colors shadow-2xs"
+                      >
+                        <ChevronLeft className="w-4 h-4" />
+                        <span>Back: Date & Location</span>
+                      </button>
 
-                  <button
-                    type="button"
-                    onClick={handleNextStep}
-                    className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg bg-stone-900 hover:bg-black text-white font-mono text-xs font-semibold uppercase tracking-wider transition-colors shadow-2xs"
-                  >
-                    <span>Next: Discovery Preview</span>
-                    <ChevronRight className="w-4 h-4" />
-                  </button>
+                      <button
+                        type="button"
+                        onClick={handleNextStep}
+                        className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg bg-stone-900 hover:bg-black text-white font-mono text-xs font-semibold uppercase tracking-wider transition-colors shadow-2xs"
+                      >
+                        <span>Next: Discovery Preview</span>
+                        <ChevronRight className="w-4 h-4" />
+                      </button>
+                    </>
+                  )}
                 </div>
               </div>
             )}
 
-            {currentStep === 4 && (
+            {!isReadOnlyEditor && canEditDetails && activeStep === 4 && (
               <div className="bg-white rounded-xl border border-stone-200/90 p-6 sm:p-8 space-y-6 shadow-xs">
                 <div>
                   <div className="flex items-center gap-2 text-stone-500 text-xs font-mono uppercase tracking-wider font-semibold">
@@ -3492,17 +3380,11 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
                             {venueName || city || country || 'United States'}
                           </span>
                           <span className="font-bold text-stone-900 font-mono text-xs">
-                            {ticketTiers.length > 0
-                              ? (() => {
-                                  const minDisplay = Math.min(
-                                    ...ticketTiers.map((t) => {
-                                      const p = Number(t.price) || 0;
-                                      return p > 0 ? calculateDisplayPriceFromGross(Math.round(p * 100)) / 100 : 0;
-                                    })
-                                  );
-                                  return minDisplay === 0 ? 'Free' : `From $${minDisplay.toFixed(2)}`;
-                                })()
-                              : 'From $0.00'}
+                            {(() => {
+                              const minDisplay = computeVisibleMinDisplayPrice(ticketTiers);
+                              if (minDisplay === null) return 'Price TBD';
+                              return minDisplay === 0 ? 'Free' : `From $${minDisplay.toFixed(2)}`;
+                            })()}
                           </span>
                         </div>
                         {features.length > 0 && (
@@ -3590,32 +3472,54 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
                   </button>
 
                   <div className="flex items-center gap-3">
-                    <button
-                      type="button"
-                      onClick={() => saveMutation.mutate({ publish: false })}
-                      disabled={saveMutation.isPending || isAnyImageUploading || isSubmittingRef.current}
-                      className="px-4 py-2.5 rounded-lg border border-stone-300 bg-white hover:bg-stone-100 text-stone-900 font-mono text-xs font-semibold transition-colors shadow-2xs disabled:opacity-50"
-                    >
-                      {saveMutation.isPending ? 'Saving...' : 'Save Draft'}
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => saveMutation.mutate({ publish: true })}
-                      disabled={saveMutation.isPending || isAnyImageUploading || isSubmittingRef.current}
-                      className="inline-flex items-center gap-2 px-6 py-2.5 rounded-lg bg-stone-900 hover:bg-black text-white font-mono text-xs font-semibold uppercase tracking-wider transition-colors shadow-2xs disabled:opacity-50"
-                    >
-                      <Globe className="w-4 h-4" />
-                      <span>
+                    {canSaveChanges && (
+                      <button
+                        type="button"
+                        onClick={() => saveMutation.mutate({ publish: false })}
+                        disabled={saveMutation.isPending || isAnyImageUploading || isSubmittingRef.current}
+                        className="px-4 py-2.5 rounded-lg border border-stone-300 bg-white hover:bg-stone-100 text-stone-900 font-mono text-xs font-semibold transition-colors shadow-2xs disabled:opacity-50"
+                      >
                         {saveMutation.isPending
-                          ? 'Publishing...'
-                          : isRecurring && !isEditing
-                          ? `Publish All ${occurrenceSchedulePreview.length} Occurrences`
-                          : currentStatus === 'PUBLISHED'
-                          ? 'Update Live'
-                          : 'Publish Live'}
-                      </span>
-                    </button>
+                          ? 'Saving...'
+                          : currentStatus === 'PUBLISHED' && !canPublishOrUnpublish
+                          ? 'Save Changes'
+                          : 'Save Draft'}
+                      </button>
+                    )}
+
+                    {canPublishOrUnpublish && (
+                      <button
+                        type="button"
+                        data-testid="step4-publish-btn"
+                        onClick={() => {
+                          if (currentStatus === 'PUBLISHED') {
+                            saveMutation.mutate({ publish: false });
+                          } else {
+                            void handlePublishClick();
+                          }
+                        }}
+                        disabled={
+                          saveMutation.isPending ||
+                          isCheckingStripeReadiness ||
+                          isAnyImageUploading ||
+                          isSubmittingRef.current
+                        }
+                        className="inline-flex items-center gap-2 px-6 py-2.5 rounded-lg bg-stone-900 hover:bg-black text-white font-mono text-xs font-semibold uppercase tracking-wider transition-colors shadow-2xs disabled:opacity-50"
+                      >
+                        <Globe className="w-4 h-4" />
+                        <span>
+                          {isCheckingStripeReadiness
+                            ? 'Checking...'
+                            : saveMutation.isPending
+                            ? 'Publishing...'
+                            : isRecurring && !isEditing
+                            ? `Publish All ${occurrenceSchedulePreview.length} Occurrences`
+                            : currentStatus === 'PUBLISHED'
+                            ? 'Update Live'
+                            : 'Publish Live'}
+                        </span>
+                      </button>
+                    )}
                   </div>
                 </div>
               </div>
@@ -3670,6 +3574,26 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
           </div>
         </div>
       )}
+
+      <StripeOnboardingGateModal
+        isOpen={showStripeGateModal}
+        onClose={() => {
+          if (!isStartingStripeSetup && !saveMutation.isPending) {
+            setShowStripeGateModal(false);
+            setStripeGateError(null);
+          }
+        }}
+        accountStatus={stripeAccountStatus}
+        supportedCountries={stripeSupportedCountries}
+        selectedCountry={stripeSelectedCountry}
+        onCountryChange={setStripeSelectedCountry}
+        onCompleteSetup={handleCompleteStripeSetup}
+        onSaveDraft={handleModalSaveAsDraft}
+        isStartingSetup={isStartingStripeSetup}
+        isSavingDraft={saveMutation.isPending}
+        errorMessage={stripeGateError}
+        statusNotice={stripeGateNotice}
+      />
 
       <ImageCropModal
         isOpen={coverCropModalOpen}

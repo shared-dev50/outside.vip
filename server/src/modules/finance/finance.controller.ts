@@ -1,7 +1,9 @@
 import { Request, Response, NextFunction } from 'express';
+import { Role, TransferStatus } from '@prisma/client';
 import {
   getConnectedAccountStatus,
   createOnboardingLink,
+  adminReplaceConnectedAccount,
   createAccountLoginOrUpdateLink,
   getConnectedAccountBalance,
   getConnectedAccountPayouts,
@@ -20,11 +22,12 @@ import {
   updatePayoutScheduleSchema,
   withdrawFundsSchema,
   adminWithdrawFundsSchema,
+  adminReplaceConnectedAccountSchema,
 } from './finance.schema.js';
 import { prisma } from '../../db/prisma.js';
 import { recordAdminAuditLog } from '../../lib/auditLogger.js';
 import {
-  STRIPE_EXPRESS_SUPPORTED_COUNTRIES,
+  getConfiguredStripeConnectCountries,
   DEFAULT_STRIPE_CONNECT_COUNTRY,
 } from './stripeCountries.js';
 
@@ -35,7 +38,7 @@ export async function handleGetSupportedCountries(
   res.json({
     success: true,
     data: {
-      countries: STRIPE_EXPRESS_SUPPORTED_COUNTRIES,
+      countries: getConfiguredStripeConnectCountries(),
       defaultCountry: DEFAULT_STRIPE_CONNECT_COUNTRY,
     },
   });
@@ -143,7 +146,9 @@ export async function handleExecuteWithdrawal(
       notes: input.notes,
       isAdmin: false,
     });
-    res.json({
+    const statusCode =
+      result.status === TransferStatus.PENDING && result.reconciliationRequired ? 202 : 200;
+    res.status(statusCode).json({
       success: true,
       data: result,
     });
@@ -177,8 +182,38 @@ export async function handleAdminWithdrawal(
       metadata: {
         amountInCents: input.amountInCents,
         idempotencyKey: input.idempotencyKey,
+        transferId: result.transferId,
+        status: result.status,
+        reconciliationRequired: result.reconciliationRequired,
         notes: input.notes ?? null,
       },
+      ipAddress: req.ip,
+    });
+    const statusCode =
+      result.status === TransferStatus.PENDING && result.reconciliationRequired ? 202 : 200;
+    res.status(statusCode).json({
+      success: true,
+      data: result,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function handleAdminReplaceConnectedAccount(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const adminUserId = req.user!.userId;
+    const input = adminReplaceConnectedAccountSchema.parse(req.body);
+    const result = await adminReplaceConnectedAccount({
+      adminUserId,
+      adminEmail: req.user!.email,
+      organizerId: input.organizerId,
+      country: input.country,
+      reason: input.reason,
       ipAddress: req.ip,
     });
     res.json({
@@ -296,8 +331,11 @@ export async function handleGetDisputes(
 ): Promise<void> {
   try {
     const userId = req.user!.userId;
-    const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 10;
-    const disputes = await getConnectedAccountDisputes(userId, limit);
+    const rawLimit = req.query.limit ? parseInt(req.query.limit as string, 10) : 10;
+    const limit = Number.isFinite(rawLimit) ? rawLimit : 10;
+    const disputes = await getConnectedAccountDisputes(userId, limit, {
+      isPlatformAdmin: req.user!.role === Role.ADMIN,
+    });
     res.json({
       success: true,
       data: disputes,

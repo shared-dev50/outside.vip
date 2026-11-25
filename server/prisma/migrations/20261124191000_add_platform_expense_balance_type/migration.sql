@@ -1,0 +1,2 @@
+-- AlterEnum
+ALTER TYPE "LedgerBalanceType" ADD VALUE IF NOT EXISTS 'PLATFORM_EXPENSE';

@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useOptionalAuth } from '../context/AuthContext';
 import { api } from '../lib/api';
+import { resolveOrganizerEventUiPermissions } from '../lib/eventPermissions';
 import { OrganizerDashboardStats, OrganizerEventItem, User } from '../types';
 import { OrganizerWaitlistModal } from '../components/organizer/OrganizerWaitlistModal';
 import { EventTeamModal } from '../components/team/EventTeamModal';
@@ -32,6 +33,7 @@ import {
   X,
   Sparkles,
   Building2,
+  Ban,
 } from 'lucide-react';
 
 interface OrganizerDashboardPageProps {
@@ -67,6 +69,8 @@ export const OrganizerDashboardPage: React.FC<OrganizerDashboardPageProps> = ({
   const [notification, setNotification] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [eventToDelete, setEventToDelete] = useState<OrganizerEventItem | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [eventToCancel, setEventToCancel] = useState<OrganizerEventItem | null>(null);
+  const [cancelReason, setCancelReason] = useState('');
   const [waitlistEvent, setWaitlistEvent] = useState<OrganizerEventItem | null>(null);
   const [teamEvent, setTeamEvent] = useState<OrganizerEventItem | null>(null);
   const [promotionsEvent, setPromotionsEvent] = useState<OrganizerEventItem | null>(null);
@@ -164,6 +168,27 @@ export const OrganizerDashboardPage: React.FC<OrganizerDashboardPageProps> = ({
         return;
       }
       showNotification('error', err?.message || 'Failed to delete event. Events with sold tickets cannot be deleted.');
+    },
+  });
+
+  const cancelMutation = useMutation({
+    mutationFn: ({ eventId, reason }: { eventId: string; reason?: string }) =>
+      api.organizer.cancelEvent(eventId, reason),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['organizer-dashboard'] });
+      queryClient.invalidateQueries({ queryKey: ['organizer-events'] });
+      queryClient.invalidateQueries({ queryKey: ['events'] });
+      setEventToCancel(null);
+      setCancelReason('');
+      showNotification('success', 'This event occurrence has been cancelled.');
+    },
+    onError: (err: any) => {
+      const status = err?.statusCode || err?.status;
+      if (status === 401) {
+        clearSessionState?.();
+        return;
+      }
+      showNotification('error', err?.message || 'Failed to cancel event.');
     },
   });
 
@@ -600,25 +625,19 @@ export const OrganizerDashboardPage: React.FC<OrganizerDashboardPageProps> = ({
                     const sold = evt.ticketsSold || 0;
                     const capacity = evt.totalCapacity || 1;
                     const percent = Math.min(100, Math.round((sold / capacity) * 100));
-                    const isEventOwner = evt.isOwner ?? (evt.organizerId === user.id);
-                    const perms = evt.permissions || null;
-                    const canManageTeam = isEventOwner || isPlatformAdmin || Boolean(perms?.canManageTeam);
-                    const canViewPromotions =
-                      isEventOwner ||
-                      isPlatformAdmin ||
-                      Boolean(perms?.canManagePromotions || perms?.canViewAnalytics);
-                    const canViewWaitlist = isEventOwner;
-                    const canEditEvent =
-                      isEventOwner ||
-                      isPlatformAdmin ||
-                      Boolean(perms?.canEditDetails || perms?.canManageTickets);
-                    const canPublishOrUnpublish = isEventOwner || isPlatformAdmin;
-                    const canDeleteEvent =
-                      (isEventOwner || isPlatformAdmin || Boolean(perms?.canDeleteEvent)) &&
-                      !isPublished &&
-                      sold === 0;
-                    const canSeeEventRevenue =
-                      isEventOwner || isPlatformAdmin || Boolean(perms?.canViewOrders);
+                    const uiPerms = resolveOrganizerEventUiPermissions(evt, user);
+                    const isEventOwner = uiPerms.isEventOwner;
+                    const canManageTeam = uiPerms.canManageTeam;
+                    const canViewPromotions = uiPerms.canViewPromotions;
+                    const canViewWaitlist = uiPerms.canViewWaitlist;
+                    const canEditDetails = uiPerms.canEditDetails;
+                    const canManageTickets = uiPerms.canManageTickets;
+                    const canEditEvent = uiPerms.canEditEvent;
+                    const canCancelEvent = uiPerms.canCancelOccurrence;
+                    const canPreviewEvent = uiPerms.canPreviewEvent;
+                    const canPublishOrUnpublish = uiPerms.canPublishOrUnpublish;
+                    const canDeleteEvent = uiPerms.canDeleteEvent && !isPublished && sold === 0;
+                    const canSeeEventRevenue = uiPerms.canViewOrders;
 
                     return (
                       <tr
@@ -692,6 +711,11 @@ export const OrganizerDashboardPage: React.FC<OrganizerDashboardPageProps> = ({
                               <span className="w-1.5 h-1.5 rounded-full bg-emerald-600" />
                               Published
                             </span>
+                          ) : evt.status === 'CANCELLED' ? (
+                            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[10px] font-mono uppercase tracking-wider font-bold bg-rose-50 text-rose-800 border border-rose-300/80 shadow-2xs">
+                              <span className="w-1.5 h-1.5 rounded-full bg-rose-600" />
+                              Cancelled
+                            </span>
                           ) : (
                             <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[10px] font-mono uppercase tracking-wider font-bold bg-amber-50 text-amber-800 border border-amber-300/80 shadow-2xs">
                               <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
@@ -764,22 +788,42 @@ export const OrganizerDashboardPage: React.FC<OrganizerDashboardPageProps> = ({
                               </button>
                             )}
 
-                            <Link
-                              to={`/organizer/events/${evt.id}/preview`}
-                              className="p-2 rounded-lg bg-stone-100/80 hover:bg-stone-200/80 text-stone-600 hover:text-stone-900 border border-stone-200/90 transition-colors shadow-2xs"
-                              title="Preview Event (Organizer Mode)"
-                            >
-                              <Eye className="w-3.5 h-3.5" />
-                            </Link>
+                            {canPreviewEvent && (
+                              <Link
+                                to={`/organizer/events/${evt.id}/preview`}
+                                className="p-2 rounded-lg bg-stone-100/80 hover:bg-stone-200/80 text-stone-600 hover:text-stone-900 border border-stone-200/90 transition-colors shadow-2xs"
+                                title="Preview Event (Organizer Mode)"
+                              >
+                                <Eye className="w-3.5 h-3.5" />
+                              </Link>
+                            )}
 
                             {canEditEvent && (
                               <Link
-                                to={`/organizer/events/${evt.id}/edit`}
+                                to={uiPerms.editPath}
                                 className="p-2 rounded-lg bg-stone-100/80 hover:bg-stone-200/80 text-stone-600 hover:text-stone-900 border border-stone-200/90 transition-colors shadow-2xs"
-                                title="Edit Event & Ticket Tiers"
+                                title={uiPerms.editLabel}
                               >
-                                <Edit3 className="w-3.5 h-3.5" />
+                                {canManageTickets && !canEditDetails ? (
+                                  <Ticket className="w-3.5 h-3.5" />
+                                ) : (
+                                  <Edit3 className="w-3.5 h-3.5" />
+                                )}
                               </Link>
+                            )}
+
+                            {canCancelEvent && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setCancelReason('');
+                                  setEventToCancel(evt);
+                                }}
+                                className="p-2 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 hover:text-rose-900 border border-rose-200 transition-colors shadow-2xs cursor-pointer"
+                                title="Cancel Event Occurrence"
+                              >
+                                <Ban className="w-3.5 h-3.5" />
+                              </button>
                             )}
 
                             {canPublishOrUnpublish && (
@@ -879,6 +923,73 @@ export const OrganizerDashboardPage: React.FC<OrganizerDashboardPageProps> = ({
         </div>
       )}
 
+      {eventToCancel && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-stone-950/40 backdrop-blur-sm animate-in fade-in">
+          <div className="max-w-md w-full bg-white border border-stone-200/90 rounded-2xl p-6 space-y-4 shadow-2xl">
+            <div className="flex items-center gap-3 text-rose-600">
+              <div className="w-10 h-10 rounded-xl bg-rose-50 border border-rose-200 flex items-center justify-center">
+                <Ban className="w-5 h-5 text-rose-600" />
+              </div>
+              <div>
+                <h3 className="font-display font-bold text-base text-stone-900">
+                  Cancel Event Occurrence?
+                </h3>
+                <span className="text-[11px] font-mono text-stone-500">
+                  This marks the event cancelled and cancels active waitlist entries.
+                </span>
+              </div>
+            </div>
+
+            <p className="text-xs text-stone-600 leading-relaxed font-sans">
+              Are you sure you want to cancel{' '}
+              <strong className="text-stone-900">"{eventToCancel.title}"</strong>? Pending
+              checkouts and waitlist offers will be released, ticket sales and admission scans will
+              stop, and buyer refunds remain manually initiated from your Orders dashboard.
+            </p>
+
+            <div>
+              <label className="block text-[11px] font-mono uppercase text-stone-700 font-bold mb-1">
+                Cancellation Reason (Optional)
+              </label>
+              <textarea
+                rows={2}
+                value={cancelReason}
+                onChange={(e) => setCancelReason(e.target.value)}
+                placeholder="e.g. Weather disruption or venue scheduling conflict"
+                className="w-full px-3 py-2 rounded-lg bg-[#FAF8F5] border border-stone-300 text-stone-900 text-xs focus:outline-none focus:border-stone-900"
+              />
+            </div>
+
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setEventToCancel(null);
+                  setCancelReason('');
+                }}
+                disabled={cancelMutation.isPending}
+                className="px-4 py-2 rounded-xl border border-stone-200 text-xs font-mono text-stone-600 hover:text-stone-900 hover:bg-stone-50 transition-colors shadow-2xs"
+              >
+                Keep Event
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  cancelMutation.mutate({
+                    eventId: eventToCancel.id,
+                    reason: cancelReason.trim() || undefined,
+                  })
+                }
+                disabled={cancelMutation.isPending}
+                className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-semibold text-xs font-mono uppercase tracking-wider transition-colors shadow-xs disabled:opacity-50"
+              >
+                {cancelMutation.isPending ? 'Cancelling...' : 'Confirm Cancellation'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <OrganizerWaitlistModal
         isOpen={Boolean(waitlistEvent)}
         onClose={() => setWaitlistEvent(null)}
@@ -895,6 +1006,12 @@ export const OrganizerDashboardPage: React.FC<OrganizerDashboardPageProps> = ({
         isOpen={Boolean(promotionsEvent)}
         onClose={() => setPromotionsEvent(null)}
         event={promotionsEvent}
+        isOwner={
+          promotionsEvent
+            ? (promotionsEvent.isOwner ?? (promotionsEvent.organizerId === user.id))
+            : undefined
+        }
+        permissions={promotionsEvent?.permissions ?? null}
       />
     </div>
   );

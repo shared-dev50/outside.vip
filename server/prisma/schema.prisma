@@ -109,6 +109,7 @@ enum TicketStatus {
   ISSUED
   CHECKED_IN
   CANCELLED
+  REFUND_PENDING
   REFUNDED
 }
 
@@ -131,6 +132,9 @@ enum CheckInResult {
   INVALID_TOKEN
   WRONG_EVENT
   CANCELLED_TICKET
+  REFUND_PENDING_TICKET
+  REFUNDED_TICKET
+  EVENT_CANCELLED
   TICKET_NOT_YET_VALID
   TICKET_EXPIRED
 }
@@ -158,6 +162,7 @@ enum LedgerBalanceType {
   AVAILABLE
   TRANSFERRED
   PLATFORM_REVENUE
+  PLATFORM_EXPENSE
   RECOVERABLE
 }
 
@@ -191,8 +196,22 @@ model User {
   emailVerified        Boolean       @default(false)
   emailVerifiedAt      DateTime?
   avatarUrl            String?
-  stripeAccountId      String?       @unique
-  stripeAccountCountry String?
+  stripeAccountId                  String?       @unique
+  stripeAccountCountry             String?
+  stripeAccountDefaultCurrency     String?
+  stripeAccountDetailsSubmitted    Boolean       @default(false)
+  stripeAccountChargesEnabled      Boolean       @default(false)
+  stripeAccountPayoutsEnabled      Boolean       @default(false)
+  stripeAccountTransfersCapability String?
+  stripeAccountDisabledReason      String?
+  stripeAccountCapabilities        Json?
+  stripeAccountRequirements        Json?
+  stripeAccountEventCreatedAt      Int?
+  stripeAccountSyncedAt            DateTime?
+  stripeAccountCreationKey         String?
+  stripeAccountCreationLockedBy    String?
+  stripeAccountCreationLockedUntil DateTime?
+  stripeAccountCreationStartedAt   DateTime?
   createdAt            DateTime      @default(now())
   updatedAt            DateTime      @updatedAt
 
@@ -220,6 +239,7 @@ model User {
   teamMembersInvited    EventTeamMember[]      @relation("TeamMemberInvitedBy")
   teamInvitationsSent   EventTeamInvitation[]  @relation("TeamInvitationsSent")
   promotionLinksCreated PromotionLink[]        @relation("PromotionLinksCreated")
+  initiatedRefunds      OrderRefund[]          @relation("InitiatedRefunds")
 
   @@index([email])
 }
@@ -309,8 +329,11 @@ model Event {
   isPasswordProtected Boolean @default(false)
   passwordHash        String?
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+  cancelledAt        DateTime?
+  cancelledByUserId  String?
+  cancellationReason String?   @db.Text
 
   ticketTiers     TicketTier[]
   orders          Order[]
@@ -348,6 +371,7 @@ model Event {
   @@index([seriesId])
   @@index([showOnExplore, status])
   @@index([placeId])
+  @@index([organizerId, status])
 }
 
 model EventSeries {
@@ -422,6 +446,8 @@ model TicketTier {
   validityStartAt  DateTime?
   validityEndAt    DateTime?
   status           TicketTierStatus @default(ACTIVE)
+  isHidden         Boolean          @default(false)
+  salesDisabled    Boolean          @default(false)
   waitlistEnabled  Boolean          @default(false)
 
   createdAt DateTime @default(now())
@@ -472,11 +498,30 @@ model Order {
 
   platformFeeInCents  Int     @default(0)
   organizerNetInCents Int     @default(0)
+  refundedAmountInCents       Int @default(0)
+  pendingRefundAmountInCents Int @default(0)
   orderAccessToken    String? @unique
 
   idempotencyKey   String          @unique
   paymentProvider  PaymentProvider @default(STRIPE)
   paymentReference String? // e.g. Stripe Checkout Session ID or M-Pesa CheckoutRequestID
+  stripeFundsAvailableAt           DateTime?
+  stripeSettledChargeId            String?
+  stripeBalanceTransactionId       String?
+  stripeAvailableOn                DateTime?
+  stripeSettlementStatus           StripeSettlementStatus?
+  stripeSettlementAttempts         Int                     @default(0)
+  stripeSettlementNextAttemptAt    DateTime?
+  stripeSettlementLockedBy         String?
+  stripeSettlementLockedUntil      DateTime?
+  stripeSettlementLastErrorCategory String?
+  stripeSettlementLastErrorCode    String?
+  stripeSettlementLastErrorMessage String?                 @db.Text
+  stripeSettlementLastAttemptAt    DateTime?
+  stripeSettlementFailedAt         DateTime?
+  stripeActualFeeInCents           Int?
+  stripeActualFeeCurrency          String?
+  stripeActualFeeRecordedAt        DateTime?
   expiresAt        DateTime // 15-minute checkout reservation hold
 
   createdAt DateTime @default(now())
@@ -488,12 +533,18 @@ model Order {
   transactions   PaymentTransaction[]
   waitlistOffers TicketWaitlistOffer[]
   ledgerEntries  FinancialLedgerEntry[]
+  emailOutbox    EmailOutbox[]
+  refunds        OrderRefund[]
+  refundTickets  OrderRefundTicket[]
 
   @@index([orderNumber])
   @@index([customerEmail])
   @@index([eventId, status])
   @@index([expiresAt, status])
   @@index([orderAccessToken])
+  @@index([paymentReference])
+  @@index([status, paymentProvider, stripeSettlementStatus, stripeSettlementNextAttemptAt])
+  @@index([stripeSettlementLockedUntil])
 }
 
 model OrderItem {
@@ -527,11 +578,24 @@ model Ticket {
   checkedInByUserId String?
   checkedInByUser   User?        @relation("ScannerTickets", fields: [checkedInByUserId], references: [id], onDelete: SetNull)
 
+  allocatedGrossInCents         Int?
+  allocatedPlatformFeeInCents   Int?
+  allocatedServiceFeeInCents    Int?
+  allocatedProcessingFeeInCents Int?
+  allocatedBuyerTotalInCents    Int?
+  refundedAt                    DateTime?
+  refundedByUserId              String?
+  cancelledAt                   DateTime?
+  cancelledByUserId             String?
+  cancellationReason            String?  @db.Text
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  checkInLogs CheckInLog[]
+  checkInLogs       CheckInLog[]
+  refundAllocations OrderRefundTicket[]
 
+  @@unique([id, orderId])
   @@index([ticketToken])
   @@index([eventId, status])
   @@index([orderId])
@@ -715,10 +779,23 @@ model OrganizerTransfer {
   organizer       User   @relation("OrganizerTransfers", fields: [organizerId], references: [id], onDelete: Restrict)
   stripeAccountId String
 
-  amountInCents    Int
-  currency         String         @default("USD")
-  status           TransferStatus @default(PENDING)
-  stripeTransferId String?        @unique // tr_...
+  amountInCents        Int
+  reversedAmountInCents Int            @default(0)
+  currency             String         @default("USD")
+  status               TransferStatus @default(PENDING)
+  stripeTransferId     String?        @unique // tr_...
+
+  reconciliationRequired         Boolean   @default(false)
+  reconciliationAttempts         Int       @default(0)
+  reconciliationNextAttemptAt    DateTime?
+  reconciliationLockedBy         String?
+  reconciliationLockedUntil      DateTime?
+  reconciliationLastAttemptAt    DateTime?
+  reconciliationLastErrorCode    String?
+  reconciliationLastErrorMessage String?   @db.Text
+  lastCreateAttemptAt            DateTime?
+  succeededAt                    DateTime?
+  failedAt                       DateTime?
 
   sourceType        TransferSourceType @default(MANUAL_ORGANIZER_REQUEST)
   initiatedByUserId String
@@ -735,6 +812,8 @@ model OrganizerTransfer {
 
   @@index([organizerId, createdAt])
   @@index([status])
+  @@index([status, reconciliationNextAttemptAt])
+  @@index([status, reconciliationLockedUntil])
   @@index([stripeTransferId])
   @@index([transferNumber])
 }
@@ -1021,4 +1100,217 @@ model PromotionDailyAggregate {
 
   @@unique([promotionLinkId, date])
   @@index([eventId, date])
+}
+
+// ==========================================
+// TRANSACTIONAL EMAIL OUTBOX
+// ==========================================
+
+enum EmailOutboxType {
+  ORDER_CONFIRMATION
+  LATE_PAYMENT_REFUND_CONFIRMED
+  LATE_PAYMENT_REFUND_MANUAL_REVIEW
+  BUYER_REFUND_CONFIRMED
+  BUYER_REFUND_MANUAL_REVIEW
+  EVENT_CANCELLED_BUYER
+  EVENT_CANCELLED_ORGANIZER
+}
+
+enum OrderRefundStatus {
+  PENDING
+  PROCESSING
+  STRIPE_PENDING
+  SUCCEEDED
+  MANUAL_REVIEW_REQUIRED
+  MANUALLY_RESOLVED
+  CANCELLED
+}
+
+enum OrderRefundKind {
+  LATE_PAYMENT
+  ORGANIZER_TICKET_REFUND
+  ADMIN_TICKET_REFUND
+  EVENT_CANCELLATION
+  EXTERNAL_STRIPE_RECONCILED
+}
+
+enum RefundInitiatorRole {
+  SYSTEM
+  ORGANIZER
+  ADMIN
+  STRIPE_WEBHOOK
+}
+
+enum RefundFeeBearer {
+  NOT_APPLICABLE
+  ORGANIZER
+  PLATFORM
+  SHARED
+}
+
+enum OrderRefundTicketLockState {
+  ACTIVE_PENDING
+  CONFIRMED
+  RELEASED
+}
+
+enum StripeSettlementStatus {
+  PENDING
+  SETTLED
+  FAILED_PERMANENT
+}
+
+enum EmailOutboxStatus {
+  PENDING
+  PROCESSING
+  SENT // Accepted by email provider (e.g. Resend HTTP 200); does not guarantee inbox delivery
+  FAILED_PERMANENT
+  CANCELLED // Superseded before dispatch (e.g. manual refund resolved prior to notification)
+}
+
+model EmailOutbox {
+  id                String            @id @default(uuid())
+  dedupeKey         String            @unique // e.g. "order_confirmation:<orderId>"
+  type              EmailOutboxType
+  status            EmailOutboxStatus @default(PENDING)
+
+  // Preservation strategy (matches FinancialLedgerEntry): deleting an Order sets orderId = NULL
+  // so pending or historical confirmation records are never silently deleted.
+  orderId           String?
+  order             Order?            @relation(fields: [orderId], references: [id], onDelete: SetNull)
+
+  recipientEmail    String
+  idempotencyKey    String            @unique // Deterministic provider key, e.g. "order-confirmation:<orderId>"
+  templateVersion   Int               @default(1)
+  // Immutable fulfillment-time rendering snapshot (must never store orderAccessToken or ticket QR tokens)
+  contentSnapshot   Json
+
+  attempts          Int               @default(0)
+  maxAttempts       Int               @default(8)
+  nextAttemptAt     DateTime          @default(now())
+  lockedBy          String?
+  lockedUntil       DateTime?
+
+  provider          String?           // "resend" | "test-recorder"
+  providerMessageId String?
+  lastErrorCode     String?
+  lastErrorMessage  String?           @db.Text
+  lastAttemptAt     DateTime?
+  // Timestamp when the provider accepted the message (HTTP 200), not confirmed inbox delivery.
+  sentAt            DateTime?
+  failedAt          DateTime?
+
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+
+  @@index([status, nextAttemptAt])
+  @@index([status, lockedUntil])
+  @@index([orderId])
+}
+
+// ==========================================
+// LATE-PAYMENT AUTOMATIC REFUNDS & DEAD-LETTER QUEUE
+// ==========================================
+
+/// Note: PostgreSQL-only CHECK constraints (Order_cumulativeRefundCap_chk,
+/// Ticket_persistedAllocation_chk, OrderRefund_amounts_chk, OrderRefundTicket_amounts_chk)
+/// and the partial unique index OrderRefundTicket_active_or_confirmed_ticket_key cannot be
+/// expressed in Prisma 5 DSL and live in migration SQL; preserve them when running
+/// `prisma migrate dev --create-only`.
+model OrderRefund {
+  id                       String            @id @default(uuid())
+  // Preservation strategy (matches FinancialLedgerEntry / EmailOutbox):
+  // Nullable so unlinked or anomalous PaymentIntents are never silently discarded.
+  // Composite FK on OrderRefundTicket uses ON DELETE RESTRICT ON UPDATE RESTRICT so
+  // rows linked to OrderRefundTicket cannot cascade-delete or null orderId.
+  orderId                  String?
+  order                    Order?            @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  stripePaymentIntentId    String
+  stripeChargeId           String?
+  stripeRefundId           String?           @unique
+  idempotencyKey           String            @unique
+  refundKind               OrderRefundKind   @default(LATE_PAYMENT)
+  initiatorRole            RefundInitiatorRole @default(SYSTEM)
+  initiatedByUserId        String?
+  initiatedByUser          User?             @relation("InitiatedRefunds", fields: [initiatedByUserId], references: [id], onDelete: SetNull)
+  feeBearer                RefundFeeBearer   @default(NOT_APPLICABLE)
+  refundStripeProcessingFee Boolean          @default(false)
+
+  amountInCents            Int
+  ticketSubtotalInCents    Int               @default(0)
+  platformFeeReversedInCents Int             @default(0)
+  serviceFeeReversedInCents Int              @default(0)
+  processingFeeInCents     Int               @default(0)
+  organizerDebitInCents    Int               @default(0)
+  platformExpenseInCents   Int               @default(0)
+  restoreInventory         Boolean           @default(false)
+  inventoryRestoredCount   Int               @default(0)
+
+  currency                 String            @default("USD")
+  reason                   String
+  status                   OrderRefundStatus @default(PENDING)
+
+  attempts                 Int               @default(0)
+  maxAttempts              Int               @default(8)
+  nextAttemptAt            DateTime          @default(now())
+  lockedBy                 String?
+  lockedUntil              DateTime?
+
+  lastErrorCategory        String?
+  lastErrorCode            String?
+  lastErrorMessage         String?           @db.Text
+  lastAttemptAt            DateTime?
+  succeededAt              DateTime?
+  failedAt                 DateTime?
+  cancelledAt              DateTime?
+  cancellationReason       String?           @db.Text
+
+  requiresManualResolution Boolean           @default(false)
+  resolvedAt               DateTime?
+  resolvedByUserId         String?
+  resolvedByEmail          String?
+  resolutionAction         String?
+  resolutionNotes          String?           @db.Text
+  metadata                 Json?
+
+  refundTickets            OrderRefundTicket[]
+
+  createdAt                DateTime          @default(now())
+  updatedAt                DateTime          @updatedAt
+
+  @@unique([id, orderId])
+  @@index([stripePaymentIntentId])
+  @@index([orderId, refundKind, status])
+  @@index([initiatedByUserId])
+  @@index([status, nextAttemptAt])
+  @@index([status, lockedUntil])
+  @@index([requiresManualResolution, resolvedAt])
+  @@index([orderId])
+}
+
+model OrderRefundTicket {
+  id                            String                     @id @default(uuid())
+  orderRefundId                 String
+  orderRefund                   OrderRefund                @relation(fields: [orderRefundId, orderId], references: [id, orderId], onDelete: Restrict, onUpdate: Restrict)
+  orderId                       String
+  order                         Order                      @relation(fields: [orderId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  ticketId                      String
+  ticket                        Ticket                     @relation(fields: [ticketId, orderId], references: [id, orderId], onDelete: Restrict, onUpdate: Restrict)
+  lockState                     OrderRefundTicketLockState @default(ACTIVE_PENDING)
+
+  allocatedGrossInCents         Int
+  allocatedPlatformFeeInCents   Int
+  allocatedServiceFeeInCents    Int
+  allocatedProcessingFeeInCents Int
+  allocatedBuyerTotalInCents    Int
+  refundedAmountInCents         Int
+  restoreInventory              Boolean                    @default(false)
+  inventoryRestored             Boolean                    @default(false)
+
+  createdAt                     DateTime                   @default(now())
+  updatedAt                     DateTime                   @updatedAt
+
+  @@unique([orderRefundId, ticketId])
+  @@index([orderId])
+  @@index([ticketId, lockState])
 }

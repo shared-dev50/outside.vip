@@ -432,8 +432,21 @@ describe('Automatic Ticket Waitlist System', () => {
         data: { expiresAt: new Date(Date.now() - 60000) },
       });
 
-      // Run background sweep / maintenance
-      const maintenanceRes = await request(app).post('/api/waitlist/maintenance');
+      // Run background sweep / maintenance with configured secret
+      const prevCronSecret = process.env.CRON_SECRET;
+      process.env.CRON_SECRET = 'waitlist_test_cron_secret';
+      let maintenanceRes: request.Response;
+      try {
+        maintenanceRes = await request(app)
+          .post('/api/waitlist/maintenance')
+          .set('Authorization', 'Bearer waitlist_test_cron_secret');
+      } finally {
+        if (prevCronSecret === undefined) {
+          delete process.env.CRON_SECRET;
+        } else {
+          process.env.CRON_SECRET = prevCronSecret;
+        }
+      }
       expect(maintenanceRes.status).toBe(200);
       expect(maintenanceRes.body.data.sweptExpiredOffers).toBeGreaterThanOrEqual(1);
 

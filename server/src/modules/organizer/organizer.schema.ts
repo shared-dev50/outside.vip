@@ -1,7 +1,8 @@
 import { z } from 'zod';
 import { EventCategory, EventStatus, TicketTierStatus, RecurrenceFrequency, EventFeatureType, OrderStatus } from '@prisma/client';
 import { extractYouTubeVideoId } from '../../utils/youtube.js';
-import { calculateGrossPriceFromDisplay } from '../checkout/checkout.financials.js';
+import { validateAndResolveTicketTierPricing } from '../checkout/checkout.financials.js';
+import { isSupportedPlatformCurrency } from '../finance/stripeCountries.js';
 
 export const galleryImageInputSchema = z.object({
   id: z.string().optional(),
@@ -38,11 +39,17 @@ export type EventFeatureInput = z.infer<typeof eventFeatureInputSchema>;
 export const ticketTierInputSchema = z
   .object({
     id: z.string().optional(),
-    name: z.string().min(1, 'Ticket name is required').max(100),
+    name: z.string().trim().min(1, 'Ticket name is required').max(100),
     description: z.string().optional().nullable(),
     priceInCents: z.number().int().min(0, 'Price must be 0 or greater').optional(),
     displayPriceInCents: z.number().int().min(0, 'Display price must be 0 or greater').optional().nullable(),
-    currency: z.string().default('USD'),
+    currency: z
+      .string()
+      .default('USD')
+      .transform((v) => v.trim().toUpperCase())
+      .refine((v) => isSupportedPlatformCurrency(v), {
+        message: 'Only USD currency is currently supported for ticket tiers.',
+      }),
     totalCapacity: z.number().int().min(1, 'Capacity must be at least 1'),
     minPerOrder: z.number().int().min(1, 'Min per order must be at least 1').default(1),
     maxPerOrder: z.number().int().min(1, 'Max per order must be at least 1').default(10),
@@ -50,7 +57,9 @@ export const ticketTierInputSchema = z
     salesEndAt: z.string().datetime().optional().nullable(),
     validityStartAt: z.string().datetime().optional().nullable(),
     validityEndAt: z.string().datetime().optional().nullable(),
-    status: z.nativeEnum(TicketTierStatus).default(TicketTierStatus.ACTIVE),
+    status: z.nativeEnum(TicketTierStatus).optional(),
+    isHidden: z.boolean().optional(),
+    salesDisabled: z.boolean().optional(),
     waitlistEnabled: z.boolean().default(false),
   })
   .refine(
@@ -77,18 +86,21 @@ export const ticketTierInputSchema = z
       path: ['validityEndAt'],
     }
   )
-  .transform((data) => {
-    let priceInCents = data.priceInCents;
-    if (priceInCents === undefined || priceInCents === null) {
-      if (data.displayPriceInCents !== undefined && data.displayPriceInCents !== null) {
-        priceInCents = calculateGrossPriceFromDisplay(data.displayPriceInCents);
-      } else {
-        priceInCents = 0;
-      }
+  .superRefine((data, ctx) => {
+    const pricing = validateAndResolveTicketTierPricing(data);
+    if (!pricing.valid) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: pricing.message || 'Invalid ticket tier pricing configuration.',
+        path: [pricing.field || 'displayPriceInCents'],
+      });
     }
+  })
+  .transform((data) => {
+    const pricing = validateAndResolveTicketTierPricing(data);
     return {
       ...data,
-      priceInCents,
+      priceInCents: pricing.resolvedPriceInCents ?? 0,
     };
   })
   .refine((data) => data.maxPerOrder >= data.minPerOrder, {
@@ -229,6 +241,7 @@ export const createEventSchema = z
 
 export const updateEventSchema = z.object({
   title: z.string().min(2).max(200).optional(),
+  cancellationReason: z.string().trim().max(500).optional(),
   tagline: z.string().max(300).optional().nullable(),
   description: z.string().optional(),
   category: z.nativeEnum(EventCategory).optional(),
@@ -273,6 +286,10 @@ export const updateEventSchema = z.object({
 
 export type CreateEventInput = z.infer<typeof createEventSchema>;
 export type UpdateEventInput = z.infer<typeof updateEventSchema>;
+
+export const cancelEventBodySchema = z.object({
+  reason: z.string().trim().max(500).optional(),
+});
 
 export const earningsPreviewInputSchema = z.object({
   tiers: z

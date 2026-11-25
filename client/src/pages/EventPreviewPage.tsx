@@ -2,7 +2,9 @@ import React, { useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../lib/api';
-import { TicketTier } from '../types';
+import { useOptionalAuth } from '../context/AuthContext';
+import { resolveOrganizerEventUiPermissions } from '../lib/eventPermissions';
+import { TicketTier, User } from '../types';
 import { calculateDisplayPriceFromGross, calculateCheckoutFeeBreakdown } from '../lib/fees';
 import {
   Calendar,
@@ -15,11 +17,18 @@ import {
   X,
   Minus,
   Plus,
+  Ticket,
 } from 'lucide-react';
 
-export const EventPreviewPage: React.FC = () => {
+interface EventPreviewPageProps {
+  initialUser?: User | null;
+}
+
+export const EventPreviewPage: React.FC<EventPreviewPageProps> = ({ initialUser }) => {
   const { id } = useParams<{ id: string }>();
   const queryClient = useQueryClient();
+  const auth = useOptionalAuth();
+  const user = initialUser !== undefined ? initialUser : auth?.user;
 
   const [selectedQuantities, setSelectedQuantities] = useState<Record<string, number>>({});
   const [notification, setNotification] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
@@ -128,6 +137,9 @@ export const EventPreviewPage: React.FC = () => {
   }
 
   const isPublished = event.status === 'PUBLISHED';
+  const uiPerms = resolveOrganizerEventUiPermissions(event, user);
+  const canManageTicketsOnly = uiPerms.canManageTickets && !uiPerms.canEditDetails;
+  const canEditDetailsOnly = uiPerms.canEditDetails && !uiPerms.canManageTickets;
   const totalTickets = Object.values(selectedQuantities).reduce((a, b) => a + b, 0);
   const ticketSubtotalInCents = event
     ? event.ticketTiers.reduce((acc, tier) => {
@@ -173,16 +185,27 @@ export const EventPreviewPage: React.FC = () => {
               Dashboard
             </Link>
 
-            <Link
-              to={`/organizer/events/${event.id}/edit`}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#14171F] hover:bg-[#1C202B] text-gray-200 hover:text-[#D2FF00] border border-white/10 text-xs font-mono transition-colors"
-            >
-              <Edit3 className="w-3.5 h-3.5" />
-              Edit Event
-            </Link>
+            {uiPerms.canEditEvent && (
+              <Link
+                to={uiPerms.editPath}
+                title={uiPerms.editLabel}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#14171F] hover:bg-[#1C202B] text-gray-200 hover:text-[#D2FF00] border border-white/10 text-xs font-mono transition-colors"
+              >
+                {canManageTicketsOnly ? (
+                  <Ticket className="w-3.5 h-3.5" />
+                ) : (
+                  <Edit3 className="w-3.5 h-3.5" />
+                )}
+                {canManageTicketsOnly
+                  ? 'Manage Ticket Tiers'
+                  : canEditDetailsOnly
+                  ? 'Edit Event Details'
+                  : 'Edit Event'}
+              </Link>
+            )}
 
-            {isPublished ? (
-              <>
+            {uiPerms.canPublishOrUnpublish && (
+              isPublished ? (
                 <button
                   type="button"
                   onClick={() => unpublishMutation.mutate(event.id)}
@@ -191,26 +214,29 @@ export const EventPreviewPage: React.FC = () => {
                 >
                   Unpublish
                 </button>
-                <Link
-                  to={`/events/${event.slug}`}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-[#D2FF00] hover:bg-[#BEF200] text-black text-xs font-mono font-bold uppercase tracking-wider transition-colors"
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => publishMutation.mutate(event.id)}
+                  disabled={publishMutation.isPending}
+                  className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-lg bg-[#D2FF00] hover:bg-[#BEF200] text-black text-xs font-mono font-bold uppercase tracking-wider transition-all duration-200 shadow-[0_0_15px_rgba(210,255,0,0.3)] disabled:opacity-50"
                 >
-                  <ExternalLink className="w-3.5 h-3.5" />
-                  Public Page
-                </Link>
-              </>
-            ) : (
-              <button
-                type="button"
-                onClick={() => publishMutation.mutate(event.id)}
-                disabled={publishMutation.isPending}
-                className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-lg bg-[#D2FF00] hover:bg-[#BEF200] text-black text-xs font-mono font-bold uppercase tracking-wider transition-all duration-200 shadow-[0_0_15px_rgba(210,255,0,0.3)] disabled:opacity-50"
+                  <Globe className="w-3.5 h-3.5" />
+                  {publishMutation.isPending ? 'Publishing...' : 'Publish Live Now'}
+                </button>
+              )
+            )}
+
+            {isPublished && (
+              <Link
+                to={`/events/${event.slug}`}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-[#D2FF00] hover:bg-[#BEF200] text-black text-xs font-mono font-bold uppercase tracking-wider transition-colors"
               >
-                <Globe className="w-3.5 h-3.5" />
-                {publishMutation.isPending ? 'Publishing...' : 'Publish Live Now'}
-              </button>
+                <ExternalLink className="w-3.5 h-3.5" />
+                Public Page
+              </Link>
             )}
           </div>
         </div>
@@ -386,28 +412,49 @@ export const EventPreviewPage: React.FC = () => {
               {event.ticketTiers.length === 0 ? (
                 <div className="p-6 text-center text-xs text-gray-500 border border-dashed border-gray-200 rounded-xl space-y-2">
                   <p>No ticket tiers configured for this event yet.</p>
-                  <Link
-                    to={`/organizer/events/${event.id}/edit`}
-                    className="inline-block text-xs font-mono text-black font-semibold underline"
-                  >
-                    Add Ticket Tiers in Editor →
-                  </Link>
+                  {uiPerms.canManageTickets && (
+                    <Link
+                      to={uiPerms.editPath}
+                      className="inline-block text-xs font-mono text-black font-semibold underline"
+                    >
+                      Add Ticket Tiers in Editor →
+                    </Link>
+                  )}
                 </div>
               ) : (
                 <div className="space-y-3">
                   {event.ticketTiers.map((tier: TicketTier) => {
                     const qty = selectedQuantities[tier.id] || 0;
+                    const isHidden = Boolean(tier.isHidden) || tier.status === 'HIDDEN';
+                    const isSalesDisabled = Boolean(tier.salesDisabled) || tier.status === 'PAUSED';
+                    const isSelectable = !isHidden && !isSalesDisabled && tier.status !== 'SOLD_OUT';
                     return (
                       <div
                         key={tier.id}
                         className={`p-3.5 rounded-xl border transition-colors ${
-                          qty > 0 ? 'bg-gray-50 border-gray-900' : 'border-gray-200 hover:border-gray-300'
+                          qty > 0
+                            ? 'bg-gray-50 border-gray-900'
+                            : isSelectable
+                            ? 'border-gray-200 hover:border-gray-300'
+                            : 'bg-gray-50/70 border-gray-200 opacity-75'
                         }`}
                       >
                         <div className="flex items-start justify-between gap-3">
                           <div className="space-y-0.5 flex-1">
-                            <div className="font-semibold text-gray-900 text-sm">
-                              {tier.name}
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="font-semibold text-gray-900 text-sm">
+                                {tier.name}
+                              </span>
+                              {isHidden && (
+                                <span className="text-[10px] font-mono uppercase font-bold px-2 py-0.5 rounded bg-stone-200 text-stone-800 border border-stone-300">
+                                  Hidden from public
+                                </span>
+                              )}
+                              {isSalesDisabled && (
+                                <span className="text-[10px] font-mono uppercase font-bold px-2 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-200">
+                                  Sales unavailable
+                                </span>
+                              )}
                             </div>
                             {tier.description && (
                               <p className="text-xs text-gray-500 leading-snug">
@@ -437,27 +484,29 @@ export const EventPreviewPage: React.FC = () => {
                             </div>
                           </div>
 
-                          <div className="flex items-center gap-1.5 bg-gray-50 border border-gray-200 rounded-md p-1 shrink-0">
-                            <button
-                              type="button"
-                              onClick={() => updateQuantity(tier.id, -1, tier.maxPerOrder)}
-                              disabled={qty === 0}
-                              className="w-6 h-6 rounded flex items-center justify-center text-gray-600 hover:text-black hover:bg-gray-200 disabled:opacity-20"
-                            >
-                              <Minus className="w-3 h-3" />
-                            </button>
-                            <span className="w-5 text-center text-xs font-bold text-gray-900">
-                              {qty}
-                            </span>
-                            <button
-                              type="button"
-                              onClick={() => updateQuantity(tier.id, 1, tier.maxPerOrder)}
-                              disabled={qty >= tier.maxPerOrder}
-                              className="w-6 h-6 rounded flex items-center justify-center text-gray-600 hover:text-black hover:bg-gray-200 disabled:opacity-20"
-                            >
-                              <Plus className="w-3 h-3" />
-                            </button>
-                          </div>
+                          {isSelectable && (
+                            <div className="flex items-center gap-1.5 bg-gray-50 border border-gray-200 rounded-md p-1 shrink-0">
+                              <button
+                                type="button"
+                                onClick={() => updateQuantity(tier.id, -1, tier.maxPerOrder)}
+                                disabled={qty === 0}
+                                className="w-6 h-6 rounded flex items-center justify-center text-gray-600 hover:text-black hover:bg-gray-200 disabled:opacity-20"
+                              >
+                                <Minus className="w-3 h-3" />
+                              </button>
+                              <span className="w-5 text-center text-xs font-bold text-gray-900">
+                                {qty}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => updateQuantity(tier.id, 1, tier.maxPerOrder)}
+                                disabled={qty >= tier.maxPerOrder}
+                                className="w-6 h-6 rounded flex items-center justify-center text-gray-600 hover:text-black hover:bg-gray-200 disabled:opacity-20"
+                              >
+                                <Plus className="w-3 h-3" />
+                              </button>
+                            </div>
+                          )}
                         </div>
                       </div>
                     );

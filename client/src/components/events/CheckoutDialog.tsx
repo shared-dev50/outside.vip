@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Elements, CardElement, useStripe, useElements } from '@stripe/react-stripe-js';
 import { X, ShieldCheck, Clock, AlertCircle, Lock, CheckCircle2 } from 'lucide-react';
@@ -63,14 +63,50 @@ const PaymentContent: React.FC<PaymentContentProps> = ({
   const [email, setEmail] = useState(attendeeEmail);
   const [phone, setPhone] = useState(attendeePhone || '');
 
-  const [paymentStep, setPaymentStep] = useState<'idle' | 'processing' | 'success'>('idle');
+  const [paymentStep, setPaymentStep] = useState<
+    'idle' | 'processing' | 'awaiting_confirmation' | 'pending_timeout' | 'success'
+  >('idle');
   const [cardError, setCardError] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [processingNotice, setProcessingNotice] = useState<string | null>(null);
   const [isReady, setIsReady] = useState(false);
   const [secondsRemaining, setSecondsRemaining] = useState<number>(() => {
     const diff = Math.floor((new Date(paymentSession.expiresAt).getTime() - Date.now()) / 1000);
     return Math.max(0, diff);
   });
+
+  const isMountedRef = useRef(true);
+  const activeOrderNumberRef = useRef(paymentSession.orderNumber);
+  const attemptTokenRef = useRef(0);
+  const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const clearPollTimer = () => {
+    if (pollTimerRef.current !== null) {
+      clearTimeout(pollTimerRef.current);
+      pollTimerRef.current = null;
+    }
+  };
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      attemptTokenRef.current += 1;
+      clearPollTimer();
+    };
+  }, []);
+
+  useEffect(() => {
+    activeOrderNumberRef.current = paymentSession.orderNumber;
+    attemptTokenRef.current += 1;
+    clearPollTimer();
+    setPaymentStep('idle');
+    setErrorMessage(null);
+    setProcessingNotice(null);
+    setCardError(null);
+    const diff = Math.floor((new Date(paymentSession.expiresAt).getTime() - Date.now()) / 1000);
+    setSecondsRemaining(Math.max(0, diff));
+  }, [paymentSession.orderNumber, paymentSession.expiresAt]);
 
   const dialogFees = calculateCheckoutFeeBreakdown(
     selectedItems.map(({ tier, quantity }) => ({
@@ -79,7 +115,13 @@ const PaymentContent: React.FC<PaymentContentProps> = ({
     }))
   );
 
-  const isBusy = paymentStep === 'processing' || paymentStep === 'success';
+  // Actively submitting or waiting for response/navigation locks modal close;
+  // pending_timeout locks the form against duplicate payment while letting the buyer close or inspect status.
+  const isBusy =
+    paymentStep === 'processing' ||
+    paymentStep === 'awaiting_confirmation' ||
+    paymentStep === 'success';
+  const isFormLocked = isBusy || paymentStep === 'pending_timeout' || secondsRemaining <= 0;
 
   useEffect(() => {
     onBusyChange?.(isBusy);
@@ -123,7 +165,7 @@ const PaymentContent: React.FC<PaymentContentProps> = ({
   const handlePayment = async (e: React.FormEvent) => {
     e.preventDefault();
 
-    if (!stripe || !elements || isBusy || isExpired) {
+    if (!stripe || !elements || isFormLocked) {
       return;
     }
 
@@ -155,8 +197,22 @@ const PaymentContent: React.FC<PaymentContentProps> = ({
       return;
     }
 
+    if (!paymentSession.clientSecret) {
+      setErrorMessage('Payment session is missing a Stripe client secret. Please refresh and try again.');
+      return;
+    }
+
+    const sessionOrderNumber = paymentSession.orderNumber;
+    const sessionAccessToken = paymentSession.orderAccessToken;
+    const runToken = ++attemptTokenRef.current;
+    const isStaleAttempt = () =>
+      !isMountedRef.current ||
+      attemptTokenRef.current !== runToken ||
+      activeOrderNumberRef.current !== sessionOrderNumber;
+
     setPaymentStep('processing');
     setErrorMessage(null);
+    setProcessingNotice(null);
 
     try {
       const result = await stripe.confirmCardPayment(paymentSession.clientSecret, {
@@ -170,6 +226,8 @@ const PaymentContent: React.FC<PaymentContentProps> = ({
         },
       });
 
+      if (isStaleAttempt()) return;
+
       if (result.error) {
         setErrorMessage(
           result.error.message || 'Payment attempt was declined. Please verify your card details and try again.'
@@ -178,44 +236,89 @@ const PaymentContent: React.FC<PaymentContentProps> = ({
         return;
       }
 
-      if (
-        result.paymentIntent &&
-        (result.paymentIntent.status === 'succeeded' || result.paymentIntent.status === 'processing')
-      ) {
-        setPaymentStep('success');
+      const orderStatusUrl = `/orders/${sessionOrderNumber}?token=${encodeURIComponent(
+        sessionAccessToken
+      )}`;
 
-        // Poll order status until tickets are confirmed
+      if (
+        result.paymentIntent?.status === 'succeeded' ||
+        result.paymentIntent?.status === 'processing'
+      ) {
+        const isStripeSucceeded = result.paymentIntent.status === 'succeeded';
+        // Never mark a payment as succeeded until server-persisted order state confirms COMPLETED.
+        setPaymentStep('awaiting_confirmation');
+        setProcessingNotice(
+          isStripeSucceeded
+            ? 'Payment authorized — awaiting server confirmation before issuing your tickets.'
+            : 'Your payment is processing with Stripe. Tickets will be issued once payment verification completes.'
+        );
+
         const maxAttempts = 6;
         const pollIntervalMs = 1000;
 
         for (let attempt = 0; attempt < maxAttempts; attempt++) {
+          if (isStaleAttempt()) return;
+
           try {
             const orderRes = await api.orders.getByOrderNumber(
-              paymentSession.orderNumber,
-              paymentSession.orderAccessToken
+              sessionOrderNumber,
+              sessionAccessToken
             );
+            if (isStaleAttempt()) return;
+
+            const resolvedOrderStatus: string | null = orderRes?.order?.status || null;
+            if (resolvedOrderStatus === 'COMPLETED') {
+              setPaymentStep('success');
+              setProcessingNotice(null);
+              navigate(orderStatusUrl);
+              return;
+            }
 
             if (
-              orderRes?.order?.status === 'COMPLETED' ||
-              (orderRes?.order?.tickets && orderRes.order.tickets.length > 0)
+              resolvedOrderStatus === 'CANCELLED' ||
+              resolvedOrderStatus === 'EXPIRED' ||
+              resolvedOrderStatus === 'FAILED'
             ) {
-              break;
+              setPaymentStep('idle');
+              setProcessingNotice(null);
+              setErrorMessage(
+                'Your payment session did not complete. Please review your order status or start a new checkout.'
+              );
+              return;
             }
           } catch {
-            // Keep polling through transient errors
+            if (isStaleAttempt()) return;
+            // Continue polling through transient lookup errors
           }
 
-          await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+          if (attempt < maxAttempts - 1) {
+            await new Promise<void>((resolve) => {
+              clearPollTimer();
+              pollTimerRef.current = setTimeout(() => {
+                pollTimerRef.current = null;
+                resolve();
+              }, pollIntervalMs);
+            });
+            if (isStaleAttempt()) return;
+          }
         }
 
-          navigate(
-          `/orders/${paymentSession.orderNumber}?token=${encodeURIComponent(paymentSession.orderAccessToken)}`
+        // All 6 polls expired while the order remains PENDING: keep the form locked against duplicate submission.
+        setPaymentStep('pending_timeout');
+        setProcessingNotice(
+          'Your payment is still pending confirmation with our server. Do not resubmit payment — view your order page for live status or close this dialog.'
         );
+      } else if (result.paymentIntent?.status === 'canceled') {
+        setErrorMessage(
+          'This payment session was canceled. Please close this dialog and start a new checkout to try again.'
+        );
+        setPaymentStep('idle');
       } else {
         setErrorMessage('Unexpected payment response. Please check your order status or try again.');
         setPaymentStep('idle');
       }
     } catch (err: any) {
+      if (isStaleAttempt()) return;
       setErrorMessage(err.message || 'An unexpected error occurred while processing your card payment.');
       setPaymentStep('idle');
     }
@@ -336,8 +439,15 @@ const PaymentContent: React.FC<PaymentContentProps> = ({
           </div>
         </div>
 
-        <form onSubmit={handlePayment} className={`space-y-4 ${isExpired ? 'opacity-40 pointer-events-none' : ''}`}>
-          <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-3 shadow-xs">
+        <form
+          onSubmit={handlePayment}
+          className={`space-y-4 ${isExpired || paymentStep === 'pending_timeout' ? 'opacity-90' : ''}`}
+        >
+          <div
+            className={`bg-white border border-gray-200 rounded-xl p-4 space-y-3 shadow-xs ${
+              isExpired || paymentStep === 'pending_timeout' ? 'opacity-50 pointer-events-none' : ''
+            }`}
+          >
             <div className="flex items-center justify-between">
               <div className="text-[11px] uppercase tracking-wider font-semibold text-gray-400">
                 Attendee Details
@@ -354,7 +464,7 @@ const PaymentContent: React.FC<PaymentContentProps> = ({
                   id="dialog-attendee-name"
                   type="text"
                   value={name}
-                  disabled={isBusy}
+                  disabled={isFormLocked}
                   onChange={(e) => {
                     const val = e.target.value;
                     setName(val);
@@ -374,7 +484,7 @@ const PaymentContent: React.FC<PaymentContentProps> = ({
                   id="dialog-attendee-email"
                   type="email"
                   value={email}
-                  disabled={isBusy}
+                  disabled={isFormLocked}
                   onChange={(e) => {
                     const val = e.target.value;
                     setEmail(val);
@@ -395,7 +505,7 @@ const PaymentContent: React.FC<PaymentContentProps> = ({
                 id="dialog-attendee-phone"
                 type="tel"
                 value={phone}
-                disabled={isBusy}
+                disabled={isFormLocked}
                 onChange={(e) => {
                   const val = e.target.value;
                   setPhone(val);
@@ -408,7 +518,11 @@ const PaymentContent: React.FC<PaymentContentProps> = ({
             </div>
           </div>
 
-          <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-2.5 shadow-xs">
+          <div
+            className={`bg-white border border-gray-200 rounded-xl p-4 space-y-2.5 shadow-xs ${
+              isExpired || paymentStep === 'pending_timeout' ? 'opacity-50 pointer-events-none' : ''
+            }`}
+          >
             <div className="flex items-center justify-between">
               <label htmlFor="card-element-container" className="text-[11px] uppercase tracking-wider font-semibold text-gray-500 block">
                 Card Details
@@ -425,7 +539,7 @@ const PaymentContent: React.FC<PaymentContentProps> = ({
                 cardError
                   ? 'border-rose-400 ring-1 ring-rose-400'
                   : 'border-gray-200 focus-within:border-gray-900 focus-within:ring-1 focus-within:ring-gray-900'
-              } ${isBusy ? 'opacity-60 pointer-events-none' : ''}`}
+              } ${isFormLocked ? 'opacity-60 pointer-events-none' : ''}`}
             >
               {!isReady && (
                 <div className="absolute inset-x-3.5 inset-y-2.5 flex items-center justify-between text-gray-300 animate-pulse pointer-events-none">
@@ -445,7 +559,7 @@ const PaymentContent: React.FC<PaymentContentProps> = ({
                   }}
                   onReady={() => setIsReady(true)}
                   options={{
-                    disabled: isBusy,
+                    disabled: isFormLocked,
                     style: {
                       base: {
                         fontSize: '13px',
@@ -475,6 +589,19 @@ const PaymentContent: React.FC<PaymentContentProps> = ({
             )}
           </div>
 
+          {processingNotice && (
+            <div
+              role="status"
+              className="p-3.5 rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-xs flex items-start gap-2.5 animate-in fade-in"
+            >
+              <Clock className="w-4 h-4 shrink-0 mt-0.5 text-amber-600" />
+              <div className="space-y-1.5">
+                <span className="font-semibold block">Payment Processing</span>
+                <span className="text-[11px] leading-relaxed block">{processingNotice}</span>
+              </div>
+            </div>
+          )}
+
           {errorMessage && (
             <div className="p-3.5 rounded-lg bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-start gap-2.5 animate-in fade-in">
               <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-600" />
@@ -486,34 +613,58 @@ const PaymentContent: React.FC<PaymentContentProps> = ({
           )}
 
           <div className="space-y-2 pt-1">
-            <button
-              type="submit"
-              disabled={!stripe || !elements || !isReady || isBusy || isExpired}
-              className={`w-full py-3 rounded-lg font-semibold text-xs transition-all flex items-center justify-center gap-2 shadow-sm min-h-[42px] ${
-                paymentStep === 'success'
-                  ? 'bg-emerald-600 text-white cursor-default disabled:opacity-100'
-                  : 'bg-gray-900 hover:bg-black text-white disabled:opacity-50'
-              }`}
-            >
-              {paymentStep === 'processing' ? (
-                <>
-                  <div
-                    className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin motion-reduce:animate-none shrink-0"
-                    aria-hidden="true"
-                  />
-                  <span aria-live="polite">Processing payment…</span>
-                </>
-              ) : paymentStep === 'success' ? (
-                <>
-                  <CheckCircle2 className="w-4 h-4 text-white shrink-0" aria-hidden="true" />
-                  <span aria-live="polite">Payment successful — preparing your tickets…</span>
-                </>
-              ) : !isReady ? (
-                <span>Securing Card Form...</span>
-              ) : (
-                <span>Pay {formatPrice(paymentSession.totalInCents || dialogFees.buyerTotalInCents || totalInCents, currency)}</span>
-              )}
-            </button>
+            {paymentStep === 'pending_timeout' ? (
+              <button
+                type="button"
+                onClick={() =>
+                  navigate(
+                    `/orders/${paymentSession.orderNumber}?token=${encodeURIComponent(
+                      paymentSession.orderAccessToken
+                    )}`
+                  )
+                }
+                className="w-full py-3 rounded-lg font-semibold text-xs transition-all flex items-center justify-center gap-2 shadow-sm min-h-[42px] bg-amber-900 hover:bg-amber-950 text-white"
+              >
+                <span>View Order Status</span>
+              </button>
+            ) : (
+              <button
+                type="submit"
+                disabled={!stripe || !elements || !isReady || isFormLocked}
+                className={`w-full py-3 rounded-lg font-semibold text-xs transition-all flex items-center justify-center gap-2 shadow-sm min-h-[42px] ${
+                  paymentStep === 'success'
+                    ? 'bg-emerald-600 text-white cursor-default disabled:opacity-100'
+                    : 'bg-gray-900 hover:bg-black text-white disabled:opacity-50'
+                }`}
+              >
+                {paymentStep === 'processing' ? (
+                  <>
+                    <div
+                      className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin motion-reduce:animate-none shrink-0"
+                      aria-hidden="true"
+                    />
+                    <span aria-live="polite">Processing payment…</span>
+                  </>
+                ) : paymentStep === 'awaiting_confirmation' ? (
+                  <>
+                    <div
+                      className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin motion-reduce:animate-none shrink-0"
+                      aria-hidden="true"
+                    />
+                    <span aria-live="polite">Awaiting payment verification…</span>
+                  </>
+                ) : paymentStep === 'success' ? (
+                  <>
+                    <CheckCircle2 className="w-4 h-4 text-white shrink-0" aria-hidden="true" />
+                    <span aria-live="polite">Payment successful — preparing your tickets…</span>
+                  </>
+                ) : !isReady ? (
+                  <span>Securing Card Form...</span>
+                ) : (
+                  <span>Pay {formatPrice(paymentSession.totalInCents || dialogFees.buyerTotalInCents || totalInCents, currency)}</span>
+                )}
+              </button>
+            )}
 
             <button
               type="button"
@@ -521,7 +672,7 @@ const PaymentContent: React.FC<PaymentContentProps> = ({
               disabled={isBusy}
               className="w-full py-2 text-center text-xs text-gray-500 hover:text-gray-900 transition-colors disabled:opacity-30 disabled:pointer-events-none"
             >
-              Cancel
+              {paymentStep === 'pending_timeout' ? 'Close' : 'Cancel'}
             </button>
           </div>
         </form>
@@ -530,6 +681,119 @@ const PaymentContent: React.FC<PaymentContentProps> = ({
       <div className="px-5 sm:px-6 py-2.5 sm:py-3 border-t border-gray-100 bg-white flex items-center justify-center gap-1.5 text-[11px] text-gray-400 shrink-0">
         <ShieldCheck className="w-3.5 h-3.5 text-gray-400 shrink-0" />
         <span>End-to-end 256-bit encrypted card checkout via Stripe</span>
+      </div>
+    </div>
+  );
+};
+
+const FreeCheckoutContent: React.FC<PaymentContentProps> = ({
+  onClose,
+  event,
+  selectedItems,
+  attendeeName,
+  attendeeEmail,
+  totalInCents,
+  currency,
+  paymentSession,
+  formatPrice,
+  onBusyChange,
+}) => {
+  const navigate = useNavigate();
+  const [isNavigating, setIsNavigating] = useState(false);
+
+  const handleContinue = () => {
+    if (isNavigating) return;
+    setIsNavigating(true);
+    onBusyChange?.(true);
+    navigate(
+      `/orders/${paymentSession.orderNumber}?token=${encodeURIComponent(paymentSession.orderAccessToken)}`
+    );
+  };
+
+  return (
+    <div className="flex flex-col h-full min-h-0">
+      <div className="px-5 sm:px-6 py-3.5 sm:py-4 border-b border-gray-100 flex items-center justify-between bg-white shrink-0">
+        <div className="space-y-0.5">
+          <div className="flex items-center gap-2">
+            <h2 id="checkout-dialog-title" className="font-display font-bold text-lg text-gray-900 tracking-tight">
+              Free Registration Confirmed
+            </h2>
+            <span className="font-mono text-[11px] font-semibold text-gray-400 bg-gray-50 border border-gray-200 px-1.5 py-0.5 rounded">
+              #{paymentSession.orderNumber}
+            </span>
+          </div>
+          <p className="text-xs text-gray-500 truncate max-w-xs sm:max-w-sm">{event.title}</p>
+        </div>
+
+        <button
+          type="button"
+          onClick={onClose}
+          disabled={isNavigating}
+          aria-label="Close checkout"
+          className="p-1.5 rounded-lg text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-colors disabled:opacity-30 disabled:pointer-events-none"
+        >
+          <X className="w-5 h-5" />
+        </button>
+      </div>
+
+      <div className="px-5 sm:px-6 py-4 sm:py-5 overflow-y-auto flex-1 min-h-0 space-y-4 bg-[#FAF8F5]/40">
+        <div className="p-3 rounded-lg border bg-emerald-50 border-emerald-200 text-emerald-800 text-xs flex items-center gap-2 font-medium">
+          <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-600" />
+          <span>No payment required. Your free tickets are confirmed and ready.</span>
+        </div>
+
+        <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-3 shadow-xs">
+          <div className="text-[11px] uppercase tracking-wider font-semibold text-gray-400">
+            Order Summary
+          </div>
+          <div className="space-y-2 divide-y divide-gray-100 text-xs">
+            {selectedItems.map(({ tier, quantity }) => (
+              <div key={tier.id} className="pt-2 first:pt-0 flex items-start justify-between gap-2">
+                <div className="space-y-0.5">
+                  <div className="font-semibold text-gray-900">
+                    {quantity} × {tier.name}
+                  </div>
+                  <div className="text-gray-400 text-[11px]">Free</div>
+                </div>
+                <div className="font-semibold text-gray-900 font-mono">Free</div>
+              </div>
+            ))}
+          </div>
+          <div className="pt-2 border-t border-gray-200 flex items-center justify-between text-sm font-bold text-gray-900">
+            <span>Total</span>
+            <span className="text-base text-gray-900 font-mono">
+              {formatPrice(paymentSession.totalInCents ?? totalInCents, currency)}
+            </span>
+          </div>
+        </div>
+
+        <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-1 text-xs shadow-xs">
+          <div className="text-[11px] uppercase tracking-wider font-semibold text-gray-400">
+            Attendee
+          </div>
+          <div className="font-semibold text-gray-900">{attendeeName}</div>
+          <div className="text-gray-600">{attendeeEmail}</div>
+        </div>
+
+        <div className="space-y-2 pt-1">
+          <button
+            type="button"
+            onClick={handleContinue}
+            disabled={isNavigating}
+            className="w-full py-3 rounded-lg font-semibold text-xs transition-all flex items-center justify-center gap-2 shadow-sm min-h-[42px] bg-gray-900 hover:bg-black text-white disabled:opacity-50"
+          >
+            <span>{isNavigating ? 'Opening tickets...' : 'View & Download Tickets'}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={isNavigating}
+            className="w-full py-2 text-center text-xs text-gray-500 hover:text-gray-900 transition-colors disabled:opacity-30 disabled:pointer-events-none"
+          >
+            Close
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -579,6 +843,11 @@ export const CheckoutDialog: React.FC<CheckoutDialogProps> = ({
     return null;
   }
 
+  const isFreeSession =
+    paymentSession.isFreeOrder === true ||
+    paymentSession.paymentProvider === 'FREE' ||
+    (paymentSession.totalInCents === 0 && !paymentSession.clientSecret);
+
   return (
     <div
       role="dialog"
@@ -595,8 +864,8 @@ export const CheckoutDialog: React.FC<CheckoutDialogProps> = ({
         className="w-full max-w-lg bg-white rounded-2xl border border-gray-200/80 shadow-2xl flex flex-col max-h-[calc(100dvh-1.5rem)] sm:max-h-[min(90vh,90dvh)] min-h-0 overflow-hidden my-auto animate-in zoom-in-95 duration-200"
         onClick={(e) => e.stopPropagation()}
       >
-        <Elements stripe={getStripePromise(paymentSession.publishableKey)}>
-          <PaymentContent
+        {isFreeSession ? (
+          <FreeCheckoutContent
             onClose={onClose}
             event={event}
             selectedItems={selectedItems}
@@ -611,7 +880,25 @@ export const CheckoutDialog: React.FC<CheckoutDialogProps> = ({
             onSessionExpired={onSessionExpired}
             onBusyChange={setIsBusy}
           />
-        </Elements>
+        ) : (
+          <Elements stripe={getStripePromise(paymentSession.publishableKey)}>
+            <PaymentContent
+              onClose={onClose}
+              event={event}
+              selectedItems={selectedItems}
+              attendeeName={attendeeName}
+              attendeeEmail={attendeeEmail}
+              attendeePhone={attendeePhone}
+              onUpdateAttendee={onUpdateAttendee}
+              totalInCents={totalInCents}
+              currency={currency}
+              paymentSession={paymentSession}
+              formatPrice={formatPrice}
+              onSessionExpired={onSessionExpired}
+              onBusyChange={setIsBusy}
+            />
+          </Elements>
+        )}
       </div>
     </div>
   );

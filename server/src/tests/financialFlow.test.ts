@@ -42,7 +42,7 @@ describe('Posh-Inspired Organizer Finance & Transfer Workflow', () => {
     organizerUserId = organizerReg.body.data.user.id;
     await prisma.user.update({
       where: { id: organizerUserId },
-      data: { emailVerified: true, emailVerifiedAt: new Date() },
+      data: { role: Role.ORGANIZER, emailVerified: true, emailVerifiedAt: new Date() },
     });
 
     // Authenticate seeded admin user
@@ -67,7 +67,7 @@ describe('Posh-Inspired Organizer Finance & Transfer Workflow', () => {
     secondOrganizerUserId = secondReg.body.data.user.id;
     await prisma.user.update({
       where: { id: secondOrganizerUserId },
-      data: { emailVerified: true, emailVerifiedAt: new Date() },
+      data: { role: Role.ORGANIZER, emailVerified: true, emailVerifiedAt: new Date() },
     });
 
     // Create a test event with a paid ticket tier for the main organizer
@@ -304,6 +304,8 @@ describe('Posh-Inspired Organizer Finance & Transfer Workflow', () => {
       // Mock Stripe accounts.retrieve
       vi.spyOn(stripe.accounts, 'retrieve').mockResolvedValueOnce({
         id: 'acct_test_express_101',
+        country: 'US',
+        default_currency: 'usd',
         payouts_enabled: true,
         charges_enabled: true,
         details_submitted: true,
@@ -326,6 +328,8 @@ describe('Posh-Inspired Organizer Finance & Transfer Workflow', () => {
       // Mock Stripe accounts.retrieve returning false for payouts and charges
       vi.spyOn(stripe.accounts, 'retrieve').mockResolvedValueOnce({
         id: 'acct_test_express_101',
+        country: 'US',
+        default_currency: 'usd',
         payouts_enabled: false,
         charges_enabled: false,
         details_submitted: false,
@@ -355,6 +359,8 @@ describe('Posh-Inspired Organizer Finance & Transfer Workflow', () => {
       // Mock Stripe API calls
       vi.spyOn(stripe.accounts, 'retrieve').mockResolvedValueOnce({
         id: 'acct_test_express_101',
+        country: 'US',
+        default_currency: 'usd',
         payouts_enabled: true,
         charges_enabled: true,
         details_submitted: true,
@@ -414,6 +420,8 @@ describe('Posh-Inspired Organizer Finance & Transfer Workflow', () => {
 
       vi.spyOn(stripe.accounts, 'retrieve').mockResolvedValueOnce({
         id: 'acct_test_express_101',
+        country: 'US',
+        default_currency: 'usd',
         payouts_enabled: true,
         charges_enabled: true,
         details_submitted: true,
@@ -423,10 +431,12 @@ describe('Posh-Inspired Organizer Finance & Transfer Workflow', () => {
         },
       } as any);
 
-      // Simulate Stripe transfer creation rejection
-      vi.spyOn(stripe.transfers, 'create').mockRejectedValueOnce(
-        new Error('Your destination account balance has been restricted.')
-      );
+      // Simulate authoritative Stripe transfer rejection (not an ambiguous network/unknown error)
+      const restrictionErr: any = new Error('Your destination account balance has been restricted.');
+      restrictionErr.type = 'StripeInvalidRequestError';
+      restrictionErr.code = 'transfers_not_active';
+      restrictionErr.statusCode = 400;
+      vi.spyOn(stripe.transfers, 'create').mockRejectedValueOnce(restrictionErr);
 
       const failRes = await request(app)
         .post('/api/organizer/finance/withdraw')
@@ -461,6 +471,8 @@ describe('Posh-Inspired Organizer Finance & Transfer Workflow', () => {
 
       vi.spyOn(stripe.accounts, 'retrieve').mockResolvedValueOnce({
         id: 'acct_test_express_101',
+        country: 'US',
+        default_currency: 'usd',
         payouts_enabled: true,
         charges_enabled: true,
         details_submitted: true,

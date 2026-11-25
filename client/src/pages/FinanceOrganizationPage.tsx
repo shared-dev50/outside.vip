@@ -37,44 +37,14 @@ import { NumericInput } from '../components/common/NumericInput';
 
 const FALLBACK_STRIPE_COUNTRIES: StripeConnectCountry[] = [
   { code: 'US', name: 'United States' },
-  { code: 'CA', name: 'Canada' },
-  { code: 'GB', name: 'United Kingdom' },
-  { code: 'AU', name: 'Australia' },
-  { code: 'AT', name: 'Austria' },
-  { code: 'BE', name: 'Belgium' },
-  { code: 'BG', name: 'Bulgaria' },
-  { code: 'HR', name: 'Croatia' },
-  { code: 'CY', name: 'Cyprus' },
-  { code: 'CZ', name: 'Czech Republic' },
-  { code: 'DK', name: 'Denmark' },
-  { code: 'EE', name: 'Estonia' },
-  { code: 'FI', name: 'Finland' },
-  { code: 'FR', name: 'France' },
-  { code: 'DE', name: 'Germany' },
-  { code: 'GR', name: 'Greece' },
-  { code: 'HK', name: 'Hong Kong' },
-  { code: 'HU', name: 'Hungary' },
-  { code: 'IE', name: 'Ireland' },
-  { code: 'IT', name: 'Italy' },
-  { code: 'JP', name: 'Japan' },
-  { code: 'LV', name: 'Latvia' },
-  { code: 'LI', name: 'Liechtenstein' },
-  { code: 'LT', name: 'Lithuania' },
-  { code: 'LU', name: 'Luxembourg' },
-  { code: 'MT', name: 'Malta' },
-  { code: 'NL', name: 'Netherlands' },
-  { code: 'NZ', name: 'New Zealand' },
-  { code: 'NO', name: 'Norway' },
-  { code: 'PL', name: 'Poland' },
-  { code: 'PT', name: 'Portugal' },
-  { code: 'RO', name: 'Romania' },
-  { code: 'SG', name: 'Singapore' },
-  { code: 'SK', name: 'Slovakia' },
-  { code: 'SI', name: 'Slovenia' },
-  { code: 'ES', name: 'Spain' },
-  { code: 'SE', name: 'Sweden' },
-  { code: 'CH', name: 'Switzerland' },
 ];
+
+function generateWithdrawalIdempotencyKey(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return `wd_${crypto.randomUUID()}`;
+  }
+  return `wd_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 12)}`;
+}
 
 /**
  * Strips raw secrets, account IDs, and technical exception traces from any client-displayed message.
@@ -165,6 +135,9 @@ export const FinanceOrganizationPage: React.FC = () => {
   const [isWithdrawModalOpen, setIsWithdrawModalOpen] = useState<boolean>(false);
   const [withdrawAmountDollars, setWithdrawAmountDollars] = useState<string>('');
   const [withdrawNotes, setWithdrawNotes] = useState<string>('');
+  const [withdrawIdempotencyKey, setWithdrawIdempotencyKey] = useState<string>(() =>
+    generateWithdrawalIdempotencyKey()
+  );
   const [isSubmittingWithdrawal, setIsSubmittingWithdrawal] = useState<boolean>(false);
   const [withdrawError, setWithdrawError] = useState<string | null>(null);
 
@@ -364,6 +337,7 @@ export const FinanceOrganizationPage: React.FC = () => {
 
   const handleWithdrawalSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmittingWithdrawal) return;
     setWithdrawError(null);
 
     const amountFloat = parseFloat(withdrawAmountDollars);
@@ -386,8 +360,24 @@ export const FinanceOrganizationPage: React.FC = () => {
     try {
       const result = await api.finance.withdraw({
         amountInCents,
+        idempotencyKey: withdrawIdempotencyKey,
         notes: withdrawNotes || undefined,
       });
+
+      if (result.status === 'PENDING' && result.reconciliationRequired) {
+        setNotification({
+          type: 'warning',
+          message:
+            result.message ||
+            `Withdrawal #${result.transferNumber} is awaiting Stripe confirmation. Funds are safely reserved; you may retry with this reference or wait for automatic verification.`,
+        });
+        setWithdrawError(
+          result.message ||
+            `Withdrawal #${result.transferNumber} is awaiting confirmation from Stripe.`
+        );
+        await loadDashboardData(true);
+        return;
+      }
 
       setNotification({
         type: 'success',
@@ -397,14 +387,24 @@ export const FinanceOrganizationPage: React.FC = () => {
       setIsWithdrawModalOpen(false);
       setWithdrawAmountDollars('');
       setWithdrawNotes('');
+      setWithdrawIdempotencyKey(generateWithdrawalIdempotencyKey());
 
-          await loadDashboardData(true);
+      await loadDashboardData(true);
     } catch (err: any) {
       if ((err?.statusCode || err?.status) === 401) {
         clearSessionState?.();
         return;
       }
       console.error('Withdrawal failed:', err);
+      // Only rotate idempotency key after an authoritative confirmed failure so user can submit a new attempt.
+      // Ambiguous / network / 5xx errors retain the exact same key for safe retries.
+      if (
+        err?.code === 'TRANSFER_EXECUTION_FAILED' ||
+        err?.code === 'TRANSFER_ALREADY_FAILED' ||
+        err?.code === 'IDEMPOTENCY_KEY_CONFLICT'
+      ) {
+        setWithdrawIdempotencyKey(generateWithdrawalIdempotencyKey());
+      }
       setWithdrawError(sanitizeClientErrorMessage(err?.message || 'Withdrawal could not be completed. Please try again.'));
     } finally {
       setIsSubmittingWithdrawal(false);
@@ -688,7 +688,7 @@ export const FinanceOrganizationPage: React.FC = () => {
                         <span>Payout & Bank Account Country</span>
                       </label>
                       <p className="text-xs text-stone-600 font-sans max-w-xl">
-                        Select the country where your bank account or legal entity is based. Supported for Stripe Express cross-border payouts from our US platform.
+                        Stripe Express onboarding and USD payouts are currently enabled for United States organizers.
                       </p>
                     </div>
                     <div className="sm:w-72 shrink-0">
@@ -802,6 +802,16 @@ export const FinanceOrganizationPage: React.FC = () => {
                       ? accountStatus.transferBalance.message
                       : 'Withdrawal capabilities activate as soon as identity & bank details verify.'}
                   </p>
+                  {accountStatus?.connected && (
+                    <div className="mt-3 pt-2.5 border-t border-stone-200/70 flex flex-wrap gap-2 text-[10px] font-mono">
+                      <span className="px-2 py-0.5 rounded bg-white border border-stone-200 text-stone-700">
+                        Bank Payouts: {accountStatus.payoutsEnabled ? 'Enabled' : 'Required'}
+                      </span>
+                      <span className="px-2 py-0.5 rounded bg-white border border-stone-200 text-stone-700">
+                        Requirements Due: {accountStatus.requirements.currentlyDue.length + accountStatus.requirements.pastDue.length}
+                      </span>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
@@ -827,6 +837,7 @@ export const FinanceOrganizationPage: React.FC = () => {
                     onClick={() => {
                       setWithdrawAmountDollars(netAvailableCents > 0 ? (netAvailableCents / 100).toFixed(2) : '');
                       setWithdrawError(null);
+                      setWithdrawIdempotencyKey(generateWithdrawalIdempotencyKey());
                       setIsWithdrawModalOpen(true);
                     }}
                     disabled={netAvailableCents < 100 || !accountStatus?.transferBalance.enabled}
@@ -883,6 +894,7 @@ export const FinanceOrganizationPage: React.FC = () => {
                       onClick={() => {
                         setWithdrawAmountDollars(netAvailableCents > 0 ? (netAvailableCents / 100).toFixed(2) : '');
                         setWithdrawError(null);
+                        setWithdrawIdempotencyKey(generateWithdrawalIdempotencyKey());
                         setIsWithdrawModalOpen(true);
                       }}
                       disabled={netAvailableCents < 100 || !accountStatus?.transferBalance.enabled}
@@ -1519,7 +1531,10 @@ export const FinanceOrganizationPage: React.FC = () => {
                 </label>
                 <NumericInput
                   value={withdrawAmountDollars}
-                  onChange={(_val, raw) => setWithdrawAmountDollars(raw)}
+                  onChange={(_val, raw) => {
+                    setWithdrawAmountDollars(raw);
+                    setWithdrawIdempotencyKey(generateWithdrawalIdempotencyKey());
+                  }}
                   allowDecimals={true}
                   decimalPlaces={2}
                   min={1.00}
@@ -1538,7 +1553,10 @@ export const FinanceOrganizationPage: React.FC = () => {
                       <button
                         key={amt}
                         type="button"
-                        onClick={() => setWithdrawAmountDollars(amt.toFixed(2))}
+                        onClick={() => {
+                          setWithdrawAmountDollars(amt.toFixed(2));
+                          setWithdrawIdempotencyKey(generateWithdrawalIdempotencyKey());
+                        }}
                         className="px-2.5 py-1 rounded-lg border border-stone-200 text-xs font-mono font-bold text-stone-700 hover:bg-stone-100"
                       >
                         ${amt}
@@ -1548,7 +1566,10 @@ export const FinanceOrganizationPage: React.FC = () => {
                   {netAvailableCents >= 100 && (
                     <button
                       type="button"
-                      onClick={() => setWithdrawAmountDollars((netAvailableCents / 100).toFixed(2))}
+                      onClick={() => {
+                        setWithdrawAmountDollars((netAvailableCents / 100).toFixed(2));
+                        setWithdrawIdempotencyKey(generateWithdrawalIdempotencyKey());
+                      }}
                       className="px-2.5 py-1 rounded-lg border border-emerald-300 bg-emerald-50 text-xs font-mono font-bold text-emerald-800 hover:bg-emerald-100"
                     >
                       Full Balance
@@ -1580,7 +1601,10 @@ export const FinanceOrganizationPage: React.FC = () => {
                   maxLength={100}
                   placeholder="e.g. Venue deposit payout"
                   value={withdrawNotes}
-                  onChange={(e) => setWithdrawNotes(e.target.value)}
+                  onChange={(e) => {
+                    setWithdrawNotes(e.target.value);
+                    setWithdrawIdempotencyKey(generateWithdrawalIdempotencyKey());
+                  }}
                   className="w-full px-3 py-2 rounded-xl border border-stone-300 text-xs font-sans focus:outline-hidden focus:border-stone-900"
                 />
               </div>

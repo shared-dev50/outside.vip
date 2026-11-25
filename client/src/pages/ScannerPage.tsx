@@ -33,6 +33,9 @@ type ScanStatus =
   | 'invalid'
   | 'wrong_event'
   | 'cancelled'
+  | 'refund_pending'
+  | 'refunded'
+  | 'event_cancelled'
   | 'unpaid'
   | 'forbidden'
   | 'session_expired'
@@ -536,6 +539,9 @@ export const ScannerPage: React.FC<ScannerPageProps> = ({ initialUser, initialEv
         code === 'ALREADY_CHECKED_IN' ||
         status === 409 ||
         code === 'CANCELLED_TICKET' ||
+        code === 'REFUND_PENDING_TICKET' ||
+        code === 'REFUNDED_TICKET' ||
+        code === 'EVENT_CANCELLED' ||
         code === 'UNPAID_ORDER' ||
         code === 'INVALID_TOKEN' ||
         status === 404 ||
@@ -554,6 +560,33 @@ export const ScannerPage: React.FC<ScannerPageProps> = ({ initialUser, initialEv
           note: message,
           token: trimmed,
           wrongEvent: err.data?.ticket || err.data?.event,
+        });
+      } else if (code === 'EVENT_CANCELLED') {
+        setScanStatus('event_cancelled');
+        setTicketMeta({
+          note:
+            message ||
+            'This event has been cancelled. Tickets are no longer valid for entry.',
+          attendee: err.data?.ticket?.attendeeName,
+          tier: err.data?.ticket?.tierName,
+        });
+      } else if (code === 'REFUND_PENDING_TICKET') {
+        setScanStatus('refund_pending');
+        setTicketMeta({
+          note:
+            message ||
+            'This ticket has a pending refund and cannot be admitted.',
+          attendee: err.data?.ticket?.attendeeName,
+          tier: err.data?.ticket?.tierName,
+        });
+      } else if (code === 'REFUNDED_TICKET') {
+        setScanStatus('refunded');
+        setTicketMeta({
+          note:
+            message ||
+            'This ticket has been refunded and is no longer valid for admission.',
+          attendee: err.data?.ticket?.attendeeName,
+          tier: err.data?.ticket?.tierName,
         });
       } else if (code === 'ALREADY_CHECKED_IN' || status === 409) {
         setScanStatus('already_used');
@@ -1095,6 +1128,76 @@ export const ScannerPage: React.FC<ScannerPageProps> = ({ initialUser, initialEv
                     </button>
                   </div>
                 )}
+              </div>
+            )}
+
+            {scanStatus === 'event_cancelled' && (
+              <div className="space-y-4">
+                <div className="w-20 h-20 rounded-full bg-rose-50 text-rose-600 mx-auto flex items-center justify-center border border-rose-200">
+                  <XCircle className="w-10 h-10" />
+                </div>
+                <div>
+                  <span className="px-3.5 py-1 rounded-full bg-rose-100 text-rose-800 font-mono font-semibold text-xs uppercase tracking-wider border border-rose-300 inline-block mb-3">
+                    Event Cancelled · Admission Closed
+                  </span>
+                  <h2 className="text-xl sm:text-2xl font-display font-bold text-gray-900">
+                    Event Has Been Cancelled
+                  </h2>
+                  <p className="text-xs text-gray-600 mt-2 max-w-md mx-auto">
+                    {ticketMeta?.note ||
+                      'This event has been cancelled and tickets are no longer valid for entry.'}
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {scanStatus === 'refund_pending' && (
+              <div className="space-y-4">
+                <div className="w-20 h-20 rounded-full bg-amber-50 text-amber-600 mx-auto flex items-center justify-center border border-amber-200">
+                  <AlertTriangle className="w-10 h-10" />
+                </div>
+                <div>
+                  <span className="px-3.5 py-1 rounded-full bg-amber-100 text-amber-800 font-mono font-semibold text-xs uppercase tracking-wider border border-amber-300 inline-block mb-3">
+                    Refund Pending · Admission Blocked
+                  </span>
+                  <h2 className="text-xl sm:text-2xl font-display font-bold text-gray-900">
+                    Ticket Refund In Progress
+                  </h2>
+                  <p className="text-xs text-gray-600 mt-2 max-w-md mx-auto">
+                    {ticketMeta?.note ||
+                      'This ticket has an active pending refund and cannot be admitted.'}
+                  </p>
+                  {ticketMeta?.tier && (
+                    <div className="mt-3 inline-block px-3 py-1 bg-gray-50 border border-gray-200 rounded-lg text-xs font-mono text-gray-700">
+                      Tier: <strong>{ticketMeta.tier}</strong>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {scanStatus === 'refunded' && (
+              <div className="space-y-4">
+                <div className="w-20 h-20 rounded-full bg-rose-50 text-rose-600 mx-auto flex items-center justify-center border border-rose-200">
+                  <XCircle className="w-10 h-10" />
+                </div>
+                <div>
+                  <span className="px-3.5 py-1 rounded-full bg-rose-50 text-rose-700 font-mono font-semibold text-xs uppercase tracking-wider border border-rose-200 inline-block mb-3">
+                    Refunded Pass · Entry Denied
+                  </span>
+                  <h2 className="text-xl sm:text-2xl font-display font-bold text-gray-900">
+                    Ticket Has Been Refunded
+                  </h2>
+                  <p className="text-xs text-gray-500 mt-2 max-w-md mx-auto">
+                    {ticketMeta?.note ||
+                      'This ticket has been refunded and is no longer valid for admission.'}
+                  </p>
+                  {ticketMeta?.tier && (
+                    <div className="mt-3 inline-block px-3 py-1 bg-gray-50 border border-gray-200 rounded-lg text-xs font-mono text-gray-700">
+                      Tier: <strong>{ticketMeta.tier}</strong>
+                    </div>
+                  )}
+                </div>
               </div>
             )}
 

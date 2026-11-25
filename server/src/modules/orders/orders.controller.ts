@@ -1,9 +1,14 @@
+import crypto from 'crypto';
 import { Request, Response, NextFunction } from 'express';
 import { prisma } from '../../db/prisma.js';
 import { stripe } from '../../lib/stripe.js';
-import { fulfillPaidOrder } from '../webhooks/webhook.service.js';
+import { fulfillPaidOrder, cancelOrderFromPaymentIntent } from '../webhooks/webhook.service.js';
 import { NotFoundError, ForbiddenError, UnauthorizedError, BadRequestError } from '../../utils/errors.js';
-import { generateTicketsPdf } from './ticketPdf.service.js';
+import {
+  filterEligiblePdfTickets,
+  generateTicketsPdf,
+  isTicketAdmissionEligible,
+} from './ticketPdf.service.js';
 
 const orderInclude = {
   event: {
@@ -11,6 +16,7 @@ const orderInclude = {
       id: true,
       slug: true,
       title: true,
+      status: true,
       tagline: true,
       description: true,
       category: true,
@@ -76,9 +82,12 @@ const orderInclude = {
  * Common order loader with reconciliation and strict access authorization.
  */
 async function fetchAndAuthorizeOrder(req: Request, orderNumber: string) {
-  const providedToken =
-    (req.query.token as string | undefined) ||
-    (req.headers['x-order-token'] as string | undefined);
+  const rawQueryToken = typeof req.query.token === 'string' ? req.query.token : undefined;
+  const rawHeaderToken =
+    typeof req.headers['x-order-token'] === 'string' ? req.headers['x-order-token'] : undefined;
+  const providedToken = rawQueryToken || rawHeaderToken;
+  const hasSuppliedTokenInput =
+    req.query.token !== undefined || req.headers['x-order-token'] !== undefined;
 
   let order = await prisma.order.findUnique({
     where: { orderNumber },
@@ -94,10 +103,20 @@ async function fetchAndAuthorizeOrder(req: Request, orderNumber: string) {
   // 2. OR authenticated user who owns the order
   // 3. OR admin user
   // 4. OR organizer of the event
-  const hasValidAccessToken =
-    Boolean(order.orderAccessToken) &&
-    Boolean(providedToken) &&
-    providedToken === order.orderAccessToken;
+  const hasValidAccessToken = (() => {
+    if (
+      typeof order.orderAccessToken !== 'string' ||
+      order.orderAccessToken.length === 0 ||
+      typeof providedToken !== 'string' ||
+      providedToken.length === 0
+    ) {
+      return false;
+    }
+    const expected = Buffer.from(order.orderAccessToken, 'utf8');
+    const supplied = Buffer.from(providedToken, 'utf8');
+    if (expected.length !== supplied.length) return false;
+    return crypto.timingSafeEqual(expected, supplied);
+  })();
 
   const isOwner =
     Boolean(req.user?.userId) && Boolean(order.userId) && req.user?.userId === order.userId;
@@ -108,7 +127,7 @@ async function fetchAndAuthorizeOrder(req: Request, orderNumber: string) {
     Boolean(req.user?.userId) && order.event?.organizerId === req.user?.userId;
 
   if (!hasValidAccessToken && !isOwner && !isAdmin && !isOrganizer) {
-    if (!providedToken && !req.user) {
+    if (!hasSuppliedTokenInput && !req.user) {
       throw new UnauthorizedError('Order access token or authentication required to access this order');
     }
     throw new ForbiddenError('You do not have permission to access details for this order');
@@ -122,6 +141,15 @@ async function fetchAndAuthorizeOrder(req: Request, orderNumber: string) {
       const paymentIntent = await stripe.paymentIntents.retrieve(order.paymentReference);
       if (paymentIntent.status === 'succeeded') {
         await fulfillPaidOrder(paymentIntent);
+        const refreshed = await prisma.order.findUnique({
+          where: { orderNumber },
+          include: orderInclude,
+        });
+        if (refreshed) {
+          order = refreshed;
+        }
+      } else if (paymentIntent.status === 'canceled') {
+        await cancelOrderFromPaymentIntent(paymentIntent);
         const refreshed = await prisma.order.findUnique({
           where: { orderNumber },
           include: orderInclude,
@@ -167,7 +195,17 @@ export async function getOrderByOrderNumber(
           expiresAt: order.expiresAt,
           event: order.event,
           items: order.items,
-          tickets: order.tickets,
+          tickets: (order.tickets || []).map((t) => {
+            const admissionEligible =
+              order.status === 'COMPLETED' &&
+              order.event?.status !== 'CANCELLED' &&
+              isTicketAdmissionEligible(t.status);
+            return {
+              ...t,
+              admissionEligible,
+              ticketToken: admissionEligible ? t.ticketToken : null,
+            };
+          }),
         },
       },
     });
@@ -196,15 +234,36 @@ export async function downloadOrderTicketsPdf(
       );
     }
 
+    if (order.event?.status === 'CANCELLED') {
+      throw new BadRequestError(
+        'This event has been cancelled. Admission passes are no longer valid or downloadable.',
+        'EVENT_CANCELLED_NO_ADMISSION_PASSES'
+      );
+    }
+
     if (!order.tickets || order.tickets.length === 0) {
       throw new NotFoundError('No issued tickets found for this order.');
     }
 
     if (specificTicketId) {
-      const exists = order.tickets.some((t) => t.id === specificTicketId);
-      if (!exists) {
+      const targetTicket = order.tickets.find((t) => t.id === specificTicketId);
+      if (!targetTicket) {
         throw new NotFoundError(`Ticket '${specificTicketId}' not found in order ${orderNumber}`);
       }
+      if (!isTicketAdmissionEligible(targetTicket.status)) {
+        throw new BadRequestError(
+          `Ticket '${specificTicketId}' is not eligible for admission PDF download (status: ${targetTicket.status}).`,
+          'TICKET_NOT_ELIGIBLE_FOR_PDF'
+        );
+      }
+    }
+
+    const eligibleTickets = filterEligiblePdfTickets(order.tickets, specificTicketId);
+    if (eligibleTickets.length === 0) {
+      throw new BadRequestError(
+        'No eligible admission tickets remain for this order (all passes are cancelled, refunded, or refund pending).',
+        'NO_ELIGIBLE_TICKETS_FOR_PDF'
+      );
     }
 
     const pdfBuffer = await generateTicketsPdf(order as any, specificTicketId);

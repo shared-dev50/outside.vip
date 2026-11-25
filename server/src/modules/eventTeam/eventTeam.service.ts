@@ -1011,6 +1011,24 @@ export async function updateTeamMember(
     const targetRole = updates.role || member.role;
     const targetStatus = updates.status || member.status;
 
+    // Enforce the same S4R-01 ADMIN credential and account-status invariants on
+    // non-ADMIN -> ADMIN role promotions as on direct ADMIN invitation acceptance.
+    if (member.role !== EventTeamRole.ADMIN && targetRole === EventTeamRole.ADMIN) {
+      const txUser = await tx.user.findUnique({
+        where: { id: member.userId },
+        select: { id: true, status: true, passwordHash: true },
+      });
+      if (!txUser || txUser.status !== AccountStatus.ACTIVE) {
+        throw new ForbiddenError('Account is not active and cannot be promoted to Event Admin.');
+      }
+      if (!txUser.passwordHash || !txUser.passwordHash.trim()) {
+        throw new ForbiddenError(
+          'Event Admin role requires a password-protected account. Please establish password credentials before promoting this user.',
+          'ADMIN_PASSWORD_REQUIRED'
+        );
+      }
+    }
+
     // STEP 1: De-escalation & Inactivation
     // If role is changing away from HOST: archive dependent links first
     if (member.role === EventTeamRole.HOST && targetRole !== EventTeamRole.HOST) {
@@ -1066,6 +1084,8 @@ export async function updateTeamMember(
         ) as any;
       } else if (member.permissions) {
         data.permissions = parseAdminPermissions(member.permissions) as any;
+      } else {
+        data.permissions = { ...DEFAULT_ADMIN_PERMISSIONS } as any;
       }
     } else if (targetRole === EventTeamRole.HOST) {
       data.permissions = Prisma.DbNull;

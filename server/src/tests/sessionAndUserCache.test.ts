@@ -49,7 +49,7 @@ describe('Server-Side Redis Sessions & 30-Second Redis User Authorization Cache'
   beforeAll(async () => {
     process.env.ADMIN_EMAILS = 'admin@outside.vip,redis_admin_allow@outside.vip';
     resetSentVerificationEmails();
-    resetVerificationRateLimits();
+    await resetVerificationRateLimits();
   });
 
   beforeEach(() => {

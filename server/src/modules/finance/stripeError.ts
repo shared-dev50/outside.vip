@@ -12,6 +12,15 @@ export interface ClassifiedStripeError {
   statusCode: number;
 }
 
+export type TransferCreateOutcomeDisposition = 'CONFIRMED_FAILURE' | 'AMBIGUOUS';
+
+export interface ClassifiedTransferCreateError {
+  disposition: TransferCreateOutcomeDisposition;
+  code: string;
+  safeMessage: string;
+  isRetryable: boolean;
+}
+
 /**
  * Redacts API keys, webhook secrets, account IDs, and auth tokens from strings.
  */
@@ -162,4 +171,112 @@ export function logStripeDiagnostic(
     message: sanitizedMessage,
     ...sanitizedMeta,
   });
+}
+
+const AMBIGUOUS_NETWORK_CODES = new Set([
+  'ETIMEDOUT',
+  'ECONNRESET',
+  'ECONNABORTED',
+  'ECONNREFUSED',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'EPIPE',
+  'UND_ERR_CONNECT_TIMEOUT',
+  'UND_ERR_HEADERS_TIMEOUT',
+  'UND_ERR_BODY_TIMEOUT',
+  'UND_ERR_SOCKET',
+]);
+
+const AMBIGUOUS_STRIPE_ERROR_TYPES = new Set([
+  'StripeConnectionError',
+  'StripeAPIError',
+  'StripeRateLimitError',
+  'StripeIdempotencyError',
+]);
+
+const CONFIRMED_TRANSFER_FAILURE_CODES = new Set([
+  'balance_insufficient',
+  'insufficient_funds',
+  'account_invalid',
+  'transfers_not_active',
+  'transfer_group_invalid',
+  'resource_missing',
+  'country_unsupported',
+  'payouts_not_enabled',
+  'no_such_account',
+  'amount_too_large',
+  'currency_not_supported',
+  'parameter_invalid_integer',
+  'parameter_invalid_empty',
+  'parameter_missing',
+  'account_restricted',
+]);
+
+const CONFIRMED_TRANSFER_FAILURE_TYPES = new Set([
+  'StripeInvalidRequestError',
+  'StripeCardError',
+  'StripePermissionError',
+  'StripeAuthenticationError',
+]);
+
+/**
+ * Classifies exceptions thrown by `stripe.transfers.create()` into:
+ * - CONFIRMED_FAILURE: Stripe authoritatively rejected the transfer before moving funds.
+ * - AMBIGUOUS: Network drops, timeouts, 5xx, rate limits, or unclassified errors where
+ *   Stripe may have created the transfer before the response reached this server.
+ */
+export function classifyTransferCreateError(err: any): ClassifiedTransferCreateError {
+  const errType = String(err?.type || err?.rawType || '').trim();
+  const errCode = String(err?.code || err?.raw?.code || '').trim();
+  const rawMessage = String(err?.message || '');
+  const numericStatus = Number(err?.statusCode ?? err?.status ?? 0);
+
+  if (
+    AMBIGUOUS_NETWORK_CODES.has(errCode.toUpperCase()) ||
+    AMBIGUOUS_STRIPE_ERROR_TYPES.has(errType) ||
+    numericStatus >= 500 ||
+    numericStatus === 408 ||
+    numericStatus === 429 ||
+    /ETIMEDOUT|ECONNRESET|ECONNABORTED|socket hang up|timed out|timeout|network error/i.test(rawMessage)
+  ) {
+    return {
+      disposition: 'AMBIGUOUS',
+      code: errCode || errType || (numericStatus >= 500 ? `HTTP_${numericStatus}` : 'TRANSFER_OUTCOME_UNCERTAIN'),
+      safeMessage:
+        'Your withdrawal request is taking longer than expected to confirm with Stripe. No duplicate transfer will be sent while we verify its status.',
+      isRetryable: true,
+    };
+  }
+
+  const isExplicit4xx = numericStatus >= 400 && numericStatus < 500;
+  if (
+    CONFIRMED_TRANSFER_FAILURE_CODES.has(errCode) ||
+    CONFIRMED_TRANSFER_FAILURE_TYPES.has(errType) ||
+    isExplicit4xx
+  ) {
+    const classified = classifyStripeError(err);
+    const safeMessage =
+      errCode === 'balance_insufficient' || errCode === 'insufficient_funds'
+        ? 'Platform Stripe balance is temporarily insufficient to fund this transfer. Your balance has been restored.'
+        : classified.code === 'STRIPE_SERVICE_ERROR'
+          ? sanitizeErrorMessage(rawMessage) || 'Transfer could not be completed. Your available balance remains intact.'
+          : classified.safeMessage;
+
+    return {
+      disposition: 'CONFIRMED_FAILURE',
+      code: errCode || classified.code || 'TRANSFER_REJECTED',
+      safeMessage,
+      isRetryable: false,
+    };
+  }
+
+  // Any unclassified / unknown exception must be treated as ambiguous so funds are never
+  // blindly restored when Stripe may have already created the transfer.
+  return {
+    disposition: 'AMBIGUOUS',
+    code: errCode || errType || 'TRANSFER_OUTCOME_UNCERTAIN',
+    safeMessage:
+      'Your withdrawal status is being verified with Stripe. Do not initiate a separate withdrawal until confirmation completes.',
+    isRetryable: true,
+  };
 }

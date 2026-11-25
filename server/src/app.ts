@@ -40,9 +40,10 @@ if (env.NODE_ENV !== 'test') {
   app.use(morgan('dev'));
 }
 
-// Preserve raw body for webhook verification if needed
+// Preserve raw body for webhook verification with headroom for large Stripe payloads
 app.use(
   express.json({
+    limit: '1mb',
     verify: (req: any, _res, buf) => {
       req.rawBody = buf;
     },

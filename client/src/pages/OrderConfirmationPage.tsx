@@ -90,7 +90,8 @@ export const OrderConfirmationPage: React.FC = () => {
     return new Intl.NumberFormat('en-US', {
       style: 'currency',
       currency,
-      maximumFractionDigits: 0,
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
     }).format(cents / 100);
   };
 
@@ -167,7 +168,49 @@ export const OrderConfirmationPage: React.FC = () => {
 
   const isConfirmed = order.status === 'COMPLETED';
   const isPending = order.status === 'PENDING';
+  const normalizedStatus = String(order.status || '').toUpperCase();
+  const isExpired = normalizedStatus === 'EXPIRED';
+  const isCancelled = normalizedStatus === 'CANCELLED';
+  const isFailed = normalizedStatus === 'FAILED';
+  const isRefunded = normalizedStatus === 'REFUNDED';
+  const isTerminalNonCompleted = isExpired || isCancelled || isFailed || isRefunded;
   const tickets = order.tickets || [];
+  const eligibleTickets = tickets.filter(
+    (tkt) =>
+      isConfirmed &&
+      tkt.status !== 'REFUND_PENDING' &&
+      tkt.status !== 'REFUNDED' &&
+      tkt.status !== 'CANCELLED' &&
+      Boolean(tkt.ticketToken)
+  );
+
+  const statusHeading = isConfirmed
+    ? 'Order Confirmed & Secured'
+    : isPending
+    ? 'Payment Processing'
+    : isExpired
+    ? 'Order Expired'
+    : isCancelled
+    ? 'Order Cancelled'
+    : isFailed
+    ? 'Payment Failed'
+    : isRefunded
+    ? 'Order Refunded'
+    : `Order ${order.status}`;
+
+  const statusSubtitlePrefix = isConfirmed
+    ? 'Official pass issued for Outside.vip order '
+    : isPending
+    ? 'Awaiting webhook verification for Outside.vip order '
+    : isExpired
+    ? 'The checkout reservation expired before payment completed for Outside.vip order '
+    : isCancelled
+    ? 'This checkout was cancelled for Outside.vip order '
+    : isFailed
+    ? 'Payment failed for Outside.vip order '
+    : isRefunded
+    ? 'Refund processed for Outside.vip order '
+    : 'Status recorded for Outside.vip order ';
 
   return (
     <div className="max-w-3xl mx-auto px-4 sm:px-6 py-10 space-y-8">
@@ -188,27 +231,25 @@ export const OrderConfirmationPage: React.FC = () => {
               ? 'bg-emerald-50 text-emerald-600 border-emerald-200'
               : isPending
               ? 'bg-amber-50 text-amber-600 border-amber-200'
+              : isExpired || isCancelled || isFailed
+              ? 'bg-rose-50 text-rose-600 border-rose-200'
               : 'bg-gray-50 text-gray-600 border-gray-200'
           }`}
         >
           {isConfirmed ? (
             <CheckCircle2 className="w-7 h-7" />
-          ) : (
+          ) : isPending ? (
             <Clock className="w-7 h-7 animate-spin" />
+          ) : (
+            <AlertCircle className="w-7 h-7" />
           )}
         </div>
         <div className="space-y-1">
           <h1 className="font-display font-bold text-2xl sm:text-3xl text-gray-900">
-            {isConfirmed
-              ? 'Order Confirmed & Secured'
-              : isPending
-              ? 'Payment Processing'
-              : `Order ${order.status}`}
+            {statusHeading}
           </h1>
           <p className="text-sm text-gray-600">
-            {isConfirmed
-              ? `Official pass issued for Outside.vip order `
-              : 'Awaiting webhook verification for Outside.vip order '}
+            {statusSubtitlePrefix}
             <span className="font-mono text-gray-900 font-bold">{order.orderNumber}</span>
           </p>
         </div>
@@ -220,6 +261,22 @@ export const OrderConfirmationPage: React.FC = () => {
           </span>
         </div>
       </div>
+
+      {order.event?.status === 'CANCELLED' && (
+        <div className="p-4 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-start gap-2.5">
+          <AlertCircle className="w-4 h-4 mt-0.5 shrink-0 text-rose-600" />
+          <div className="space-y-1">
+            <div className="font-semibold text-rose-900">
+              Event Cancelled — Admission Passes Disabled
+            </div>
+            <p className="leading-relaxed">
+              This event has been cancelled and tickets are no longer valid for entry. Refunds are
+              handled manually by the organizer or platform support; you will receive a separate
+              confirmation if a refund is issued.
+            </p>
+          </div>
+        </div>
+      )}
 
       {downloadError && (
         <div className="p-4 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs flex items-center justify-between">
@@ -243,7 +300,7 @@ export const OrderConfirmationPage: React.FC = () => {
             Your Digital Admissions ({tickets.length})
           </h2>
 
-          {tickets.length > 0 && isConfirmed && (
+          {eligibleTickets.length > 0 && isConfirmed && (
             <div className="flex items-center gap-2">
               <button
                 onClick={() => handleDownloadPdf()}
@@ -256,7 +313,7 @@ export const OrderConfirmationPage: React.FC = () => {
                   <Download className="w-3.5 h-3.5" />
                 )}
                 <span>
-                  {tickets.length > 1 ? 'Download Passes (PDF)' : 'Download Pass (PDF)'}
+                  {eligibleTickets.length > 1 ? 'Download Passes (PDF)' : 'Download Pass (PDF)'}
                 </span>
               </button>
               <button
@@ -288,7 +345,57 @@ export const OrderConfirmationPage: React.FC = () => {
           </div>
         )}
 
-        {tickets.map((tkt, idx) => (
+        {tickets.length === 0 && isTerminalNonCompleted && (
+          <div className="p-8 rounded-2xl bg-white border border-gray-200 text-center space-y-3">
+            <AlertCircle className="w-6 h-6 text-gray-500 mx-auto" />
+            <div className="font-bold text-sm text-gray-900">No active tickets for this order</div>
+            <p className="text-xs text-gray-500 max-w-sm mx-auto">
+              {isExpired
+                ? 'This checkout reservation hold expired before payment was confirmed.'
+                : isCancelled
+                ? 'This checkout order was cancelled and any reserved inventory was released.'
+                : isFailed
+                ? 'This payment attempt did not succeed and no tickets were issued.'
+                : 'This order was refunded and its tickets are no longer active.'}
+            </p>
+            <div className="pt-1">
+              <Link
+                to={order.event?.slug ? `/events/${order.event.slug}` : '/events'}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-gray-900 text-white hover:bg-black text-xs font-medium transition-colors shadow-sm"
+              >
+                Return to Event
+              </Link>
+            </div>
+          </div>
+        )}
+
+        {tickets.map((tkt, idx) => {
+          const isTicketEligible =
+            isConfirmed &&
+            tkt.status !== 'REFUND_PENDING' &&
+            tkt.status !== 'REFUNDED' &&
+            tkt.status !== 'CANCELLED' &&
+            Boolean(tkt.ticketToken);
+
+          const statusLabel =
+            tkt.status === 'CHECKED_IN'
+              ? 'Admitted / Used'
+              : tkt.status === 'REFUND_PENDING'
+              ? 'Refund Pending'
+              : tkt.status === 'REFUNDED'
+              ? 'Refunded'
+              : tkt.status === 'CANCELLED'
+              ? 'Cancelled'
+              : 'Ready for Door';
+
+          const statusBadgeClass =
+            tkt.status === 'CHECKED_IN'
+              ? 'bg-amber-50 text-amber-700 border border-amber-200'
+              : tkt.status === 'REFUND_PENDING' || tkt.status === 'REFUNDED' || tkt.status === 'CANCELLED'
+              ? 'bg-rose-50 text-rose-700 border border-rose-200'
+              : 'bg-emerald-50 text-emerald-700 border border-emerald-200';
+
+          return (
           <div
             key={tkt.id}
             className="rounded-2xl bg-white border border-gray-200 shadow-sm overflow-hidden"
@@ -307,13 +414,9 @@ export const OrderConfirmationPage: React.FC = () => {
                     </div>
 
                     <span
-                      className={`px-3 py-1 rounded-full text-[10px] font-mono uppercase tracking-wider font-bold ${
-                        tkt.status === 'CHECKED_IN'
-                          ? 'bg-amber-50 text-amber-700 border border-amber-200'
-                          : 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                      }`}
+                      className={`px-3 py-1 rounded-full text-[10px] font-mono uppercase tracking-wider font-bold ${statusBadgeClass}`}
                     >
-                      {tkt.status === 'CHECKED_IN' ? 'Admitted / Used' : 'Ready for Door'}
+                      {statusLabel}
                     </span>
                   </div>
 
@@ -372,37 +475,54 @@ export const OrderConfirmationPage: React.FC = () => {
               </div>
 
               <div className="p-6 md:p-8 md:col-span-4 bg-gray-50 flex flex-col items-center justify-center text-center space-y-3">
-                <div className="p-3 rounded-2xl bg-white border border-gray-200 shadow-sm flex items-center justify-center">
-                  <TicketQrCode token={tkt.ticketToken} size={112} />
-                </div>
+                {isTicketEligible && tkt.ticketToken ? (
+                  <>
+                    <div className="p-3 rounded-2xl bg-white border border-gray-200 shadow-sm flex items-center justify-center">
+                      <TicketQrCode token={tkt.ticketToken} size={112} />
+                    </div>
 
-                <div className="space-y-1 w-full max-w-xs">
-                  <span className="text-[10px] font-mono uppercase tracking-wider text-gray-500 block">
-                    Security Token
-                  </span>
-                  <span className="text-[11px] font-mono font-bold text-gray-800 break-all px-1 block">
-                    {tkt.ticketToken}
-                  </span>
-                </div>
+                    <div className="space-y-1 w-full max-w-xs">
+                      <span className="text-[10px] font-mono uppercase tracking-wider text-gray-500 block">
+                        Security Token
+                      </span>
+                      <span className="text-[11px] font-mono font-bold text-gray-800 break-all px-1 block">
+                        {tkt.ticketToken}
+                      </span>
+                    </div>
 
-                {isConfirmed && (
-                  <button
-                    onClick={() => handleDownloadPdf(tkt.id)}
-                    disabled={downloadingTicketId === tkt.id}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-gray-200 bg-white text-gray-700 hover:bg-gray-100 text-[11px] font-mono font-semibold transition-colors shadow-2xs disabled:opacity-60 cursor-pointer"
-                  >
-                    {downloadingTicketId === tkt.id ? (
-                      <Loader2 className="w-3 h-3 animate-spin text-gray-600" />
-                    ) : (
-                      <Download className="w-3 h-3 text-gray-600" />
-                    )}
-                    <span>Download PDF</span>
-                  </button>
+                    <button
+                      onClick={() => handleDownloadPdf(tkt.id)}
+                      disabled={downloadingTicketId === tkt.id}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-gray-200 bg-white text-gray-700 hover:bg-gray-100 text-[11px] font-mono font-semibold transition-colors shadow-2xs disabled:opacity-60 cursor-pointer"
+                    >
+                      {downloadingTicketId === tkt.id ? (
+                        <Loader2 className="w-3 h-3 animate-spin text-gray-600" />
+                      ) : (
+                        <Download className="w-3 h-3 text-gray-600" />
+                      )}
+                      <span>Download PDF</span>
+                    </button>
+                  </>
+                ) : (
+                  <div className="p-4 rounded-xl bg-white border border-rose-200 text-rose-700 space-y-1.5 max-w-xs">
+                    <AlertCircle className="w-5 h-5 mx-auto text-rose-500" />
+                    <div className="text-xs font-bold">
+                      {tkt.status === 'REFUND_PENDING'
+                        ? 'Pass Suspended (Refund Pending)'
+                        : tkt.status === 'REFUNDED'
+                        ? 'Pass Refunded'
+                        : 'Pass Cancelled'}
+                    </div>
+                    <p className="text-[11px] text-rose-600">
+                      This pass is no longer valid for event admission or PDF download.
+                    </p>
+                  </div>
                 )}
               </div>
             </div>
           </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );

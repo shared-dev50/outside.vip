@@ -38,7 +38,7 @@ describe('Stripe Connect End-to-End Automated Integration Test Suite', () => {
     organizerUserId = regRes.body.data.user.id;
     await prisma.user.update({
       where: { id: organizerUserId },
-      data: { emailVerified: true, emailVerifiedAt: new Date() },
+      data: { role: Role.ORGANIZER, emailVerified: true, emailVerifiedAt: new Date() },
     });
 
     const event = await prisma.event.create({
@@ -80,7 +80,7 @@ describe('Stripe Connect End-to-End Automated Integration Test Suite', () => {
   });
 
   describe('1. Account Creation & Country Selection', () => {
-    it('GET /api/organizer/finance/countries returns only US platform allowlisted countries', async () => {
+    it('GET /api/organizer/finance/countries returns strictly US for initial commercial launch', async () => {
       const res = await request(app)
         .get('/api/organizer/finance/countries')
         .set('Authorization', `Bearer ${organizerToken}`);
@@ -89,56 +89,65 @@ describe('Stripe Connect End-to-End Automated Integration Test Suite', () => {
       expect(res.body.success).toBe(true);
       expect(res.body.data.defaultCountry).toBe('US');
       expect(Array.isArray(res.body.data.countries)).toBe(true);
-      expect(res.body.data.countries.length).toBe(38);
+      expect(res.body.data.countries.length).toBe(1);
 
       const countryCodes = res.body.data.countries.map((c: any) => c.code);
-      expect(countryCodes).toContain('US');
-      expect(countryCodes).toContain('CA');
-      expect(countryCodes).toContain('GB');
-      expect(countryCodes).toContain('AU');
+      expect(countryCodes).toEqual(['US']);
+      expect(countryCodes).not.toContain('CA');
       expect(countryCodes).not.toContain('XX');
       expect(countryCodes).not.toContain('KE');
     });
 
-    it('rejects client-supplied unauthorized country codes on onboarding-link creation with 400', async () => {
-      const res = await request(app)
+    it('rejects client-supplied unsupported/non-US country codes on onboarding-link creation with 400', async () => {
+      const invalidRes = await request(app)
         .post('/api/organizer/finance/onboarding-link')
         .set('Authorization', `Bearer ${organizerToken}`)
         .send({ country: 'ZZ' });
 
-      expect(res.status).toBe(400);
-      expect(res.body.success).toBe(false);
-      expect(res.body.error.code).toBe('UNSUPPORTED_COUNTRY');
+      expect(invalidRes.status).toBe(400);
+      expect(invalidRes.body.success).toBe(false);
+      expect(invalidRes.body.error.code).toBe('UNSUPPORTED_COUNTRY');
+
+      const nonUsRes = await request(app)
+        .post('/api/organizer/finance/onboarding-link')
+        .set('Authorization', `Bearer ${organizerToken}`)
+        .send({ country: 'CA' });
+
+      expect(nonUsRes.status).toBe(400);
+      expect(nonUsRes.body.error.code).toBe('UNSUPPORTED_COUNTRY');
     });
 
-    it('passes country: countryCode to stripe.accounts.create and persists in database', async () => {
+    it('passes country: US to stripe.accounts.create and persists in database', async () => {
       const createAccountSpy = vi.spyOn(stripe.accounts, 'create').mockResolvedValueOnce({
         id: testConnectedAccountId,
-        country: 'CA',
+        country: 'US',
       } as any);
 
       vi.spyOn(stripe.accountLinks, 'create').mockResolvedValueOnce({
-        url: 'https://connect.stripe.com/setup/s/e2e_ca_link',
+        url: 'https://connect.stripe.com/setup/s/e2e_us_link',
       } as any);
 
       const res = await request(app)
         .post('/api/organizer/finance/onboarding-link')
         .set('Authorization', `Bearer ${organizerToken}`)
-        .send({ country: 'CA' });
+        .send({ country: 'US' });
 
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
-      expect(res.body.data.url).toBe('https://connect.stripe.com/setup/s/e2e_ca_link');
+      expect(res.body.data.url).toBe('https://connect.stripe.com/setup/s/e2e_us_link');
       expect(createAccountSpy).toHaveBeenCalledWith(
         expect.objectContaining({
           type: 'express',
-          country: 'CA',
+          country: 'US',
+        }),
+        expect.objectContaining({
+          idempotencyKey: expect.stringMatching(/^acct_create_/),
         })
       );
 
       const dbUser = await prisma.user.findUnique({ where: { id: organizerUserId } });
       expect(dbUser?.stripeAccountId).toBe(testConnectedAccountId);
-      expect(dbUser?.stripeAccountCountry).toBe('CA');
+      expect(dbUser?.stripeAccountCountry).toBe('US');
     });
 
     it('re-uses existing connected account and preserves original country without duplicating accounts', async () => {
@@ -147,11 +156,10 @@ describe('Stripe Connect End-to-End Automated Integration Test Suite', () => {
         url: 'https://connect.stripe.com/setup/s/e2e_reuse_link',
       } as any);
 
-      // Subsequent call attempting to pass 'GB'
       const res = await request(app)
         .post('/api/organizer/finance/onboarding-link')
         .set('Authorization', `Bearer ${organizerToken}`)
-        .send({ country: 'GB' });
+        .send({ country: 'US' });
 
       expect(res.status).toBe(200);
       expect(createAccountSpy).not.toHaveBeenCalled();
@@ -163,7 +171,7 @@ describe('Stripe Connect End-to-End Automated Integration Test Suite', () => {
 
       const dbUser = await prisma.user.findUnique({ where: { id: organizerUserId } });
       expect(dbUser?.stripeAccountId).toBe(testConnectedAccountId);
-      expect(dbUser?.stripeAccountCountry).toBe('CA');
+      expect(dbUser?.stripeAccountCountry).toBe('US');
     });
   });
 
@@ -247,7 +255,7 @@ describe('Stripe Connect End-to-End Automated Integration Test Suite', () => {
       expect(res.body.received).toBe(true);
     });
 
-    it('verifies signature signed with STRIPE_CONNECT_WEBHOOK_SECRET via fallback mechanism', async () => {
+    it('verifies connected-account webhook signature strictly using STRIPE_CONNECT_WEBHOOK_SECRET', async () => {
       const testConnectSecret = 'whsec_connect_test_secret_for_suite_2026';
       process.env.STRIPE_CONNECT_WEBHOOK_SECRET = testConnectSecret;
 
@@ -255,6 +263,7 @@ describe('Stripe Connect End-to-End Automated Integration Test Suite', () => {
         id: `evt_valid_connect_${Date.now()}`,
         object: 'event',
         api_version: '2023-10-16',
+        account: 'acct_test_connect',
         created: Math.floor(Date.now() / 1000),
         type: 'charge.updated',
         data: {
@@ -281,6 +290,63 @@ describe('Stripe Connect End-to-End Automated Integration Test Suite', () => {
 
       expect(res.status).toBe(200);
       expect(res.body.received).toBe(true);
+    });
+
+    it('rejects a platform event signed with STRIPE_CONNECT_WEBHOOK_SECRET (no fallback)', async () => {
+      const testConnectSecret = 'whsec_connect_strict_platform_reject_2026';
+      process.env.STRIPE_CONNECT_WEBHOOK_SECRET = testConnectSecret;
+
+      const payload = JSON.stringify({
+        id: `evt_cross_plat_${Date.now()}`,
+        object: 'event',
+        api_version: '2023-10-16',
+        created: Math.floor(Date.now() / 1000),
+        type: 'charge.updated',
+        data: { object: { id: 'ch_cross_1', amount: 1000, currency: 'usd', paid: true } },
+      });
+
+      const signature = stripe.webhooks.generateTestHeaderString({
+        payload,
+        secret: testConnectSecret,
+      });
+
+      const res = await request(app)
+        .post('/api/webhooks/stripe')
+        .set('Content-Type', 'application/json')
+        .set('stripe-signature', signature)
+        .send(payload);
+
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+    });
+
+    it('rejects a connected-account event signed with platform STRIPE_WEBHOOK_SECRET (no fallback)', async () => {
+      const testConnectSecret = 'whsec_connect_strict_acct_reject_2026';
+      process.env.STRIPE_CONNECT_WEBHOOK_SECRET = testConnectSecret;
+
+      const payload = JSON.stringify({
+        id: `evt_cross_conn_${Date.now()}`,
+        object: 'event',
+        api_version: '2023-10-16',
+        account: 'acct_cross_reject',
+        created: Math.floor(Date.now() / 1000),
+        type: 'account.updated',
+        data: { object: { id: 'acct_cross_reject' } },
+      });
+
+      const signature = stripe.webhooks.generateTestHeaderString({
+        payload,
+        secret: env.STRIPE_WEBHOOK_SECRET,
+      });
+
+      const res = await request(app)
+        .post('/api/webhooks/stripe')
+        .set('Content-Type', 'application/json')
+        .set('stripe-signature', signature)
+        .send(payload);
+
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
     });
   });
 
@@ -319,8 +385,8 @@ describe('Stripe Connect End-to-End Automated Integration Test Suite', () => {
             id: testConnectedAccountId,
             object: 'account',
             business_type: 'individual',
-            country: 'CA',
-            default_currency: 'cad',
+            country: 'US',
+            default_currency: 'usd',
             charges_enabled: true,
             payouts_enabled: true,
             details_submitted: true,
@@ -331,11 +397,11 @@ describe('Stripe Connect End-to-End Automated Integration Test Suite', () => {
                   id: 'ba_test_sync_001',
                   object: 'bank_account',
                   account_holder_name: 'E2E Stripe Organizer',
-                  bank_name: 'Royal Bank of Canada',
-                  country: 'CA',
-                  currency: 'cad',
+                  bank_name: 'JPMorgan Chase',
+                  country: 'US',
+                  currency: 'usd',
                   last4: '9876',
-                  routing_number: '12345001',
+                  routing_number: '111000025',
                   status: 'verified',
                   default_for_currency: true,
                 } as any,
@@ -361,7 +427,7 @@ describe('Stripe Connect End-to-End Automated Integration Test Suite', () => {
       });
 
       expect(payoutDetails).not.toBeNull();
-      expect(payoutDetails?.bankName).toBe('Royal Bank of Canada');
+      expect(payoutDetails?.bankName).toBe('JPMorgan Chase');
       expect(payoutDetails?.accountHolderName).toBe('E2E Stripe Organizer');
       expect(payoutDetails?.accountNumberLast4).toBe('9876');
       expect(payoutDetails?.accountNumberMasked).toContain('9876');
@@ -510,6 +576,8 @@ describe('Stripe Connect End-to-End Automated Integration Test Suite', () => {
     it('rejects withdrawal when requested amount exceeds available balance', async () => {
       vi.spyOn(stripe.accounts, 'retrieve').mockResolvedValueOnce({
         id: testConnectedAccountId,
+        country: 'US',
+        default_currency: 'usd',
         capabilities: { transfers: 'active', card_payments: 'active' },
         payouts_enabled: true,
         charges_enabled: true,
@@ -528,6 +596,8 @@ describe('Stripe Connect End-to-End Automated Integration Test Suite', () => {
     it('rejects withdrawal when connected account cannot receive transfers (transfers disabled)', async () => {
       vi.spyOn(stripe.accounts, 'retrieve').mockResolvedValueOnce({
         id: testConnectedAccountId,
+        country: 'US',
+        default_currency: 'usd',
         capabilities: { transfers: 'inactive', card_payments: 'inactive' },
         payouts_enabled: false,
         charges_enabled: false,
@@ -546,15 +616,19 @@ describe('Stripe Connect End-to-End Automated Integration Test Suite', () => {
     it('safely handles Stripe transfer failure without deducting from organizer available balance', async () => {
       vi.spyOn(stripe.accounts, 'retrieve').mockResolvedValueOnce({
         id: testConnectedAccountId,
+        country: 'US',
+        default_currency: 'usd',
         capabilities: { transfers: 'active', card_payments: 'active' },
         payouts_enabled: true,
         charges_enabled: true,
         details_submitted: true,
       } as any);
 
-      vi.spyOn(stripe.transfers, 'create').mockRejectedValueOnce(
-        new Error('Your destination account balance has been restricted.')
-      );
+      const restrictionErr: any = new Error('Your destination account balance has been restricted.');
+      restrictionErr.type = 'StripeInvalidRequestError';
+      restrictionErr.code = 'transfers_not_active';
+      restrictionErr.statusCode = 400;
+      vi.spyOn(stripe.transfers, 'create').mockRejectedValueOnce(restrictionErr);
 
       const failRes = await request(app)
         .post('/api/organizer/finance/withdraw')
@@ -584,6 +658,8 @@ describe('Stripe Connect End-to-End Automated Integration Test Suite', () => {
     it('successfully executes organizer withdrawal via separate transfer and updates ledger and balances', async () => {
       vi.spyOn(stripe.accounts, 'retrieve').mockResolvedValueOnce({
         id: testConnectedAccountId,
+        country: 'US',
+        default_currency: 'usd',
         capabilities: { transfers: 'active', card_payments: 'active' },
         payouts_enabled: true,
         charges_enabled: true,

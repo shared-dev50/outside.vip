@@ -7,6 +7,7 @@ export const PLATFORM_FEE_PERCENT = 10;
 export const SERVICE_FEE_CENTS = 95;
 export const STRIPE_PERCENT = 0.029;
 export const STRIPE_FIXED_CENTS = 30;
+export const MIN_POSITIVE_GROSS_PRICE_CENTS = 1;
 
 export interface TierFeeBreakdown {
   ticketPriceInCents: number;
@@ -46,6 +47,14 @@ export function calculateDisplayPriceFromGross(grossInCents: number): number {
   const subtotal = safeGross + platformFee + SERVICE_FEE_CENTS;
   return Math.round((subtotal + STRIPE_FIXED_CENTS) / (1 - STRIPE_PERCENT));
 }
+
+/**
+ * Minimum all-in buyer display price in cents for a paid ticket tier,
+ * derived strictly from the canonical gross-to-display formula (130 cents = $1.30 for 1-cent gross).
+ */
+export const MIN_PAID_DISPLAY_PRICE_CENTS = calculateDisplayPriceFromGross(
+  MIN_POSITIVE_GROSS_PRICE_CENTS
+);
 
 /**
  * Calculates the organizer gross ticket price in integer cents from a customer display price.

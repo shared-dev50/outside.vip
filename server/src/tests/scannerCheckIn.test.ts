@@ -1,10 +1,13 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
+import { nanoid } from 'nanoid';
+import { EventCategory, EventStatus, OrderStatus, PaymentProvider, Role, TicketStatus } from '@prisma/client';
 import { app } from '../app.js';
 import { prisma } from '../db/prisma.js';
 import { env } from '../config/env.js';
 import { getRedisClient } from '../lib/redis.js';
+import { createSession } from '../lib/session.service.js';
 
 describe('Organizer Check-In & Scanner Validation API', () => {
   const organizerId = 'org-user-uuid-111';
@@ -91,6 +94,282 @@ describe('Organizer Check-In & Scanner Validation API', () => {
     vi.restoreAllMocks();
   });
 
+  function mockTransactionalAdmission(
+    ticketRecord: any,
+    options?: {
+      concurrentSingleAdmit?: boolean;
+      checkInLogCreateSpy?: ReturnType<typeof vi.fn>;
+    }
+  ) {
+    let claimed = false;
+    const ticketUpdateSpy = vi.fn().mockResolvedValue({ ...ticketRecord, status: 'CHECKED_IN' });
+    const checkInLogCreateSpy = options?.checkInLogCreateSpy ?? vi.fn().mockResolvedValue({});
+    const countSpy = vi.spyOn(prisma.ticket, 'count').mockResolvedValue(1);
+
+    const txSpy = vi.spyOn(prisma, '$transaction').mockImplementation(async (cb: any) => {
+      const txStatus =
+        options?.concurrentSingleAdmit && claimed ? 'CHECKED_IN' : ticketRecord.status;
+      if (options?.concurrentSingleAdmit && !claimed && txStatus === 'ISSUED') {
+        claimed = true;
+      }
+
+      const txMock: any = {
+        $queryRaw: vi
+          .fn()
+          .mockResolvedValueOnce([
+            {
+              status: ticketRecord.order?.status ?? 'COMPLETED',
+              eventStatus: ticketRecord.event?.status ?? 'PUBLISHED',
+            },
+          ])
+          .mockResolvedValueOnce([
+            {
+              id: ticketRecord.id,
+              status: txStatus,
+              checkedInAt:
+                txStatus === 'CHECKED_IN' ? new Date() : ticketRecord.checkedInAt ?? null,
+              checkedInByUserId:
+                txStatus === 'CHECKED_IN' ? organizerId : ticketRecord.checkedInByUserId ?? null,
+            },
+          ]),
+        checkInLog: {
+          findFirst: vi.fn().mockResolvedValue(null),
+          create: checkInLogCreateSpy,
+        },
+        ticket: {
+          update: ticketUpdateSpy,
+        },
+      };
+      return cb(txMock);
+    });
+
+    return { txSpy, ticketUpdateSpy, checkInLogCreateSpy, countSpy };
+  }
+
+  describe('Real PostgreSQL Transactional Admission, Concurrency & Refund/Cancellation Enforcement', () => {
+    const pgUserIds: string[] = [];
+    const pgEventIds: string[] = [];
+    const pgOrderIds: string[] = [];
+
+    let pgSessionCookie = '';
+    let pgCsrf = '';
+    let pgOrgUser: any;
+
+    beforeAll(async () => {
+      const suffix = nanoid(8);
+      pgOrgUser = await prisma.user.create({
+        data: {
+          email: `scanner_pg_${suffix}@outside.vip`,
+          name: `Scanner PG Org ${suffix}`,
+          role: Role.ORGANIZER,
+          emailVerified: true,
+        },
+      });
+      pgUserIds.push(pgOrgUser.id);
+
+      const session = await createSession({
+        userId: pgOrgUser.id,
+        ipAddress: '127.0.0.1',
+        userAgent: 'ScannerPGVitest',
+      });
+      pgSessionCookie = `__Host-outside_sid=${session.rawCookieValue}`;
+      pgCsrf = session.csrfToken;
+    });
+
+    afterAll(async () => {
+      if (pgOrderIds.length > 0) {
+        await prisma.checkInLog.deleteMany({
+          where: { ticket: { orderId: { in: pgOrderIds } } },
+        });
+        await prisma.ticket.deleteMany({
+          where: { orderId: { in: pgOrderIds } },
+        });
+        await prisma.orderItem.deleteMany({
+          where: { orderId: { in: pgOrderIds } },
+        });
+        await prisma.order.deleteMany({
+          where: { id: { in: pgOrderIds } },
+        });
+      }
+      if (pgEventIds.length > 0) {
+        await prisma.ticketTier.deleteMany({
+          where: { eventId: { in: pgEventIds } },
+        });
+        await prisma.event.deleteMany({
+          where: { id: { in: pgEventIds } },
+        });
+      }
+      if (pgUserIds.length > 0) {
+        await prisma.user.deleteMany({
+          where: { id: { in: pgUserIds } },
+        });
+      }
+    });
+
+    it('serializes 20 concurrent requests via PostgreSQL FOR UPDATE (admits exactly 1) and denies REFUND_PENDING, REFUNDED, and CANCELLED events in real PostgreSQL', async () => {
+      const suffix = nanoid(8);
+      const evt = await prisma.event.create({
+        data: {
+          slug: `scanner-pg-evt-${suffix}`.toLowerCase(),
+          organizerId: pgOrgUser.id,
+          title: `Scanner PG Event ${suffix}`,
+          description: 'Real PG concurrency check-in event',
+          category: EventCategory.MUSIC,
+          status: EventStatus.PUBLISHED,
+          coverImageUrl: 'https://example.com/scanner-pg.jpg',
+          venueName: 'PG Arena',
+          venueAddress: '100 DB Way',
+          city: 'Nairobi',
+          country: 'US',
+          startAt: new Date(Date.now() - 3_600_000),
+          endAt: new Date(Date.now() + 7_200_000),
+          timezone: 'UTC',
+        },
+      });
+      pgEventIds.push(evt.id);
+
+      const tier = await prisma.ticketTier.create({
+        data: {
+          eventId: evt.id,
+          name: 'GA PG',
+          priceInCents: 2000,
+          currency: 'USD',
+          totalCapacity: 50,
+          soldQuantity: 3,
+        },
+      });
+
+      const order = await prisma.order.create({
+        data: {
+          orderNumber: `OUT-SCANPG-${suffix}`,
+          eventId: evt.id,
+          status: OrderStatus.COMPLETED,
+          customerEmail: `scanpg_${suffix}@example.com`,
+          customerName: 'Scanner PG Buyer',
+          totalInCents: 2379,
+          currency: 'USD',
+          platformFeeInCents: 295,
+          organizerNetInCents: 2000,
+          idempotencyKey: `idem_scanpg_${suffix}`,
+          paymentProvider: PaymentProvider.STRIPE,
+          paymentReference: `pi_scanpg_${suffix}`,
+          expiresAt: new Date(Date.now() + 3_600_000),
+          items: {
+            create: {
+              ticketTierId: tier.id,
+              quantity: 3,
+              unitPriceInCents: 2000,
+              subtotalInCents: 6000,
+            },
+          },
+        },
+      });
+      pgOrderIds.push(order.id);
+
+      const [tRace, tPendingRefund, tRefunded] = await Promise.all([
+        prisma.ticket.create({
+          data: {
+            ticketToken: `tkt_sec_race_${suffix}`,
+            orderId: order.id,
+            eventId: evt.id,
+            ticketTierId: tier.id,
+            attendeeName: 'Race Attendee',
+            attendeeEmail: 'race@example.com',
+            status: TicketStatus.ISSUED,
+          },
+        }),
+        prisma.ticket.create({
+          data: {
+            ticketToken: `tkt_sec_rpend_${suffix}`,
+            orderId: order.id,
+            eventId: evt.id,
+            ticketTierId: tier.id,
+            attendeeName: 'Pending Refund Attendee',
+            attendeeEmail: 'rpend@example.com',
+            status: TicketStatus.REFUND_PENDING,
+          },
+        }),
+        prisma.ticket.create({
+          data: {
+            ticketToken: `tkt_sec_rref_${suffix}`,
+            orderId: order.id,
+            eventId: evt.id,
+            ticketTierId: tier.id,
+            attendeeName: 'Refunded Attendee',
+            attendeeEmail: 'rref@example.com',
+            status: TicketStatus.REFUNDED,
+          },
+        }),
+      ]);
+
+      // 1. 20 real concurrent check-ins against PostgreSQL FOR UPDATE row lock
+      const raceResponses = await Promise.all(
+        Array.from({ length: 20 }, (_, i) =>
+          request(app)
+            .post('/api/organizer/check-in')
+            .set('Cookie', pgSessionCookie)
+            .set('x-csrf-token', pgCsrf)
+            .set('Idempotency-Key', `pg_race_${suffix}_${i}`)
+            .send({ token: tRace.ticketToken, eventId: evt.id })
+        )
+      );
+
+      const wins = raceResponses.filter((r) => r.status === 200);
+      const dupes = raceResponses.filter((r) => r.status === 409);
+      expect(wins).toHaveLength(1);
+      expect(wins[0].body.data.result).toBe('SUCCESS');
+      expect(dupes).toHaveLength(19);
+      for (const d of dupes) {
+        expect(d.body.error.code).toBe('ALREADY_CHECKED_IN');
+      }
+
+      // 2. Denies REFUND_PENDING and REFUNDED tickets with explicit distinct CheckInResult codes
+      const pendingRes = await request(app)
+        .post('/api/organizer/check-in')
+        .set('Cookie', pgSessionCookie)
+        .set('x-csrf-token', pgCsrf)
+        .send({ token: tPendingRefund.ticketToken, eventId: evt.id });
+      expect(pendingRes.status).toBe(400);
+      expect(pendingRes.body.error.code).toBe('REFUND_PENDING_TICKET');
+      expect(pendingRes.body.data.result).toBe('REFUND_PENDING_TICKET');
+
+      const refundedRes = await request(app)
+        .post('/api/organizer/check-in')
+        .set('Cookie', pgSessionCookie)
+        .set('x-csrf-token', pgCsrf)
+        .send({ token: tRefunded.ticketToken, eventId: evt.id });
+      expect(refundedRes.status).toBe(400);
+      expect(refundedRes.body.error.code).toBe('REFUNDED_TICKET');
+      expect(refundedRes.body.data.result).toBe('REFUNDED_TICKET');
+
+      // 3. Denies CANCELLED event ticket with EVENT_CANCELLED in real PG
+      const tCancelledEvt = await prisma.ticket.create({
+        data: {
+          ticketToken: `tkt_sec_cevt_${suffix}`,
+          orderId: order.id,
+          eventId: evt.id,
+          ticketTierId: tier.id,
+          attendeeName: 'Cancelled Event Attendee',
+          attendeeEmail: 'cevt@example.com',
+          status: TicketStatus.ISSUED,
+        },
+      });
+      await prisma.event.update({
+        where: { id: evt.id },
+        data: { status: EventStatus.CANCELLED, cancelledAt: new Date(), cancelledByUserId: pgOrgUser.id },
+      });
+
+      const cancelledEvtRes = await request(app)
+        .post('/api/organizer/check-in')
+        .set('Cookie', pgSessionCookie)
+        .set('x-csrf-token', pgCsrf)
+        .send({ token: tCancelledEvt.ticketToken, eventId: evt.id });
+      expect(cancelledEvtRes.status).toBe(400);
+      expect(cancelledEvtRes.body.error.code).toBe('EVENT_CANCELLED');
+      expect(cancelledEvtRes.body.data.result).toBe('EVENT_CANCELLED');
+    });
+  });
+
   describe('Event Selection & Gate Mismatch', () => {
     it('returns 400 WRONG_EVENT with complete diagnostic data when Savannah ticket is scanned at Sol Fest gate', async () => {
       vi.spyOn(prisma.ticket, 'findUnique').mockResolvedValue(mockTicketSavannah as any);
@@ -145,9 +424,7 @@ describe('Organizer Check-In & Scanner Validation API', () => {
 
     it('successfully admits ticket when scanned at the correct matching gate slug', async () => {
       vi.spyOn(prisma.ticket, 'findUnique').mockResolvedValue(mockTicketSavannah as any);
-      vi.spyOn(prisma.ticket, 'updateMany').mockResolvedValue({ count: 1 });
-      vi.spyOn(prisma.ticket, 'count').mockResolvedValue(1);
-      vi.spyOn(prisma.checkInLog, 'create').mockResolvedValue({} as any);
+      mockTransactionalAdmission(mockTicketSavannah);
 
       const res = await request(app)
         .post('/api/organizer/check-in')
@@ -167,9 +444,7 @@ describe('Organizer Check-In & Scanner Validation API', () => {
 
     it('successfully admits ticket when gate is empty or "all" (auto-detect gate)', async () => {
       vi.spyOn(prisma.ticket, 'findUnique').mockResolvedValue(mockTicketSolFest as any);
-      vi.spyOn(prisma.ticket, 'updateMany').mockResolvedValue({ count: 1 });
-      vi.spyOn(prisma.ticket, 'count').mockResolvedValue(1);
-      vi.spyOn(prisma.checkInLog, 'create').mockResolvedValue({} as any);
+      mockTransactionalAdmission(mockTicketSolFest);
 
       const res = await request(app)
         .post('/api/organizer/check-in')
@@ -191,9 +466,7 @@ describe('Organizer Check-In & Scanner Validation API', () => {
       vi.spyOn(prisma.ticket, 'findUnique')
         .mockResolvedValueOnce(null) // first try: raw token
         .mockResolvedValueOnce(mockTicketSavannah as any); // second try: prefixed
-      vi.spyOn(prisma.ticket, 'updateMany').mockResolvedValue({ count: 1 });
-      vi.spyOn(prisma.ticket, 'count').mockResolvedValue(1);
-      vi.spyOn(prisma.checkInLog, 'create').mockResolvedValue({} as any);
+      mockTransactionalAdmission(mockTicketSavannah);
 
       const res = await request(app)
         .post('/api/organizer/check-in')
@@ -210,9 +483,7 @@ describe('Organizer Check-In & Scanner Validation API', () => {
     it('finds ticket via case-insensitive fallback when entered with uppercase mistake', async () => {
       vi.spyOn(prisma.ticket, 'findUnique').mockResolvedValue(null);
       vi.spyOn(prisma.ticket, 'findFirst').mockResolvedValue(mockTicketSolFest as any);
-      vi.spyOn(prisma.ticket, 'updateMany').mockResolvedValue({ count: 1 });
-      vi.spyOn(prisma.ticket, 'count').mockResolvedValue(1);
-      vi.spyOn(prisma.checkInLog, 'create').mockResolvedValue({} as any);
+      mockTransactionalAdmission(mockTicketSolFest);
 
       const res = await request(app)
         .post('/api/organizer/check-in')
@@ -518,9 +789,7 @@ describe('Organizer Check-In & Scanner Validation API', () => {
       };
 
       vi.spyOn(prisma.ticket, 'findUnique').mockResolvedValue(foreignEventTicket as any);
-      vi.spyOn(prisma.ticket, 'updateMany').mockResolvedValue({ count: 1 });
-      vi.spyOn(prisma.ticket, 'count').mockResolvedValue(1);
-      vi.spyOn(prisma.checkInLog, 'create').mockResolvedValue({} as any);
+      mockTransactionalAdmission(foreignEventTicket);
 
       const res = await request(app)
         .post('/api/organizer/check-in')
@@ -540,10 +809,11 @@ describe('Organizer Check-In & Scanner Validation API', () => {
     it('returns cached 200 response and avoids duplicate DB mutation when identical idempotency key is submitted', async () => {
       const idemKey = `idem_${Date.now()}_test_cached`;
 
-      vi.spyOn(prisma.ticket, 'findUnique').mockResolvedValue(mockTicketSavannah as any);
-      const updateSpy = vi.spyOn(prisma.ticket, 'updateMany').mockResolvedValue({ count: 1 });
-      vi.spyOn(prisma.ticket, 'count').mockResolvedValue(1);
-      const logSpy = vi.spyOn(prisma.checkInLog, 'create').mockResolvedValue({} as any);
+      vi.spyOn(prisma.ticket, 'findUnique')
+        .mockResolvedValueOnce(mockTicketSavannah as any)
+        .mockResolvedValueOnce({ ...mockTicketSavannah, status: 'CHECKED_IN' } as any);
+      const { ticketUpdateSpy: updateSpy, checkInLogCreateSpy: logSpy } =
+        mockTransactionalAdmission(mockTicketSavannah);
 
       const res1 = await request(app)
         .post('/api/organizer/check-in')
@@ -581,9 +851,7 @@ describe('Organizer Check-In & Scanner Validation API', () => {
       const idemKey = `idem_${Date.now()}_test_mismatch`;
 
       vi.spyOn(prisma.ticket, 'findUnique').mockResolvedValue(mockTicketSavannah as any);
-      vi.spyOn(prisma.ticket, 'updateMany').mockResolvedValue({ count: 1 });
-      vi.spyOn(prisma.ticket, 'count').mockResolvedValue(1);
-      vi.spyOn(prisma.checkInLog, 'create').mockResolvedValue({} as any);
+      mockTransactionalAdmission(mockTicketSavannah);
 
       const res1 = await request(app)
         .post('/api/organizer/check-in')
@@ -636,17 +904,7 @@ describe('Organizer Check-In & Scanner Validation API', () => {
 
     it('concurrency: 20 simultaneous requests for the same ticket admit exactly 1 attendee', async () => {
       vi.spyOn(prisma.ticket, 'findUnique').mockResolvedValue(mockTicketSavannah as any);
-      vi.spyOn(prisma.ticket, 'count').mockResolvedValue(1);
-      vi.spyOn(prisma.checkInLog, 'create').mockResolvedValue({} as any);
-
-      let atomicClaimed = false;
-      vi.spyOn(prisma.ticket, 'updateMany').mockImplementation(async () => {
-        if (!atomicClaimed) {
-          atomicClaimed = true;
-          return { count: 1 };
-        }
-        return { count: 0 };
-      });
+      mockTransactionalAdmission(mockTicketSavannah, { concurrentSingleAdmit: true });
 
       const requests = Array.from({ length: 20 }, (_, i) =>
         request(app)
@@ -747,9 +1005,7 @@ describe('Organizer Check-In & Scanner Validation API', () => {
       const idemKey = `idem_gate_mismatch_${Date.now()}`;
 
       vi.spyOn(prisma.ticket, 'findUnique').mockResolvedValue(mockTicketSavannah as any);
-      vi.spyOn(prisma.ticket, 'updateMany').mockResolvedValue({ count: 1 });
-      vi.spyOn(prisma.ticket, 'count').mockResolvedValue(1);
-      vi.spyOn(prisma.checkInLog, 'create').mockResolvedValue({} as any);
+      mockTransactionalAdmission(mockTicketSavannah);
 
       // Attempt 1: Auto-detect / all gates (empty eventId)
       const res1 = await request(app)
@@ -781,9 +1037,7 @@ describe('Organizer Check-In & Scanner Validation API', () => {
       const idemKey = `idem_case_insens_${Date.now()}`;
 
       vi.spyOn(prisma.ticket, 'findUnique').mockResolvedValue(mockTicketSavannah as any);
-      vi.spyOn(prisma.ticket, 'updateMany').mockResolvedValue({ count: 1 });
-      vi.spyOn(prisma.ticket, 'count').mockResolvedValue(1);
-      vi.spyOn(prisma.checkInLog, 'create').mockResolvedValue({} as any);
+      mockTransactionalAdmission(mockTicketSavannah);
 
       // First call with standard token
       const res1 = await request(app)

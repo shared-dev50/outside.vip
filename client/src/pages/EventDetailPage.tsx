@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import React, { useState, useEffect, useRef } from 'react';
+import { useParams, Link, useNavigate } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../lib/api';
 import { TicketTier, CheckoutSessionResult, WaitlistOfferInfo } from '../types';
@@ -30,6 +30,7 @@ import {
 
 export const EventDetailPage: React.FC = () => {
   const { slug } = useParams<{ slug: string }>();
+  const navigate = useNavigate();
   const [eventAccessToken, setEventAccessToken] = useState<string | null>(() => {
     if (typeof window !== 'undefined' && slug) {
       return sessionStorage.getItem(`outside_event_token_${slug}`);
@@ -58,6 +59,8 @@ export const EventDetailPage: React.FC = () => {
   const [isCheckoutOpen, setIsCheckoutOpen] = useState(false);
   const [paymentSession, setPaymentSession] = useState<CheckoutSessionResult | null>(null);
   const [sessionSnapshotKey, setSessionSnapshotKey] = useState<string | null>(null);
+  const submitInFlightRef = useRef(false);
+  const pendingIdempotencyRef = useRef<{ snapshotKey: string; key: string } | null>(null);
 
   const [waitlistModalTier, setWaitlistModalTier] = useState<TicketTier | null>(null);
 
@@ -200,24 +203,31 @@ export const EventDetailPage: React.FC = () => {
     if (checkoutError) setCheckoutError(null);
   };
 
+  const visibleTicketTiers = (event?.ticketTiers || []).filter(
+    (tier) => !tier.isHidden && tier.status !== 'HIDDEN'
+  );
+
   const totalTickets = Object.values(selectedQuantities).reduce((a, b) => a + b, 0);
 
-  const ticketSubtotalInCents = event
-    ? event.ticketTiers.reduce((acc, tier) => {
-        const qty = selectedQuantities[tier.id] || 0;
-        return acc + qty * tier.priceInCents;
-      }, 0)
-    : 0;
+  const ticketSubtotalInCents = visibleTicketTiers.reduce((acc, tier) => {
+    const qty = selectedQuantities[tier.id] || 0;
+    return acc + qty * tier.priceInCents;
+  }, 0);
 
   const checkoutFees = calculateCheckoutFeeBreakdown(ticketSubtotalInCents, totalTickets);
   const totalInCents = checkoutFees.buyerTotalInCents;
 
-  const selectedItems = (event?.ticketTiers || [])
+  const selectedItems = visibleTicketTiers
     .filter((tier) => (selectedQuantities[tier.id] || 0) > 0)
     .map((tier) => ({
       tier,
       quantity: selectedQuantities[tier.id],
     }));
+
+  const isFreeCheckout =
+    totalTickets > 0 &&
+    totalInCents === 0 &&
+    selectedItems.every(({ tier }) => tier.priceInCents === 0);
 
   const formatPrice = (cents?: number, currency = 'USD') => {
     if (cents === undefined || cents === 0) return 'Free';
@@ -338,7 +348,7 @@ export const EventDetailPage: React.FC = () => {
       return;
     }
 
-    if (isReserving) {
+    if (submitInFlightRef.current || isReserving) {
       return;
     }
 
@@ -356,16 +366,40 @@ export const EventDetailPage: React.FC = () => {
     });
 
     const now = Date.now();
+    const hasExpiredPaymentSession = Boolean(
+      paymentSession && new Date(paymentSession.expiresAt).getTime() <= now + 15000
+    );
+    if (hasExpiredPaymentSession) {
+      setPaymentSession(null);
+      setSessionSnapshotKey(null);
+      pendingIdempotencyRef.current = null;
+    }
+
     const isSessionValid =
+      !isFreeCheckout &&
+      !hasExpiredPaymentSession &&
       paymentSession &&
-      sessionSnapshotKey === currentSnapshotKey &&
-      new Date(paymentSession.expiresAt).getTime() > now + 15000;
+      Boolean(paymentSession.clientSecret) &&
+      sessionSnapshotKey === currentSnapshotKey;
 
     if (isSessionValid) {
       setIsCheckoutOpen(true);
       return;
     }
 
+    if (
+      !pendingIdempotencyRef.current ||
+      pendingIdempotencyRef.current.snapshotKey !== currentSnapshotKey
+    ) {
+      const generatedKey =
+        typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+          ? `chk_${crypto.randomUUID()}`
+          : `chk_${Date.now()}_${Math.random().toString(36).slice(2, 12)}`;
+      pendingIdempotencyRef.current = { snapshotKey: currentSnapshotKey, key: generatedKey };
+    }
+    const idempotencyKey = pendingIdempotencyRef.current.key;
+
+    submitInFlightRef.current = true;
     setIsReserving(true);
 
     try {
@@ -387,9 +421,26 @@ export const EventDetailPage: React.FC = () => {
         customerName: trimmedName,
         customerPhone: normalizedPhone,
         marketingConsent,
+        idempotencyKey,
         eventAccessToken: activeEventToken || undefined,
         offerToken: isOfferActive ? offerInfo!.token : undefined,
       });
+
+      const isFreeResult =
+        res.isFreeOrder === true ||
+        res.paymentProvider === 'FREE' ||
+        (res.status === 'COMPLETED' && res.totalInCents === 0 && !res.clientSecret);
+
+      if (isFreeResult) {
+        pendingIdempotencyRef.current = null;
+        setPaymentSession(null);
+        setSessionSnapshotKey(null);
+        setIsCheckoutOpen(false);
+        navigate(
+          `/orders/${res.orderNumber}?token=${encodeURIComponent(res.orderAccessToken)}`
+        );
+        return;
+      }
 
       if (res.clientSecret) {
         setPaymentSession(res);
@@ -399,8 +450,13 @@ export const EventDetailPage: React.FC = () => {
         throw new Error('Unable to initialize payment session.');
       }
     } catch (err: any) {
+      const statusCode = err?.statusCode ?? err?.status;
+      if (typeof statusCode === 'number' && statusCode >= 400 && statusCode < 500) {
+        pendingIdempotencyRef.current = null;
+      }
       setCheckoutError(err.message || 'Failed to initiate checkout. Please try again.');
     } finally {
+      submitInFlightRef.current = false;
       setIsReserving(false);
     }
   };
@@ -416,11 +472,13 @@ export const EventDetailPage: React.FC = () => {
     if (paymentSession && new Date(paymentSession.expiresAt).getTime() <= Date.now()) {
       setPaymentSession(null);
       setSessionSnapshotKey(null);
+      pendingIdempotencyRef.current = null;
     }
   };
 
   const handleSessionExpired = () => {
     setSessionSnapshotKey(null);
+    pendingIdempotencyRef.current = null;
   };
 
   if (isLoading) {
@@ -925,128 +983,153 @@ export const EventDetailPage: React.FC = () => {
             )}
 
             <div className="space-y-3">
-              {event.ticketTiers.map((tier: TicketTier) => {
-                const qty = selectedQuantities[tier.id] || 0;
-                const isSoldOut = tier.status === 'SOLD_OUT' || (tier.remainingCapacity !== undefined && tier.remainingCapacity <= 0);
-                const now = new Date();
-                const isSalesPending = Boolean(tier.salesStartAt && new Date(tier.salesStartAt) > now);
-                const isSalesEnded = Boolean(tier.salesEndAt && new Date(tier.salesEndAt) < now);
-                const isPurchasable = !isSoldOut && !isSalesPending && !isSalesEnded && tier.status === 'ACTIVE';
+              {visibleTicketTiers.length === 0 ? (
+                <div className="p-4 rounded-lg border border-dashed border-gray-200 bg-gray-50 text-center text-xs text-gray-500">
+                  Tickets are not currently available for this event.
+                </div>
+              ) : (
+                visibleTicketTiers.map((tier: TicketTier) => {
+                  const qty = selectedQuantities[tier.id] || 0;
+                  const isSalesDisabled = Boolean(tier.salesDisabled) || tier.status === 'PAUSED';
+                  const isSoldOut =
+                    tier.status === 'SOLD_OUT' ||
+                    (tier.remainingCapacity !== undefined && tier.remainingCapacity <= 0);
+                  const now = new Date();
+                  const isSalesPending = Boolean(tier.salesStartAt && new Date(tier.salesStartAt) > now);
+                  const isSalesEnded = Boolean(tier.salesEndAt && new Date(tier.salesEndAt) < now);
+                  const isPurchasable =
+                    !isSalesDisabled &&
+                    !isSoldOut &&
+                    !isSalesPending &&
+                    !isSalesEnded &&
+                    tier.status === 'ACTIVE';
 
-                const formatTimeInEventTz = (dateString?: string | null) => {
-                  if (!dateString) return '';
-                  try {
-                    return new Intl.DateTimeFormat('en-US', {
-                      timeZone: event.timezone || 'UTC',
-                      month: 'short',
-                      day: 'numeric',
-                      hour: 'numeric',
-                      minute: '2-digit',
-                    }).format(new Date(dateString));
-                  } catch {
-                    return new Date(dateString).toLocaleString();
-                  }
-                };
+                  const formatTimeInEventTz = (dateString?: string | null) => {
+                    if (!dateString) return '';
+                    try {
+                      return new Intl.DateTimeFormat('en-US', {
+                        timeZone: event.timezone || 'UTC',
+                        month: 'short',
+                        day: 'numeric',
+                        hour: 'numeric',
+                        minute: '2-digit',
+                      }).format(new Date(dateString));
+                    } catch {
+                      return new Date(dateString).toLocaleString();
+                    }
+                  };
 
-                return (
-                  <div
-                    key={tier.id}
-                    className={`p-3.5 rounded-lg border transition-colors ${
-                      qty > 0
-                        ? 'bg-gray-50 border-gray-900'
-                        : isPurchasable
-                        ? 'border-gray-200 hover:border-gray-300'
-                        : isSoldOut && tier.waitlistEnabled && !isSalesEnded
-                        ? 'bg-amber-50/20 border-amber-200/60'
-                        : 'bg-gray-50/60 border-gray-200 opacity-70'
-                    }`}
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="space-y-0.5 flex-1">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className="font-semibold text-gray-900 text-sm">
-                            {tier.name}
-                          </span>
-                          {isSoldOut ? (
-                            <span className="text-[10px] text-red-600 font-bold uppercase tracking-wider">
-                              Sold out
+                  return (
+                    <div
+                      key={tier.id}
+                      data-testid={`public-ticket-tier-${tier.id}`}
+                      className={`p-3.5 rounded-lg border transition-colors ${
+                        qty > 0
+                          ? 'bg-gray-50 border-gray-900'
+                          : isPurchasable
+                          ? 'border-gray-200 hover:border-gray-300'
+                          : !isSalesDisabled && isSoldOut && tier.waitlistEnabled && !isSalesEnded
+                          ? 'bg-amber-50/20 border-amber-200/60'
+                          : 'bg-gray-50/60 border-gray-200 opacity-75'
+                      }`}
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="space-y-0.5 flex-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="font-semibold text-gray-900 text-sm">
+                              {tier.name}
                             </span>
-                          ) : isSalesPending ? (
-                            <span className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded font-mono font-bold uppercase tracking-wider">
-                              Sales start {formatTimeInEventTz(tier.salesStartAt)}
-                            </span>
-                          ) : isSalesEnded ? (
-                            <span className="text-[10px] text-stone-500 bg-stone-100 border border-stone-200 px-2 py-0.5 rounded font-mono font-bold uppercase tracking-wider">
-                              Sales ended
-                            </span>
-                          ) : null}
-                        </div>
-
-                        {tier.description && (
-                          <p className="text-xs text-gray-500 leading-snug">
-                            {tier.description}
-                          </p>
-                        )}
-
-                        {(tier.validityStartAt || tier.validityEndAt) && (
-                          <div className="text-[11px] font-mono text-indigo-800 bg-indigo-50/80 border border-indigo-200/80 rounded px-2 py-0.5 mt-1 inline-flex items-center gap-1">
-                            <span>Entry validity:</span>
-                            <span className="font-semibold">
-                              {tier.validityStartAt && tier.validityEndAt
-                                ? `${formatTimeInEventTz(tier.validityStartAt)} – ${formatTimeInEventTz(tier.validityEndAt)}`
-                                : tier.validityStartAt
-                                ? `From ${formatTimeInEventTz(tier.validityStartAt)}`
-                                : `Until ${formatTimeInEventTz(tier.validityEndAt)}`}
-                            </span>
+                            {isSalesDisabled ? (
+                              <span className="text-[10px] text-amber-800 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded font-mono font-bold uppercase tracking-wider">
+                                Sales unavailable
+                              </span>
+                            ) : isSoldOut ? (
+                              <span className="text-[10px] text-red-600 font-bold uppercase tracking-wider">
+                                Sold out
+                              </span>
+                            ) : isSalesPending ? (
+                              <span className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded font-mono font-bold uppercase tracking-wider">
+                                Sales start {formatTimeInEventTz(tier.salesStartAt)}
+                              </span>
+                            ) : isSalesEnded ? (
+                              <span className="text-[10px] text-stone-500 bg-stone-100 border border-stone-200 px-2 py-0.5 rounded font-mono font-bold uppercase tracking-wider">
+                                Sales ended
+                              </span>
+                            ) : null}
                           </div>
-                        )}
 
-                        <div className="pt-1 font-semibold text-gray-900 text-xs">
-                          {formatPrice(
-                            tier.displayPriceInCents ?? calculateDisplayPriceFromGross(tier.priceInCents),
-                            tier.currency
+                          {tier.description && (
+                            <p className="text-xs text-gray-500 leading-snug">
+                              {tier.description}
+                            </p>
                           )}
-                        </div>
-                      </div>
 
-                      {isPurchasable ? (
-                        <div className="flex items-center gap-1.5 bg-gray-50 border border-gray-200 rounded-md p-1 shrink-0">
-                          <button
-                            type="button"
-                            onClick={() => updateQuantity(tier.id, -1, tier.maxPerOrder)}
-                            disabled={qty === 0 || isReserving}
-                            className="w-6 h-6 rounded flex items-center justify-center text-gray-600 hover:text-black hover:bg-gray-200 disabled:opacity-20 cursor-pointer"
-                            aria-label={`Decrease ${tier.name}`}
-                          >
-                            <Minus className="w-3 h-3" />
-                          </button>
-                          <span className="w-5 text-center text-xs font-bold text-gray-900">
-                            {qty}
-                          </span>
-                          <button
-                            type="button"
-                            onClick={() => updateQuantity(tier.id, 1, Math.min(tier.maxPerOrder, tier.remainingCapacity || 10))}
-                            disabled={isReserving || qty >= (tier.remainingCapacity || tier.maxPerOrder)}
-                            className="w-6 h-6 rounded flex items-center justify-center text-gray-600 hover:text-black hover:bg-gray-200 disabled:opacity-20 cursor-pointer"
-                            aria-label={`Increase ${tier.name}`}
-                          >
-                            <Plus className="w-3 h-3" />
-                          </button>
+                          {isSalesDisabled && (
+                            <p className="text-[11px] text-amber-800/90 leading-snug">
+                              New ticket sales are currently disabled by the organizer.
+                            </p>
+                          )}
+
+                          {(tier.validityStartAt || tier.validityEndAt) && (
+                            <div className="text-[11px] font-mono text-indigo-800 bg-indigo-50/80 border border-indigo-200/80 rounded px-2 py-0.5 mt-1 inline-flex items-center gap-1">
+                              <span>Entry validity:</span>
+                              <span className="font-semibold">
+                                {tier.validityStartAt && tier.validityEndAt
+                                  ? `${formatTimeInEventTz(tier.validityStartAt)} – ${formatTimeInEventTz(tier.validityEndAt)}`
+                                  : tier.validityStartAt
+                                  ? `From ${formatTimeInEventTz(tier.validityStartAt)}`
+                                  : `Until ${formatTimeInEventTz(tier.validityEndAt)}`}
+                              </span>
+                            </div>
+                          )}
+
+                          <div className="pt-1 font-semibold text-gray-900 text-xs">
+                            {formatPrice(
+                              tier.displayPriceInCents ?? calculateDisplayPriceFromGross(tier.priceInCents),
+                              tier.currency
+                            )}
+                          </div>
                         </div>
-                      ) : isSoldOut && tier.waitlistEnabled && !isSalesEnded ? (
-                        <button
-                          type="button"
-                          onClick={() => setWaitlistModalTier(tier)}
-                          className="px-3 py-1.5 rounded-lg bg-stone-900 hover:bg-black text-white text-xs font-bold flex items-center gap-1.5 shrink-0 transition-colors shadow-2xs cursor-pointer"
-                        >
-                          <Clock className="w-3.5 h-3.5 text-amber-400" />
-                          <span>Join waitlist</span>
-                        </button>
-                      ) : null}
+
+                        {isPurchasable ? (
+                          <div className="flex items-center gap-1.5 bg-gray-50 border border-gray-200 rounded-md p-1 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => updateQuantity(tier.id, -1, tier.maxPerOrder)}
+                              disabled={qty === 0 || isReserving}
+                              className="w-6 h-6 rounded flex items-center justify-center text-gray-600 hover:text-black hover:bg-gray-200 disabled:opacity-20 cursor-pointer"
+                              aria-label={`Decrease ${tier.name}`}
+                            >
+                              <Minus className="w-3 h-3" />
+                            </button>
+                            <span className="w-5 text-center text-xs font-bold text-gray-900">
+                              {qty}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => updateQuantity(tier.id, 1, Math.min(tier.maxPerOrder, tier.remainingCapacity || 10))}
+                              disabled={isReserving || qty >= (tier.remainingCapacity || tier.maxPerOrder)}
+                              className="w-6 h-6 rounded flex items-center justify-center text-gray-600 hover:text-black hover:bg-gray-200 disabled:opacity-20 cursor-pointer"
+                              aria-label={`Increase ${tier.name}`}
+                            >
+                              <Plus className="w-3 h-3" />
+                            </button>
+                          </div>
+                        ) : !isSalesDisabled && isSoldOut && tier.waitlistEnabled && !isSalesEnded ? (
+                          <button
+                            type="button"
+                            onClick={() => setWaitlistModalTier(tier)}
+                            className="px-3 py-1.5 rounded-lg bg-stone-900 hover:bg-black text-white text-xs font-bold flex items-center gap-1.5 shrink-0 transition-colors shadow-2xs cursor-pointer"
+                          >
+                            <Clock className="w-3.5 h-3.5 text-amber-400" />
+                            <span>Join waitlist</span>
+                          </button>
+                        ) : null}
+                      </div>
                     </div>
-                  </div>
-                );
-              })}
+                  );
+                })
+              )}
             </div>
 
             {ticketsError && (
@@ -1192,8 +1275,10 @@ export const EventDetailPage: React.FC = () => {
                 {isReserving ? (
                   <>
                     <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                    <span>Preparing checkout...</span>
+                    <span>{isFreeCheckout ? 'Completing registration...' : 'Preparing checkout...'}</span>
                   </>
+                ) : isFreeCheckout ? (
+                  <span>Complete free registration · Free</span>
                 ) : (
                   <span>Continue to payment · {formatPrice(totalInCents, event.currency)}</span>
                 )}
@@ -1231,7 +1316,11 @@ export const EventDetailPage: React.FC = () => {
             }}
             className="px-4 py-2 rounded-md bg-gray-900 text-white font-semibold text-xs hover:bg-black"
           >
-            {totalTickets > 0 ? `Continue · ${formatPrice(totalInCents, event.currency)}` : 'Select Tickets'}
+            {totalTickets > 0
+              ? isFreeCheckout
+                ? 'Register · Free'
+                : `Continue · ${formatPrice(totalInCents, event.currency)}`
+              : 'Select Tickets'}
           </button>
         </div>
       </div>

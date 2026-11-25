@@ -1,17 +1,27 @@
+import crypto from 'crypto';
 import Stripe from 'stripe';
-import { LedgerEntryType } from '@prisma/client';
+import { LedgerEntryType, PayoutStatus, Role, TransferStatus } from '@prisma/client';
 import { prisma } from '../../db/prisma.js';
 import { stripe } from '../../lib/stripe.js';
 import { env } from '../../config/env.js';
-import { BadRequestError, NotFoundError, ServiceUnavailableError } from '../../utils/errors.js';
+import { getAllAllowedOrigins } from '../../config/cors.js';
+import { recordAdminAuditLog } from '../../lib/auditLogger.js';
+import {
+  BadRequestError,
+  ConflictError,
+  NotFoundError,
+  ServiceUnavailableError,
+} from '../../utils/errors.js';
 import {
   classifyStripeError,
+  classifyTransferCreateError,
   logStripeDiagnostic,
 } from './stripeError.js';
 import {
-  STRIPE_EXPRESS_SUPPORTED_COUNTRIES,
+  getConfiguredStripeConnectCountries,
   DEFAULT_STRIPE_CONNECT_COUNTRY,
   isStripeExpressCountrySupported,
+  isSupportedPlatformCurrency,
   StripeConnectCountry,
 } from './stripeCountries.js';
 
@@ -68,7 +78,7 @@ export interface ConnectedAccountStatusResponse {
     monthlyAnchor: number | null;
   } | null;
   externalAccounts: SanitizedExternalAccount[];
-  defaultCurrency: string;
+  defaultCurrency: string | null;
   country: string | null;
   supportedCountries?: StripeConnectCountry[];
 }
@@ -154,9 +164,9 @@ function buildDisconnectedStatus(
     },
     payoutSchedule: null,
     externalAccounts: [],
-    defaultCurrency: 'USD',
+    defaultCurrency: null,
     country: persistedCountry || null,
-    supportedCountries: STRIPE_EXPRESS_SUPPORTED_COUNTRIES,
+    supportedCountries: getConfiguredStripeConnectCountries(),
   };
 }
 
@@ -293,9 +303,15 @@ export async function getConnectedAccountStatus(
       sellTicketsMessage = 'Pending verification: Stripe is reviewing your submitted details.';
     }
 
-    // Transfer Balance evaluation:
-    // Strictly requires active transfers capability on Stripe Connected Account
+    // Transfer Balance & Bank Payout Readiness evaluation:
+    // Strictly requires active transfers capability AND payouts_enabled === true AND explicit US/USD compatibility
     const transfersActive = account.capabilities?.transfers === 'active';
+    const payoutsEnabled = Boolean(account.payouts_enabled);
+    const effectiveCountry = account.country || user.stripeAccountCountry || null;
+    const countryCompatible =
+      Boolean(effectiveCountry) && isStripeExpressCountrySupported(effectiveCountry);
+    const currencyCompatible =
+      Boolean(account.default_currency) && isSupportedPlatformCurrency(account.default_currency);
 
     let transferStatus: 'enabled' | 'action_required' | 'disabled' = 'disabled';
     let transferMessage = '';
@@ -303,15 +319,28 @@ export async function getConnectedAccountStatus(
     if (disabledReason) {
       transferStatus = 'disabled';
       transferMessage = `Disabled by Stripe: ${disabledReason}`;
+    } else if (!countryCompatible) {
+      transferStatus = 'disabled';
+      transferMessage = effectiveCountry
+        ? `Unsupported Stripe account country (${effectiveCountry}). Only US Connect Express accounts are supported for this launch.`
+        : 'Missing Stripe account country. Only verified US Connect Express accounts are supported for this launch.';
+    } else if (!currencyCompatible) {
+      transferStatus = 'disabled';
+      transferMessage = account.default_currency
+        ? `Incompatible Stripe settlement currency (${account.default_currency.toUpperCase()}). USD settlement is required.`
+        : 'Missing Stripe settlement currency. USD settlement is required.';
     } else if (pastDueRaw.length > 0) {
       transferStatus = 'action_required';
       transferMessage =
         'Action required: Your Stripe account has past-due verification requirements. Please complete them in Stripe.';
-    } else if (transfersActive) {
+    } else if (transfersActive && payoutsEnabled) {
       transferStatus = 'enabled';
-      transferMessage = Boolean(account.payouts_enabled)
-        ? 'Enabled: Balance transfers and external bank payouts are fully functional.'
-        : 'Enabled: Transfers to your Stripe Express account are active. Link a verified bank account to enable automatic bank payouts.';
+      transferMessage =
+        'Enabled: Balance transfers and external bank payouts are fully functional.';
+    } else if (transfersActive && !payoutsEnabled) {
+      transferStatus = 'action_required';
+      transferMessage =
+        'Bank account required: Transfers capability is active, but bank payouts are not enabled yet. Link and verify a bank account in Stripe before publishing paid events or withdrawing funds.';
     } else if (currentlyDueRaw.length > 0) {
       transferStatus = 'action_required';
       transferMessage =
@@ -377,9 +406,9 @@ export async function getConnectedAccountStatus(
       },
       payoutSchedule,
       externalAccounts,
-      defaultCurrency: account.default_currency ? account.default_currency.toUpperCase() : 'USD',
+      defaultCurrency: account.default_currency ? account.default_currency.toUpperCase() : null,
       country: account.country || user.stripeAccountCountry || null,
-      supportedCountries: STRIPE_EXPRESS_SUPPORTED_COUNTRIES,
+      supportedCountries: getConfiguredStripeConnectCountries(),
     };
   } catch (error: any) {
     logStripeDiagnostic('getConnectedAccountStatus', error, {
@@ -422,6 +451,526 @@ export async function getConnectedAccountStatus(
  * Does NOT silently create new accounts on background read errors.
  * Supports country selection with strict server-side allowlist validation.
  */
+const CONNECT_ACCOUNT_CREATION_LEASE_MS = 30_000;
+const CONNECT_CONCURRENT_POLL_INTERVAL_MS = 50;
+const CONNECT_CONCURRENT_POLL_MAX_WAIT_MS = 1_500;
+
+function validateOnboardingRedirectUrl(
+  rawUrl: string | undefined,
+  fieldName: 'returnUrl' | 'refreshUrl',
+  fallbackUrl: string
+): string {
+  if (!rawUrl) {
+    return fallbackUrl;
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    throw new BadRequestError(`Invalid ${fieldName}: malformed URL.`, 'INVALID_REDIRECT_URL');
+  }
+
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new BadRequestError(`Invalid ${fieldName}: only HTTP(S) URLs are allowed.`, 'INVALID_REDIRECT_URL');
+  }
+
+  const allowedOrigins = getAllAllowedOrigins();
+  if (!allowedOrigins.has(parsed.origin)) {
+    throw new BadRequestError(
+      `Invalid ${fieldName}: redirect origin '${parsed.origin}' is not allowlisted.`,
+      'INVALID_REDIRECT_URL'
+    );
+  }
+
+  return parsed.toString();
+}
+
+const CONNECT_ACCOUNT_RECOVERY_MAX_PAGES = 10;
+
+type ConnectAccountLookupResult =
+  | { status: 'found'; account: Stripe.Account }
+  | { status: 'not_found' }
+  | { status: 'ambiguous'; accountIds: string[] }
+  | { status: 'incomplete'; scannedPages: number }
+  | { status: 'error'; error: unknown };
+
+async function tryFindExistingStripeAccountForCreationKey(params: {
+  userId: string;
+  creationKey: string;
+  startedAt?: Date | null;
+}): Promise<ConnectAccountLookupResult> {
+  try {
+    const matches: Stripe.Account[] = [];
+    const seenIds = new Set<string>();
+    const createdGte =
+      params.startedAt && Number.isFinite(params.startedAt.getTime())
+        ? Math.max(0, Math.floor(params.startedAt.getTime() / 1000) - 60)
+        : undefined;
+
+    let startingAfter: string | undefined;
+    let pageCount = 0;
+    let hasMore = true;
+
+    while (hasMore && pageCount < CONNECT_ACCOUNT_RECOVERY_MAX_PAGES) {
+      pageCount += 1;
+      const listParams: Stripe.AccountListParams = {
+        limit: 100,
+        ...(createdGte !== undefined ? { created: { gte: createdGte } } : {}),
+        ...(startingAfter ? { starting_after: startingAfter } : {}),
+      };
+
+      const page = await stripe.accounts.list(listParams);
+      const data = page.data || [];
+      let advanced = false;
+
+      for (const acct of data) {
+        if (!acct?.id || seenIds.has(acct.id)) {
+          continue;
+        }
+        seenIds.add(acct.id);
+        advanced = true;
+
+        if (
+          acct.metadata?.userId === params.userId &&
+          acct.metadata?.creationKey === params.creationKey
+        ) {
+          matches.push(acct);
+        }
+      }
+
+      hasMore = Boolean(page.has_more);
+      const lastId = data.length > 0 ? data[data.length - 1]?.id : undefined;
+      if (!hasMore || !lastId || !advanced || lastId === startingAfter) {
+        if (hasMore && (!lastId || !advanced || lastId === startingAfter)) {
+          // Stripe returned a stalling cursor while claiming has_more; fail closed.
+          return { status: 'incomplete', scannedPages: pageCount };
+        }
+        break;
+      }
+      startingAfter = lastId;
+    }
+
+    if (matches.length > 1) {
+      return {
+        status: 'ambiguous',
+        accountIds: matches.map((acct) => acct.id),
+      };
+    }
+
+    if (matches.length === 1) {
+      if (hasMore && pageCount >= CONNECT_ACCOUNT_RECOVERY_MAX_PAGES) {
+        // Scan truncated before confirming no duplicate account exists beyond page cap.
+        return { status: 'incomplete', scannedPages: pageCount };
+      }
+      return { status: 'found', account: matches[0] };
+    }
+
+    if (hasMore) {
+      return { status: 'incomplete', scannedPages: pageCount };
+    }
+
+    return { status: 'not_found' };
+  } catch (err) {
+    return { status: 'error', error: err };
+  }
+}
+
+async function releaseConnectCreationClaim(params: {
+  userId: string;
+  lockId: string;
+  clearCreationKey: boolean;
+}): Promise<void> {
+  await prisma.user.updateMany({
+    where: {
+      id: params.userId,
+      stripeAccountCreationLockedBy: params.lockId,
+    },
+    data: {
+      stripeAccountCreationLockedBy: null,
+      stripeAccountCreationLockedUntil: null,
+      ...(params.clearCreationKey
+        ? { stripeAccountCreationKey: null, stripeAccountCreationStartedAt: null }
+        : {}),
+    },
+  });
+}
+
+async function provisionConnectExpressAccountSafely(params: {
+  userId: string;
+  userEmail: string;
+  targetCountry: string;
+  allowReplacePreviousAccountId?: string | null;
+}): Promise<{ accountId: string; resolvedCountry: string }> {
+  const effectiveStripeKey = process.env.STRIPE_SECRET_KEY ?? env.STRIPE_SECRET_KEY;
+  if (!effectiveStripeKey || effectiveStripeKey === 'sk_test_placeholder') {
+    throw new ServiceUnavailableError(
+      'Stripe Connect onboarding is currently unavailable while platform configuration is being completed. Please check back shortly.',
+      'STRIPE_CONFIGURATION_UNAVAILABLE'
+    );
+  }
+
+  const lockId = `connect_claim_${crypto.randomBytes(8).toString('hex')}`;
+  const isReplacementFlow = Boolean(params.allowReplacePreviousAccountId);
+
+  const attemptClaim = async (): Promise<
+    | {
+        status: 'claimed';
+        creationKey: string;
+        creationStartedAt: Date;
+        isRecoveringPreviousAttempt: boolean;
+        existingCountry: string | null;
+      }
+    | { status: 'already_connected'; accountId: string; country: string | null }
+    | { status: 'locked_by_other' }
+  > => {
+    const now = new Date();
+    const leaseUntil = new Date(now.getTime() + CONNECT_ACCOUNT_CREATION_LEASE_MS);
+
+    return prisma.$transaction(async (tx) => {
+      const rows = await tx.$queryRaw<
+        Array<{
+          id: string;
+          stripeAccountId: string | null;
+          stripeAccountCountry: string | null;
+          stripeAccountCreationKey: string | null;
+          stripeAccountCreationLockedBy: string | null;
+          stripeAccountCreationLockedUntil: Date | null;
+          stripeAccountCreationStartedAt: Date | null;
+        }>
+      >`
+        SELECT
+          id,
+          "stripeAccountId",
+          "stripeAccountCountry",
+          "stripeAccountCreationKey",
+          "stripeAccountCreationLockedBy",
+          "stripeAccountCreationLockedUntil",
+          "stripeAccountCreationStartedAt"
+        FROM "User"
+        WHERE id = ${params.userId}
+        FOR UPDATE
+      `;
+
+      const lockedUser = rows[0];
+      if (!lockedUser) {
+        throw new NotFoundError('Organizer user not found');
+      }
+
+      if (
+        !isReplacementFlow &&
+        lockedUser.stripeAccountId
+      ) {
+        return {
+          status: 'already_connected' as const,
+          accountId: lockedUser.stripeAccountId,
+          country: lockedUser.stripeAccountCountry,
+        };
+      }
+
+      if (
+        isReplacementFlow &&
+        lockedUser.stripeAccountId &&
+        lockedUser.stripeAccountId !== params.allowReplacePreviousAccountId
+      ) {
+        return {
+          status: 'already_connected' as const,
+          accountId: lockedUser.stripeAccountId,
+          country: lockedUser.stripeAccountCountry,
+        };
+      }
+
+      if (
+        lockedUser.stripeAccountCreationLockedUntil &&
+        lockedUser.stripeAccountCreationLockedUntil.getTime() > now.getTime()
+      ) {
+        return { status: 'locked_by_other' as const };
+      }
+
+      const isRecoveringPreviousAttempt = Boolean(lockedUser.stripeAccountCreationKey);
+      const creationKey =
+        lockedUser.stripeAccountCreationKey ||
+        `ck_${crypto.randomBytes(12).toString('hex')}`;
+      const creationStartedAt =
+        isRecoveringPreviousAttempt && lockedUser.stripeAccountCreationStartedAt
+          ? lockedUser.stripeAccountCreationStartedAt
+          : now;
+
+      await tx.user.update({
+        where: { id: params.userId },
+        data: {
+          stripeAccountCreationKey: creationKey,
+          stripeAccountCreationLockedBy: lockId,
+          stripeAccountCreationLockedUntil: leaseUntil,
+          stripeAccountCreationStartedAt: creationStartedAt,
+        },
+      });
+
+      return {
+        status: 'claimed' as const,
+        creationKey,
+        creationStartedAt,
+        isRecoveringPreviousAttempt,
+        existingCountry: lockedUser.stripeAccountCountry,
+      };
+    });
+  };
+
+  let claim = await attemptClaim();
+  const pollDeadline = Date.now() + CONNECT_CONCURRENT_POLL_MAX_WAIT_MS;
+  while (claim.status === 'locked_by_other' && Date.now() < pollDeadline) {
+    await new Promise((resolve) => setTimeout(resolve, CONNECT_CONCURRENT_POLL_INTERVAL_MS));
+    claim = await attemptClaim();
+  }
+
+  if (claim.status === 'already_connected') {
+    return {
+      accountId: claim.accountId,
+      resolvedCountry: claim.country || params.targetCountry,
+    };
+  }
+
+  if (claim.status === 'locked_by_other') {
+    throw new ConflictError(
+      'Stripe Express account creation is already in progress. Please wait a moment and try again.',
+      'CONNECT_ONBOARDING_IN_PROGRESS'
+    );
+  }
+
+  const { creationKey, creationStartedAt, isRecoveringPreviousAttempt } = claim;
+
+  // Outside DB locks: if recovering a prior timed-out or crashed attempt, inspect Stripe first.
+  // Fail closed if Stripe account discovery is ambiguous, incomplete, or errors.
+  if (isRecoveringPreviousAttempt) {
+    const recoveryLookup = await tryFindExistingStripeAccountForCreationKey({
+      userId: params.userId,
+      creationKey,
+      startedAt: creationStartedAt,
+    });
+
+    if (recoveryLookup.status === 'found') {
+      const recoveredAccount = recoveryLookup.account;
+      const resolvedCountry = recoveredAccount.country || params.targetCountry;
+      const saved = await prisma.user.updateMany({
+        where: {
+          id: params.userId,
+          ...(isReplacementFlow
+            ? { stripeAccountId: params.allowReplacePreviousAccountId }
+            : { stripeAccountId: null }),
+        },
+        data: {
+          stripeAccountId: recoveredAccount.id,
+          stripeAccountCountry: resolvedCountry,
+          ...(recoveredAccount.default_currency
+            ? { stripeAccountDefaultCurrency: recoveredAccount.default_currency.toUpperCase() }
+            : {}),
+          stripeAccountCreationKey: null,
+          stripeAccountCreationLockedBy: null,
+          stripeAccountCreationLockedUntil: null,
+          stripeAccountCreationStartedAt: null,
+        },
+      });
+      if (saved.count > 0) {
+        return { accountId: recoveredAccount.id, resolvedCountry };
+      }
+      const freshUser = await prisma.user.findUnique({
+        where: { id: params.userId },
+        select: { stripeAccountId: true, stripeAccountCountry: true },
+      });
+      if (freshUser?.stripeAccountId) {
+        await releaseConnectCreationClaim({ userId: params.userId, lockId, clearCreationKey: true });
+        return {
+          accountId: freshUser.stripeAccountId,
+          resolvedCountry: freshUser.stripeAccountCountry || resolvedCountry,
+        };
+      }
+    } else if (recoveryLookup.status === 'ambiguous') {
+      console.error(
+        JSON.stringify({
+          level: 'error',
+          category: 'CONNECT_ACCOUNT_RECOVERY_AMBIGUOUS',
+          userId: params.userId,
+          accountIds: recoveryLookup.accountIds,
+        })
+      );
+      await releaseConnectCreationClaim({ userId: params.userId, lockId, clearCreationKey: false });
+      throw new ServiceUnavailableError(
+        'Multiple Stripe Connect accounts matched your pending onboarding attempt. Support verification is required before continuing.',
+        'CONNECT_ACCOUNT_RECOVERY_AMBIGUOUS'
+      );
+    } else if (recoveryLookup.status === 'incomplete' || recoveryLookup.status === 'error') {
+      logStripeDiagnostic('provisionConnectExpressAccountSafely.recoveryLookup', recoveryLookup.status === 'error' ? recoveryLookup.error : new Error('Incomplete paginated account recovery'), {
+        userId: params.userId,
+        status: recoveryLookup.status,
+      });
+      await releaseConnectCreationClaim({ userId: params.userId, lockId, clearCreationKey: false });
+      throw new ServiceUnavailableError(
+        'Stripe account creation verification is temporarily unavailable. Please try onboarding again shortly without creating a duplicate account.',
+        'CONNECT_ACCOUNT_CREATION_PENDING_RECOVERY'
+      );
+    }
+  }
+
+  try {
+    const account = await stripe.accounts.create(
+      {
+        type: 'express',
+        country: params.targetCountry,
+        email: params.userEmail,
+        capabilities: {
+          card_payments: { requested: true },
+          transfers: { requested: true },
+        },
+        business_type: 'individual',
+        metadata: {
+          userId: params.userId,
+          creationKey,
+          platform: 'outside.vip',
+        },
+      },
+      {
+        idempotencyKey: `acct_create_${params.userId}_${creationKey}`,
+      }
+    );
+
+    const resolvedCountry = account.country || params.targetCountry;
+    await prisma.$transaction(async (tx) => {
+      const updated = await tx.user.updateMany({
+        where: {
+          id: params.userId,
+          ...(isReplacementFlow
+            ? { stripeAccountId: params.allowReplacePreviousAccountId }
+            : { stripeAccountId: null }),
+        },
+        data: {
+          stripeAccountId: account.id,
+          stripeAccountCountry: resolvedCountry,
+          ...(account.default_currency
+            ? { stripeAccountDefaultCurrency: account.default_currency.toUpperCase() }
+            : {}),
+          stripeAccountCreationKey: null,
+          stripeAccountCreationLockedBy: null,
+          stripeAccountCreationLockedUntil: null,
+          stripeAccountCreationStartedAt: null,
+        },
+      });
+
+      if (updated.count === 0) {
+        await tx.user.updateMany({
+          where: {
+            id: params.userId,
+            stripeAccountCreationLockedBy: lockId,
+          },
+          data: {
+            stripeAccountCreationKey: null,
+            stripeAccountCreationLockedBy: null,
+            stripeAccountCreationLockedUntil: null,
+            stripeAccountCreationStartedAt: null,
+          },
+        });
+      }
+    });
+
+    const latest = await prisma.user.findUnique({
+      where: { id: params.userId },
+      select: { stripeAccountId: true, stripeAccountCountry: true },
+    });
+
+    return {
+      accountId: latest?.stripeAccountId || account.id,
+      resolvedCountry: latest?.stripeAccountCountry || resolvedCountry,
+    };
+  } catch (error: any) {
+    logStripeDiagnostic('createOnboardingLink.accounts.create', error, {
+      userId: params.userId,
+      country: params.targetCountry,
+    });
+
+    if (
+      error?.code === 'country_unsupported' ||
+      error?.param === 'country' ||
+      error?.raw?.code === 'country_unsupported' ||
+      /country.*unsupported|country is not supported/i.test(error?.message || '')
+    ) {
+      await releaseConnectCreationClaim({ userId: params.userId, lockId, clearCreationKey: true });
+      throw new BadRequestError(
+        `Stripe does not currently support Express accounts in ${params.targetCountry}. Please select another country.`,
+        'STRIPE_COUNTRY_UNSUPPORTED'
+      );
+    }
+
+    const classifiedCreate = classifyTransferCreateError(error);
+    if (classifiedCreate.disposition === 'AMBIGUOUS') {
+      // Quick non-locking recovery lookup in case Stripe created the account before timeout/drop
+      const recoveryLookup = await tryFindExistingStripeAccountForCreationKey({
+        userId: params.userId,
+        creationKey,
+        startedAt: creationStartedAt,
+      });
+      if (recoveryLookup.status === 'found') {
+        const recoveredAccount = recoveryLookup.account;
+        const resolvedCountry = recoveredAccount.country || params.targetCountry;
+        await prisma.user.updateMany({
+          where: {
+            id: params.userId,
+            ...(isReplacementFlow
+              ? { stripeAccountId: params.allowReplacePreviousAccountId }
+              : { stripeAccountId: null }),
+          },
+          data: {
+            stripeAccountId: recoveredAccount.id,
+            stripeAccountCountry: resolvedCountry,
+            ...(recoveredAccount.default_currency
+              ? { stripeAccountDefaultCurrency: recoveredAccount.default_currency.toUpperCase() }
+              : {}),
+            stripeAccountCreationKey: null,
+            stripeAccountCreationLockedBy: null,
+            stripeAccountCreationLockedUntil: null,
+            stripeAccountCreationStartedAt: null,
+          },
+        });
+        return { accountId: recoveredAccount.id, resolvedCountry };
+      }
+      if (recoveryLookup.status === 'ambiguous') {
+        console.error(
+          JSON.stringify({
+            level: 'error',
+            category: 'CONNECT_ACCOUNT_RECOVERY_AMBIGUOUS',
+            userId: params.userId,
+            accountIds: recoveryLookup.accountIds,
+          })
+        );
+      }
+
+      // Preserve creationKey & startedAt across ambiguous errors so the next retry uses the exact same key & bounds!
+      await releaseConnectCreationClaim({ userId: params.userId, lockId, clearCreationKey: false });
+      throw new ServiceUnavailableError(
+        'Stripe account creation timed out before confirmation. Retry onboarding safely to recover or complete your setup without creating a duplicate account.',
+        'CONNECT_ACCOUNT_CREATION_PENDING_RECOVERY'
+      );
+    }
+
+    await releaseConnectCreationClaim({ userId: params.userId, lockId, clearCreationKey: true });
+    const classified = classifyStripeError(error);
+    if (
+      classified.category === 'configuration_unavailable' ||
+      classified.category === 'service_unavailable'
+    ) {
+      throw new ServiceUnavailableError(classified.safeMessage, classified.code);
+    }
+    throw new BadRequestError(
+      classified.safeMessage || 'Could not create Stripe connected account. Please try again later.',
+      classified.code || 'STRIPE_ACCOUNT_CREATION_FAILED'
+    );
+  }
+}
+
+/**
+ * Creates or continues Stripe onboarding via an Account Link.
+ * Serializes concurrent initial account creations with a DB lease + durable creationKey,
+ * protects valid or in-flight connected accounts against unsafe self-service `reconnect: true`,
+ * and restricts onboarding countries & redirect origins strictly.
+ */
 export async function createOnboardingLink(
   userId: string,
   returnUrl?: string,
@@ -444,12 +993,18 @@ export async function createOnboardingLink(
     throw new NotFoundError('Organizer user not found');
   }
 
-  if (!env.STRIPE_SECRET_KEY || env.STRIPE_SECRET_KEY === 'sk_test_placeholder') {
+  const effectiveStripeKey = process.env.STRIPE_SECRET_KEY ?? env.STRIPE_SECRET_KEY;
+  if (!effectiveStripeKey || effectiveStripeKey === 'sk_test_placeholder') {
     throw new ServiceUnavailableError(
       'Stripe Connect onboarding is currently unavailable while platform configuration is being completed. Please check back shortly.',
       'STRIPE_CONFIGURATION_UNAVAILABLE'
     );
   }
+
+  const defaultReturnUrl = `${env.CLIENT_URL}/organizer/finance?stripe_return=true`;
+  const defaultRefreshUrl = `${env.CLIENT_URL}/organizer/finance?stripe_refresh=true`;
+  const validatedReturnUrl = validateOnboardingRedirectUrl(returnUrl, 'returnUrl', defaultReturnUrl);
+  const validatedRefreshUrl = validateOnboardingRedirectUrl(refreshUrl, 'refreshUrl', defaultRefreshUrl);
 
   if (country !== undefined) {
     const normalizedCountry = country.trim().toUpperCase();
@@ -463,15 +1018,10 @@ export async function createOnboardingLink(
 
   let accountId = user.stripeAccountId;
 
-  // Create a new Express connected account if one does not exist or if explicitly requested to reconnect
-  if (!accountId || reconnect === true) {
-    // Determine authoritative country for the new account:
-    // 1. Explicitly supplied country parameter
-    // 2. Previously persisted country (for reconnections)
-    // 3. Fallback to default platform country (US)
+  if (!accountId) {
     const targetCountry = country
       ? country.trim().toUpperCase()
-      : (reconnect === true && user.stripeAccountCountry) || DEFAULT_STRIPE_CONNECT_COUNTRY;
+      : DEFAULT_STRIPE_CONNECT_COUNTRY;
 
     if (!isStripeExpressCountrySupported(targetCountry)) {
       throw new BadRequestError(
@@ -480,64 +1030,76 @@ export async function createOnboardingLink(
       );
     }
 
-    try {
-      const account = await stripe.accounts.create({
-        type: 'express',
-        country: targetCountry,
-        email: user.email,
-        capabilities: {
-          card_payments: { requested: true },
-          transfers: { requested: true },
-        },
-        business_type: 'individual',
-        metadata: {
-          userId: user.id,
-          platform: 'outside.vip',
-        },
-      });
+    const provisioned = await provisionConnectExpressAccountSafely({
+      userId: user.id,
+      userEmail: user.email,
+      targetCountry,
+    });
+    accountId = provisioned.accountId;
+  } else if (reconnect === true) {
+    // Guard reconnect: true so valid, funded, or in-flight connected accounts cannot be
+    // silently replaced or orphaned via self-service onboarding.
+    const pendingTransfer = await prisma.organizerTransfer.findFirst({
+      where: {
+        organizerId: user.id,
+        status: TransferStatus.PENDING,
+      },
+      select: { id: true, transferNumber: true },
+    });
 
-      accountId = account.id;
-
-      await prisma.user.update({
-        where: { id: user.id },
-        data: {
-          stripeAccountId: accountId,
-          stripeAccountCountry: targetCountry,
-        },
-      });
-    } catch (error: any) {
-      logStripeDiagnostic('createOnboardingLink.accounts.create', error, {
-        userId,
-        country: targetCountry,
-      });
-
-      if (
-        error?.code === 'country_unsupported' ||
-        error?.param === 'country' ||
-        error?.raw?.code === 'country_unsupported' ||
-        /country.*unsupported|country is not supported/i.test(error?.message || '')
-      ) {
-        throw new BadRequestError(
-          `Stripe does not currently support Express accounts in ${targetCountry}. Please select another country.`,
-          'STRIPE_COUNTRY_UNSUPPORTED'
-        );
-      }
-
-      const classified = classifyStripeError(error);
-      if (classified.category === 'configuration_unavailable') {
-        throw new ServiceUnavailableError(classified.safeMessage, classified.code);
-      }
-      if (classified.category === 'service_unavailable') {
-        throw new ServiceUnavailableError(classified.safeMessage, classified.code);
-      }
-      throw new BadRequestError(
-        classified.safeMessage || 'Could not create Stripe connected account. Please try again later.',
-        classified.code || 'STRIPE_ACCOUNT_CREATION_FAILED'
+    if (pendingTransfer) {
+      throw new ConflictError(
+        `Cannot replace your Stripe account while transfer #${pendingTransfer.transferNumber} is still pending verification.`,
+        'TRANSFER_RECONCILIATION_PENDING'
       );
     }
+
+    let existingAccessible = false;
+    try {
+      await stripe.accounts.retrieve(accountId);
+      existingAccessible = true;
+    } catch (retrieveErr: any) {
+      const classified = classifyStripeError(retrieveErr);
+      if (classified.category !== 'invalid_or_inaccessible') {
+        if (
+          classified.category === 'configuration_unavailable' ||
+          classified.category === 'service_unavailable'
+        ) {
+          throw new ServiceUnavailableError(classified.safeMessage, classified.code);
+        }
+        throw new BadRequestError(classified.safeMessage, classified.code);
+      }
+    }
+
+    if (existingAccessible) {
+      throw new BadRequestError(
+        'Your connected Stripe Express account is still active and accessible. Self-service replacement is disabled to protect your payout history; contact support/admin if replacement is required.',
+        'RECONNECT_NOT_ALLOWED'
+      );
+    }
+
+    const targetCountry = country
+      ? country.trim().toUpperCase()
+      : user.stripeAccountCountry && isStripeExpressCountrySupported(user.stripeAccountCountry)
+        ? user.stripeAccountCountry
+        : DEFAULT_STRIPE_CONNECT_COUNTRY;
+
+    if (!isStripeExpressCountrySupported(targetCountry)) {
+      throw new BadRequestError(
+        `Country '${targetCountry}' is not supported for Stripe Connect Express onboarding on this platform. Please select an eligible country.`,
+        'UNSUPPORTED_COUNTRY'
+      );
+    }
+
+    const provisioned = await provisionConnectExpressAccountSafely({
+      userId: user.id,
+      userEmail: user.email,
+      targetCountry,
+      allowReplacePreviousAccountId: accountId,
+    });
+    accountId = provisioned.accountId;
   } else {
     // Existing connected account: retain original country without recreating
-    // If stripeAccountCountry was not previously stored, retrieve and cache from Stripe
     if (!user.stripeAccountCountry) {
       try {
         const existingAccount = await stripe.accounts.retrieve(accountId);
@@ -553,14 +1115,11 @@ export async function createOnboardingLink(
     }
   }
 
-  const baseReturn = returnUrl || `${env.CLIENT_URL}/organizer/finance?stripe_return=true`;
-  const baseRefresh = refreshUrl || `${env.CLIENT_URL}/organizer/finance?stripe_refresh=true`;
-
   try {
     const accountLink = await stripe.accountLinks.create({
       account: accountId,
-      refresh_url: baseRefresh,
-      return_url: baseReturn,
+      refresh_url: validatedRefreshUrl,
+      return_url: validatedReturnUrl,
       type: 'account_onboarding',
     });
 
@@ -596,6 +1155,103 @@ export async function createOnboardingLink(
       'ONBOARDING_LINK_FAILED'
     );
   }
+}
+
+/**
+ * Explicit admin-audited workflow to replace an organizer's connected Stripe Express account
+ * while preserving all historical OrganizerTransfer and ConnectedPayout records.
+ */
+export async function adminReplaceConnectedAccount(params: {
+  adminUserId: string;
+  adminEmail: string;
+  organizerId: string;
+  country?: string;
+  reason: string;
+  ipAddress?: string;
+}): Promise<{
+  organizerId: string;
+  previousStripeAccountId: string | null;
+  newStripeAccountId: string;
+  onboardingUrl: string;
+}> {
+  const organizer = await prisma.user.findUnique({
+    where: { id: params.organizerId },
+    select: {
+      id: true,
+      email: true,
+      stripeAccountId: true,
+      stripeAccountCountry: true,
+    },
+  });
+
+  if (!organizer) {
+    throw new NotFoundError('Organizer user not found');
+  }
+
+  const pendingTransfer = await prisma.organizerTransfer.findFirst({
+    where: {
+      organizerId: organizer.id,
+      status: TransferStatus.PENDING,
+    },
+    select: { id: true, transferNumber: true },
+  });
+
+  if (pendingTransfer) {
+    throw new ConflictError(
+      `Cannot replace connected account while transfer #${pendingTransfer.transferNumber} is still pending reconciliation.`,
+      'TRANSFER_RECONCILIATION_PENDING'
+    );
+  }
+
+  const targetCountry = params.country
+    ? params.country.trim().toUpperCase()
+    : organizer.stripeAccountCountry && isStripeExpressCountrySupported(organizer.stripeAccountCountry)
+      ? organizer.stripeAccountCountry
+      : DEFAULT_STRIPE_CONNECT_COUNTRY;
+
+  if (!isStripeExpressCountrySupported(targetCountry)) {
+    throw new BadRequestError(
+      `Country '${targetCountry}' is not supported for Stripe Connect Express onboarding.`,
+      'UNSUPPORTED_COUNTRY'
+    );
+  }
+
+  const previousStripeAccountId = organizer.stripeAccountId;
+  const provisioned = await provisionConnectExpressAccountSafely({
+    userId: organizer.id,
+    userEmail: organizer.email,
+    targetCountry,
+    allowReplacePreviousAccountId: previousStripeAccountId,
+  });
+
+  const accountLink = await stripe.accountLinks.create({
+    account: provisioned.accountId,
+    refresh_url: `${env.CLIENT_URL}/organizer/finance?stripe_refresh=true`,
+    return_url: `${env.CLIENT_URL}/organizer/finance?stripe_return=true`,
+    type: 'account_onboarding',
+  });
+
+  await recordAdminAuditLog({
+    actorUserId: params.adminUserId,
+    actorEmail: params.adminEmail,
+    action: 'ADMIN_CONNECT_ACCOUNT_REPLACED',
+    targetType: 'User',
+    targetId: organizer.id,
+    metadata: {
+      previousStripeAccountId,
+      newStripeAccountId: provisioned.accountId,
+      country: provisioned.resolvedCountry,
+      reason: params.reason,
+    },
+    ipAddress: params.ipAddress,
+  });
+
+  return {
+    organizerId: organizer.id,
+    previousStripeAccountId,
+    newStripeAccountId: provisioned.accountId,
+    onboardingUrl: accountLink.url,
+  };
 }
 
 /**
@@ -775,7 +1431,8 @@ export async function getConnectedAccountPayouts(
     return { payouts: [] };
   }
 
-  if (!env.STRIPE_SECRET_KEY || env.STRIPE_SECRET_KEY === 'sk_test_placeholder') {
+  const effectiveStripeKey = (process.env.STRIPE_SECRET_KEY ?? env.STRIPE_SECRET_KEY ?? '').trim();
+  if (!effectiveStripeKey || effectiveStripeKey === 'sk_test_placeholder') {
     return { payouts: [] };
   }
 
@@ -799,6 +1456,42 @@ export async function getConnectedAccountPayouts(
       failureCode: p.failure_code || null,
       failureMessage: p.failure_message || null,
     }));
+
+    // Reconcile delayed/missed payout.* webhooks into local ConnectedPayout snapshots
+    if (typeof (prisma as any)?.connectedPayout?.upsert === 'function') {
+      for (const p of payouts.data) {
+        let localStatus: PayoutStatus = PayoutStatus.PENDING;
+        if (p.status === 'paid') {
+          localStatus = PayoutStatus.PAID;
+        } else if (p.status === 'failed') {
+          localStatus = PayoutStatus.FAILED;
+        } else if (p.status === 'canceled') {
+          localStatus = PayoutStatus.CANCELLED;
+        }
+
+        const arrivalDate = p.arrival_date ? new Date(p.arrival_date * 1000) : null;
+        await prisma.connectedPayout.upsert({
+          where: { stripePayoutId: p.id },
+          update: {
+            status: localStatus,
+            arrivalDate,
+            failureCode: p.failure_code || null,
+            failureMessage: p.failure_message || null,
+          },
+          create: {
+            stripePayoutId: p.id,
+            organizerId: userId,
+            stripeAccountId: user.stripeAccountId,
+            amountInCents: p.amount,
+            currency: p.currency.toUpperCase(),
+            status: localStatus,
+            arrivalDate,
+            failureCode: p.failure_code || null,
+            failureMessage: p.failure_message || null,
+          },
+        });
+      }
+    }
 
     return { payouts: sanitized };
   } catch (error: any) {
@@ -830,21 +1523,216 @@ export async function getConnectedAccountPayouts(
   }
 }
 
+interface OrganizerDisputeOwnership {
+  orderIds: Set<string>;
+  disputeIds: Set<string>;
+  chargeIds: Set<string>;
+  paymentIntentIds: Set<string>;
+}
+
+function sanitizeDisputeItem(d: Stripe.Dispute): SanitizedDisputeItem {
+  return {
+    id: d.id,
+    amount: d.amount,
+    currency: d.currency.toUpperCase(),
+    status: d.status,
+    reason: d.reason,
+    created: new Date(d.created * 1000).toISOString(),
+    dueBy: d.evidence_details?.due_by
+      ? new Date(d.evidence_details.due_by * 1000).toISOString()
+      : null,
+    isChargeRefundable: Boolean(d.is_charge_refundable),
+  };
+}
+
+function addNonEmptyIdentifier(target: Set<string>, value: unknown): void {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (trimmed) {
+      target.add(trimmed);
+    }
+  }
+}
+
+async function resolveOrganizerDisputeOwnership(
+  userId: string
+): Promise<OrganizerDisputeOwnership> {
+  const [ownedOrders, organizerLedgerEntries] = await Promise.all([
+    prisma.order.findMany({
+      where: { event: { organizerId: userId } },
+      select: {
+        id: true,
+        paymentReference: true,
+        stripeSettledChargeId: true,
+        transactions: {
+          select: {
+            providerTransactionId: true,
+            rawResponse: true,
+          },
+        },
+        refunds: {
+          select: {
+            stripePaymentIntentId: true,
+            stripeChargeId: true,
+          },
+        },
+      },
+    }),
+    prisma.financialLedgerEntry.findMany({
+      where: {
+        organizerId: userId,
+        stripeReferenceId: { not: null },
+      },
+      select: {
+        type: true,
+        orderId: true,
+        stripeReferenceId: true,
+        metadata: true,
+      },
+    }),
+  ]);
+
+  const orderIds = new Set<string>();
+  const disputeIds = new Set<string>();
+  const chargeIds = new Set<string>();
+  const paymentIntentIds = new Set<string>();
+
+  for (const order of ownedOrders) {
+    addNonEmptyIdentifier(orderIds, order.id);
+    addNonEmptyIdentifier(paymentIntentIds, order.paymentReference);
+    addNonEmptyIdentifier(chargeIds, order.stripeSettledChargeId);
+
+    for (const tx of order.transactions) {
+      const ref = tx.providerTransactionId?.trim();
+      if (ref) {
+        if (ref.startsWith('ch_')) {
+          chargeIds.add(ref);
+        } else if (ref.startsWith('pi_')) {
+          paymentIntentIds.add(ref);
+        } else {
+          // Support synthetic non-prefixed transaction IDs in tests
+          chargeIds.add(ref);
+          paymentIntentIds.add(ref);
+        }
+      }
+
+      if (tx.rawResponse && typeof tx.rawResponse === 'object' && !Array.isArray(tx.rawResponse)) {
+        const latestCharge = (tx.rawResponse as Record<string, unknown>).latest_charge;
+        if (typeof latestCharge === 'string') {
+          addNonEmptyIdentifier(chargeIds, latestCharge);
+        } else if (
+          latestCharge &&
+          typeof latestCharge === 'object' &&
+          typeof (latestCharge as Record<string, unknown>).id === 'string'
+        ) {
+          addNonEmptyIdentifier(chargeIds, (latestCharge as Record<string, unknown>).id);
+        }
+      }
+    }
+
+    for (const refund of order.refunds) {
+      addNonEmptyIdentifier(paymentIntentIds, refund.stripePaymentIntentId);
+      addNonEmptyIdentifier(chargeIds, refund.stripeChargeId);
+    }
+  }
+
+  for (const entry of organizerLedgerEntries) {
+    addNonEmptyIdentifier(orderIds, entry.orderId);
+    const ref = entry.stripeReferenceId?.trim();
+
+    if (
+      entry.type === LedgerEntryType.DISPUTE_HOLD ||
+      entry.type === LedgerEntryType.DISPUTE_WON ||
+      entry.type === LedgerEntryType.DISPUTE_LOST
+    ) {
+      if (ref) {
+        disputeIds.add(ref);
+      }
+      if (entry.metadata && typeof entry.metadata === 'object' && !Array.isArray(entry.metadata)) {
+        addNonEmptyIdentifier(chargeIds, (entry.metadata as Record<string, unknown>).stripeChargeId);
+      }
+    } else if (ref) {
+      if (ref.startsWith('ch_')) {
+        chargeIds.add(ref);
+      } else if (ref.startsWith('pi_')) {
+        paymentIntentIds.add(ref);
+      }
+    }
+  }
+
+  return { orderIds, disputeIds, chargeIds, paymentIntentIds };
+}
+
+function doesDisputeBelongToOrganizer(
+  dispute: Stripe.Dispute,
+  ownership: OrganizerDisputeOwnership
+): boolean {
+  if (ownership.disputeIds.has(dispute.id)) {
+    return true;
+  }
+
+  const chargeObj =
+    typeof dispute.charge === 'object' && dispute.charge !== null
+      ? (dispute.charge as Stripe.Charge)
+      : null;
+  const chargeId =
+    typeof dispute.charge === 'string' ? dispute.charge : chargeObj?.id;
+
+  if (chargeId && ownership.chargeIds.has(chargeId)) {
+    return true;
+  }
+
+  const piFromDispute =
+    typeof dispute.payment_intent === 'string'
+      ? dispute.payment_intent
+      : (dispute.payment_intent as Stripe.PaymentIntent | null)?.id;
+  const piFromCharge = chargeObj
+    ? typeof chargeObj.payment_intent === 'string'
+      ? chargeObj.payment_intent
+      : (chargeObj.payment_intent as Stripe.PaymentIntent | null)?.id
+    : undefined;
+  const paymentIntentId = piFromDispute || piFromCharge;
+
+  if (paymentIntentId && ownership.paymentIntentIds.has(paymentIntentId)) {
+    return true;
+  }
+
+  const metaOrderId =
+    dispute.metadata?.orderId || chargeObj?.metadata?.orderId;
+  if (metaOrderId && ownership.orderIds.has(metaOrderId)) {
+    return true;
+  }
+
+  return false;
+}
+
 /**
  * Retrieves disputes associated with ticket sales from the platform Stripe account.
  * Customer charges are created on the Outside.vip platform account (merchant of record),
  * so disputes must be retrieved from the platform Stripe account, NOT the organizer's Express account.
+ * Platform ADMIN receives platform-wide disputes; ORGANIZER accounts receive only disputes
+ * matched via database ownership records and Stripe identifiers.
  */
 export async function getConnectedAccountDisputes(
   userId: string,
-  limit: number = 10
+  limit: number = 10,
+  options?: { isPlatformAdmin?: boolean }
 ): Promise<{ disputes: SanitizedDisputeItem[] }> {
   const user = await prisma.user.findUnique({
     where: { id: userId },
-    select: { stripeAccountId: true },
+    select: { stripeAccountId: true, role: true },
   });
 
-  if (!user || !user.stripeAccountId) {
+  if (!user) {
+    return { disputes: [] };
+  }
+
+  // Require both caller context (when supplied) and authoritative DB role to confirm platform ADMIN
+  const isPlatformAdmin = options
+    ? Boolean(options.isPlatformAdmin && user.role === Role.ADMIN)
+    : user.role === Role.ADMIN;
+
+  if (!isPlatformAdmin && !user.stripeAccountId) {
     return { disputes: [] };
   }
 
@@ -852,26 +1740,70 @@ export async function getConnectedAccountDisputes(
     return { disputes: [] };
   }
 
+  const boundedLimit = Number.isFinite(limit)
+    ? Math.min(Math.max(Math.trunc(limit), 1), 50)
+    : 10;
+
   try {
-    // Platform-level dispute retrieval: Query platform Stripe account without { stripeAccount } header
-    const disputes = await stripe.disputes.list({
-      limit: Math.min(Math.max(limit, 1), 50),
-    });
+    if (isPlatformAdmin) {
+      // Platform-level dispute retrieval: Query platform Stripe account without { stripeAccount } header
+      const disputes = await stripe.disputes.list({
+        limit: boundedLimit,
+      });
 
-    const sanitized: SanitizedDisputeItem[] = disputes.data.map((d) => ({
-      id: d.id,
-      amount: d.amount,
-      currency: d.currency.toUpperCase(),
-      status: d.status,
-      reason: d.reason,
-      created: new Date(d.created * 1000).toISOString(),
-      dueBy: d.evidence_details?.due_by
-        ? new Date(d.evidence_details.due_by * 1000).toISOString()
-        : null,
-      isChargeRefundable: Boolean(d.is_charge_refundable),
-    }));
+      return {
+        disputes: disputes.data.map(sanitizeDisputeItem),
+      };
+    }
 
-    return { disputes: sanitized };
+    const ownership = await resolveOrganizerDisputeOwnership(userId);
+    if (
+      ownership.disputeIds.size === 0 &&
+      ownership.chargeIds.size === 0 &&
+      ownership.paymentIntentIds.size === 0 &&
+      ownership.orderIds.size === 0
+    ) {
+      return { disputes: [] };
+    }
+
+    const matchedDisputes: Stripe.Dispute[] = [];
+    const seenDisputeIds = new Set<string>();
+    let startingAfter: string | undefined;
+    const maxPages = 10;
+    const pageLimit = 100;
+
+    for (let pageIndex = 0; pageIndex < maxPages; pageIndex++) {
+      const page = await stripe.disputes.list({
+        limit: pageLimit,
+        ...(startingAfter ? { starting_after: startingAfter } : {}),
+      });
+
+      for (const dispute of page.data) {
+        if (seenDisputeIds.has(dispute.id)) continue;
+        seenDisputeIds.add(dispute.id);
+
+        if (doesDisputeBelongToOrganizer(dispute, ownership)) {
+          matchedDisputes.push(dispute);
+          if (matchedDisputes.length >= boundedLimit) {
+            break;
+          }
+        }
+      }
+
+      if (
+        matchedDisputes.length >= boundedLimit ||
+        !page.has_more ||
+        page.data.length === 0
+      ) {
+        break;
+      }
+
+      startingAfter = page.data[page.data.length - 1].id;
+    }
+
+    return {
+      disputes: matchedDisputes.map(sanitizeDisputeItem),
+    };
   } catch (error: any) {
     logStripeDiagnostic('getConnectedAccountDisputes', error, {
       userId,
@@ -1003,7 +1935,19 @@ export async function assertStripeReadyForPaidPublishing(
 ): Promise<ConnectedAccountStatusResponse> {
   const status = await getConnectedAccountStatus(organizerId);
 
-  if (status.connected && status.detailsSubmitted && status.transferBalance.enabled) {
+  const countryCompatible =
+    Boolean(status.country) && isStripeExpressCountrySupported(status.country);
+  const currencyCompatible =
+    Boolean(status.defaultCurrency) && isSupportedPlatformCurrency(status.defaultCurrency);
+
+  if (
+    status.connected &&
+    status.detailsSubmitted &&
+    status.payoutsEnabled &&
+    status.transferBalance.enabled &&
+    countryCompatible &&
+    currencyCompatible
+  ) {
     return status;
   }
 
@@ -1024,6 +1968,20 @@ export async function assertStripeReadyForPaidPublishing(
     if (status.requirements.disabledReason) {
       missingItems.push(`Resolve Stripe account restriction (${status.requirements.disabledReason})`);
     }
+    if (!countryCompatible) {
+      missingItems.push(
+        status.country
+          ? `Connected Stripe Express account country (${status.country}) is not supported for USD publishing`
+          : 'Connected Stripe Express account country is missing; US account is required for USD publishing'
+      );
+    }
+    if (!currencyCompatible) {
+      missingItems.push(
+        status.defaultCurrency
+          ? `Connected Stripe Express account currency (${status.defaultCurrency}) must support USD settlements`
+          : 'Connected Stripe Express account currency is missing; USD settlement is required'
+      );
+    }
     for (const req of status.requirements.pastDue) {
       missingItems.push(req.description);
     }
@@ -1032,10 +1990,17 @@ export async function assertStripeReadyForPaidPublishing(
         missingItems.push(req.description);
       }
     }
+    if (!status.payoutsEnabled) {
+      const bankReqMsg =
+        'Link and verify a bank account in Stripe Express so external payouts are enabled before publishing paid events';
+      if (!missingItems.some((m) => m.toLowerCase().includes('bank account'))) {
+        missingItems.push(bankReqMsg);
+      }
+    }
     if (!status.transferBalance.enabled && missingItems.length === 0) {
       missingItems.push(
         status.transferBalance.message ||
-          'Ensure your Stripe Express account transfers capability is active'
+          'Ensure your Stripe Express account transfers and payout capabilities are active'
       );
     }
   }
@@ -1043,7 +2008,7 @@ export async function assertStripeReadyForPaidPublishing(
   const explanation =
     missingItems.length > 0
       ? `Cannot publish paid event until Stripe onboarding is complete. What you need to complete: ${missingItems.join('; ')}. You can still save this event as a draft or publish free events without Stripe onboarding.`
-      : 'Cannot publish paid event: A verified Stripe Connect Express account eligible to receive transfers is required.';
+      : 'Cannot publish paid event: A verified Stripe Connect Express account eligible to receive transfers and bank payouts is required.';
 
   throw new BadRequestError(explanation, 'STRIPE_ONBOARDING_INCOMPLETE');
 }

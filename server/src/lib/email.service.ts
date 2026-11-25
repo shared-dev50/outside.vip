@@ -32,6 +32,7 @@ export interface EmailDeliveryResult {
 
 export class EmailDeliveryError extends ServiceUnavailableError {
   public readonly providerStatusCode: number | null;
+  public readonly providerErrorName: string | null;
   public readonly retryable: boolean;
   public readonly timedOut: boolean;
   public readonly providerDetail?: string;
@@ -41,6 +42,7 @@ export class EmailDeliveryError extends ServiceUnavailableError {
     options?: {
       code?: string;
       providerStatusCode?: number | null;
+      providerErrorName?: string | null;
       retryable?: boolean;
       timedOut?: boolean;
       providerDetail?: string;
@@ -49,6 +51,7 @@ export class EmailDeliveryError extends ServiceUnavailableError {
     super(message, options?.code || 'EMAIL_DELIVERY_FAILED');
     this.name = 'EmailDeliveryError';
     this.providerStatusCode = options?.providerStatusCode ?? null;
+    this.providerErrorName = options?.providerErrorName ?? null;
     this.retryable = options?.retryable ?? false;
     this.timedOut = options?.timedOut ?? false;
     this.providerDetail = options?.providerDetail;
@@ -83,6 +86,184 @@ export const sentLoginOtpEmails: LoginOtpEmailMessage[] = [];
 export const sentStaffInvitationEmails: StaffInvitationEmailMessage[] = [];
 export const sentStaffOtpEmails: StaffOtpEmailMessage[] = [];
 export const sentTeamInvitationEmails: TeamInvitationEmailMessage[] = [];
+export const sentOrderConfirmationEmails: OrderConfirmationEmailMessage[] = [];
+export const sentLatePaymentRefundEmails: LatePaymentRefundEmailMessage[] = [];
+export const sentBuyerRefundEmails: BuyerRefundEmailMessage[] = [];
+export const sentEventCancelledBuyerEmails: EventCancelledBuyerEmailMessage[] = [];
+export const sentEventCancelledOrganizerEmails: EventCancelledOrganizerEmailMessage[] = [];
+
+export const ORDER_CONFIRMATION_TEMPLATE_VERSION = 1;
+export const LATE_PAYMENT_REFUND_TEMPLATE_VERSION = 1;
+export const BUYER_REFUND_TEMPLATE_VERSION = 1;
+export const EVENT_CANCELLED_TEMPLATE_VERSION = 1;
+
+export interface EventCancelledBuyerContentSnapshot {
+  templateVersion: 1;
+  eventId: string;
+  orderId: string;
+  fromEmail: string;
+  orderNumber: string;
+  buyerName: string;
+  eventTitle: string;
+  eventStartAtIso?: string | null;
+  cancelledAtIso: string;
+  cancellationReason: string;
+  ticketCount: number;
+  orderTotalInCents: number;
+  currency: string;
+}
+
+export interface EventCancelledBuyerEmailMessage {
+  to: string;
+  from: string;
+  subject: string;
+  text: string;
+  html: string;
+  eventId: string;
+  orderId: string;
+  orderNumber: string;
+  idempotencyKey: string;
+  templateVersion: number;
+  sentAt: Date;
+}
+
+export interface EventCancelledOrganizerContentSnapshot {
+  templateVersion: 1;
+  eventId: string;
+  fromEmail: string;
+  organizerName: string;
+  eventTitle: string;
+  eventStartAtIso?: string | null;
+  cancelledAtIso: string;
+  actorEmail: string;
+  cancellationReason: string;
+  affectedOrdersCount: number;
+  cancelledPendingOrdersCount: number;
+}
+
+export interface EventCancelledOrganizerEmailMessage {
+  to: string;
+  from: string;
+  subject: string;
+  text: string;
+  html: string;
+  eventId: string;
+  idempotencyKey: string;
+  templateVersion: number;
+  sentAt: Date;
+}
+
+export type BuyerRefundNotificationKind = 'CONFIRMED' | 'MANUAL_REVIEW';
+
+export interface BuyerRefundContentSnapshot {
+  templateVersion: 1;
+  orderRefundId: string;
+  fromEmail: string;
+  orderNumber: string;
+  refundAmountInCents: number;
+  currency: string;
+  buyerName: string;
+  eventTitle: string;
+  ticketCount: number;
+  isPartialRefund: boolean;
+  stripeRefundId?: string | null;
+  confirmedAtIso?: string | null;
+  reasonSummary: string;
+}
+
+export interface BuyerRefundEmailMessage {
+  kind: BuyerRefundNotificationKind;
+  to: string;
+  from: string;
+  subject: string;
+  text: string;
+  html: string;
+  orderNumber: string;
+  orderRefundId: string;
+  idempotencyKey: string;
+  templateVersion: number;
+  sentAt: Date;
+}
+
+export type LatePaymentRefundNotificationKind = 'CONFIRMED' | 'MANUAL_REVIEW';
+
+export interface LatePaymentRefundContentSnapshot {
+  templateVersion: 1;
+  orderRefundId: string;
+  fromEmail: string;
+  orderNumber: string;
+  refundAmountInCents: number;
+  currency: string;
+  buyerName: string;
+  eventTitle: string;
+  stripeRefundId?: string | null;
+  confirmedAtIso?: string | null;
+  reasonSummary: string;
+}
+
+export interface LatePaymentRefundEmailMessage {
+  kind: LatePaymentRefundNotificationKind;
+  to: string;
+  from: string;
+  subject: string;
+  text: string;
+  html: string;
+  orderNumber: string;
+  orderRefundId: string;
+  idempotencyKey: string;
+  templateVersion: number;
+  sentAt: Date;
+}
+
+export interface OrderConfirmationSnapshotItem {
+  tierName: string;
+  quantity: number;
+  unitPriceInCents: number;
+  subtotalInCents: number;
+  currency: string;
+  validityStartAtIso: string | null;
+  validityEndAtIso: string | null;
+}
+
+/**
+ * Immutable fulfillment-time snapshot used to render buyer confirmation emails deterministically
+ * across retries so Resend idempotency payload checks always see an identical message body.
+ * Must NEVER contain bearer tokens (orderAccessToken) or individual QR ticket tokens.
+ */
+export interface OrderConfirmationContentSnapshot {
+  templateVersion: 1;
+  clientOrigin: string;
+  fromEmail: string;
+  orderNumber: string;
+  purchaseDateIso: string;
+  totalInCents: number;
+  currency: string;
+  buyerName: string;
+  eventTitle: string;
+  eventStartAtIso: string;
+  eventEndAtIso: string | null;
+  eventTimezone: string;
+  venueName: string;
+  venueAddress: string;
+  city: string;
+  country: string;
+  organizerName: string;
+  totalTickets: number;
+  items: OrderConfirmationSnapshotItem[];
+}
+
+export interface OrderConfirmationEmailMessage {
+  to: string;
+  from: string;
+  subject: string;
+  text: string;
+  html: string;
+  orderNumber: string;
+  ticketAccessUrl: string;
+  idempotencyKey: string;
+  templateVersion: number;
+  sentAt: Date;
+}
 
 export interface LoginOtpEmailMessage {
   to: string;
@@ -154,6 +335,29 @@ export function resetSentStaffOtpEmails(): void {
   sentStaffOtpEmails.length = 0;
 }
 
+export function resetSentOrderConfirmationEmails(): void {
+  sentOrderConfirmationEmails.length = 0;
+}
+
+export function resetSentBuyerRefundEmails(): void {
+  sentBuyerRefundEmails.length = 0;
+}
+
+export function getLatestOrderConfirmationEmail(
+  email: string
+): OrderConfirmationEmailMessage | undefined {
+  if (getActiveNodeEnv() !== 'test') {
+    return undefined;
+  }
+  const normalized = normalizeEmail(email);
+  for (let i = sentOrderConfirmationEmails.length - 1; i >= 0; i--) {
+    if (normalizeEmail(sentOrderConfirmationEmails[i].to) === normalized) {
+      return sentOrderConfirmationEmails[i];
+    }
+  }
+  return undefined;
+}
+
 export function getLatestVerificationEmail(email: string): VerificationEmailMessage | undefined {
   if (getActiveNodeEnv() !== 'test') {
     return undefined;
@@ -207,10 +411,12 @@ export function getLatestStaffOtpEmail(email: string): StaffOtpEmailMessage | un
 }
 
 export function resolveEmailFrom(): string {
-  const raw = (process.env.EMAIL_FROM ?? env.EMAIL_FROM ?? '')
-    .trim()
-    .replace(/^["']+|["']+$/g, '')
-    .trim();
+  const raw = sanitizeHeaderField(
+    (process.env.EMAIL_FROM ?? env.EMAIL_FROM ?? '')
+      .trim()
+      .replace(/^["']+|["']+$/g, '')
+      .trim()
+  );
   return raw || DEFAULT_EMAIL_FROM;
 }
 
@@ -244,10 +450,13 @@ export function sanitizeEmailLogMessage(raw: string, sensitiveValues: string[] =
   }
   clean = clean.replace(/\bre_[A-Za-z0-9_-]{6,}\b/g, '[REDACTED_API_KEY]');
   clean = clean.replace(/\bBearer\s+[A-Za-z0-9._-]+\b/gi, 'Bearer [REDACTED]');
+  clean = clean.replace(/\boat_[A-Za-z0-9_-]{8,}\b/g, '[REDACTED_ORDER_TOKEN]');
+  clean = clean.replace(/\btkt_sec_[A-Za-z0-9_-]{8,}\b/g, '[REDACTED_TICKET_TOKEN]');
+  clean = clean.replace(/([?&]token=)[^&\s"']+/gi, '$1[REDACTED]');
   return clean.slice(0, 300);
 }
 
-function maskEmailForLog(email: string): string {
+export function maskEmailForLog(email: string): string {
   const atIndex = email.indexOf('@');
   if (atIndex <= 0) return '[redacted-email]';
   const local = email.slice(0, atIndex);
@@ -288,6 +497,7 @@ function classifyProviderError(error: {
   message?: string;
 }): EmailDeliveryError {
   const statusCode = typeof error.statusCode === 'number' ? error.statusCode : null;
+  const providerErrorName = typeof error.name === 'string' && error.name.trim() ? error.name.trim() : null;
   const providerDetail = error.message ? `${error.name || 'error'}: ${error.message}` : error.name;
 
   if (statusCode === 401 || statusCode === 403) {
@@ -296,6 +506,41 @@ function classifyProviderError(error: {
       {
         code: 'EMAIL_PROVIDER_AUTH_FAILED',
         providerStatusCode: statusCode,
+        providerErrorName,
+        retryable: false,
+        providerDetail,
+      }
+    );
+  }
+
+  if (statusCode === 409) {
+    const lowerName = (providerErrorName || '').toLowerCase();
+    const lowerMsg = (error.message || '').toLowerCase();
+    const isConcurrent =
+      lowerName === 'concurrent_idempotent_requests' ||
+      lowerMsg.includes('concurrent') ||
+      lowerMsg.includes('still being processed') ||
+      lowerMsg.includes('in progress');
+
+    if (isConcurrent) {
+      return new EmailDeliveryError(
+        'An identical email request is currently being processed by the provider. Retry later.',
+        {
+          code: 'EMAIL_IDEMPOTENCY_CONCURRENT',
+          providerStatusCode: 409,
+          providerErrorName: providerErrorName || 'concurrent_idempotent_requests',
+          retryable: true,
+          providerDetail,
+        }
+      );
+    }
+
+    return new EmailDeliveryError(
+      'Idempotency key conflict: email payload differs from an earlier request using the same key.',
+      {
+        code: 'EMAIL_IDEMPOTENCY_PAYLOAD_CONFLICT',
+        providerStatusCode: 409,
+        providerErrorName: providerErrorName || 'invalid_idempotent_request',
         retryable: false,
         providerDetail,
       }
@@ -308,6 +553,7 @@ function classifyProviderError(error: {
       {
         code: 'EMAIL_PROVIDER_RATE_LIMITED',
         providerStatusCode: 429,
+        providerErrorName,
         retryable: false,
         providerDetail,
       }
@@ -320,6 +566,7 @@ function classifyProviderError(error: {
       {
         code: 'EMAIL_DELIVERY_REJECTED',
         providerStatusCode: statusCode,
+        providerErrorName,
         retryable: false,
         providerDetail,
       }
@@ -332,6 +579,7 @@ function classifyProviderError(error: {
       {
         code: 'EMAIL_PROVIDER_UNAVAILABLE',
         providerStatusCode: statusCode,
+        providerErrorName,
         retryable: true,
         providerDetail,
       }
@@ -343,6 +591,7 @@ function classifyProviderError(error: {
     {
       code: 'EMAIL_NETWORK_ERROR',
       providerStatusCode: null,
+      providerErrorName,
       retryable: true,
       providerDetail,
     }
@@ -1275,4 +1524,1281 @@ export async function sendLoginOtpEmail(params: {
   }
 
   throw lastError!;
+}
+
+function formatDeterministicDateTime(isoDate: string, timeZone?: string | null): string {
+  const date = new Date(isoDate);
+  if (Number.isNaN(date.getTime())) {
+    return isoDate;
+  }
+  const safeTz = (timeZone || '').trim() || 'UTC';
+  try {
+    return new Intl.DateTimeFormat('en-US', {
+      weekday: 'short',
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+      timeZone: safeTz,
+      timeZoneName: 'short',
+    }).format(date);
+  } catch {
+    return new Intl.DateTimeFormat('en-US', {
+      weekday: 'short',
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+      timeZone: 'UTC',
+      timeZoneName: 'short',
+    }).format(date);
+  }
+}
+
+function formatDeterministicDateRange(
+  startIso: string,
+  endIso?: string | null,
+  timeZone?: string | null
+): string {
+  const startFormatted = formatDeterministicDateTime(startIso, timeZone);
+  if (!endIso) {
+    return startFormatted;
+  }
+  const endFormatted = formatDeterministicDateTime(endIso, timeZone);
+  return `${startFormatted} – ${endFormatted}`;
+}
+
+function formatDeterministicMoney(cents: number, currency: string): string {
+  const safeCurrency = (currency || 'USD').trim().toUpperCase() || 'USD';
+  let formatted: string;
+  try {
+    formatted = new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency: safeCurrency,
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    }).format(cents / 100);
+  } catch {
+    formatted = `${safeCurrency} ${(cents / 100).toFixed(2)}`;
+  }
+  return cents === 0 ? `${formatted} (Free)` : formatted;
+}
+
+/**
+ * Normalizes a client base origin (http/https scheme + host + optional non-root path, no trailing slashes)
+ * for snapshotting at fulfillment time so confirmation URLs stay identical across retries even
+ * if CLIENT_URL changes later. Rejects unsupported protocols or malformed URLs.
+ */
+export function normalizeClientOrigin(rawOrigin?: string | null): string {
+  const candidate = (rawOrigin ?? process.env.CLIENT_URL ?? env.CLIENT_URL ?? 'http://localhost:5173')
+    .trim()
+    .replace(/^["']+|["']+$/g, '')
+    .trim()
+    .replace(/\/+$/, '');
+
+  if (!candidate) {
+    return 'http://localhost:5173';
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(candidate);
+  } catch {
+    throw new Error('Invalid CLIENT_URL: must be a valid http or https URL');
+  }
+
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error(
+      `Unsupported CLIENT_URL protocol "${parsed.protocol}": only http: and https: are allowed`
+    );
+  }
+
+  const cleanPath = parsed.pathname.replace(/\/+$/, '');
+  return `${parsed.origin}${cleanPath}`;
+}
+
+/**
+ * Builds the canonical buyer ticket-access URL reusing the existing /orders/:orderNumber route
+ * and orderAccessToken bearer credential. Prefers the snapshotted clientOrigin when provided so
+ * retries produce identical URLs regardless of subsequent CLIENT_URL changes.
+ * Never includes PII or individual QR ticket tokens.
+ */
+export function buildOrderTicketAccessUrl(
+  orderNumber: string,
+  orderAccessToken: string,
+  clientOrigin?: string | null
+): string {
+  const baseUrl = normalizeClientOrigin(clientOrigin);
+  return `${baseUrl}/orders/${encodeURIComponent(orderNumber)}?token=${encodeURIComponent(orderAccessToken)}`;
+}
+
+/**
+ * Pure deterministic renderer for buyer ticket confirmation emails.
+ * Given an immutable fulfillment snapshot and canonical ticket-access URL, produces identical
+ * subject, plain text, and HTML across retries to satisfy Resend idempotency payload rules.
+ */
+export function renderOrderConfirmationEmail(params: {
+  to: string;
+  from?: string;
+  snapshot: OrderConfirmationContentSnapshot;
+  ticketAccessUrl: string;
+}): {
+  to: string;
+  from: string;
+  subject: string;
+  text: string;
+  html: string;
+} {
+  const { snapshot } = params;
+  const from = sanitizeHeaderField(
+    params.from || snapshot.fromEmail || resolveEmailFrom()
+  );
+  const to = sanitizeHeaderField(normalizeEmail(params.to));
+  const cleanTitle = sanitizeHeaderField(snapshot.eventTitle || 'Outside.vip Event');
+  const cleanOrderNumber = sanitizeHeaderField(snapshot.orderNumber);
+  const cleanBuyerName = sanitizeHeaderField(snapshot.buyerName || 'Attendee') || 'Attendee';
+  const cleanOrganizer = sanitizeHeaderField(snapshot.organizerName || 'Outside.vip');
+  const cleanUrl = params.ticketAccessUrl.trim();
+
+  const eventDateRange = formatDeterministicDateRange(
+    snapshot.eventStartAtIso,
+    snapshot.eventEndAtIso,
+    snapshot.eventTimezone
+  );
+  const purchaseDateFormatted = formatDeterministicDateTime(
+    snapshot.purchaseDateIso,
+    snapshot.eventTimezone
+  );
+  const totalFormatted = formatDeterministicMoney(snapshot.totalInCents, snapshot.currency);
+
+  const venueParts = [
+    snapshot.venueName,
+    snapshot.venueAddress,
+    snapshot.city,
+    snapshot.country,
+  ]
+    .map((p) => (p || '').trim())
+    .filter(Boolean);
+  const venueSummary = venueParts.join(', ') || 'See event page for venue details';
+
+  const subject = sanitizeHeaderField(
+    `Your tickets for ${cleanTitle} — Order #${cleanOrderNumber}`
+  );
+
+  const ticketLinesText: string[] = [];
+  const ticketRowsHtml: string[] = [];
+
+  for (const item of snapshot.items) {
+    const tierName = sanitizeHeaderField(item.tierName || 'Ticket Pass');
+    const qty = item.quantity;
+    const subtotalStr = formatDeterministicMoney(item.subtotalInCents, item.currency || snapshot.currency);
+    const hasCustomValidity = Boolean(item.validityStartAtIso || item.validityEndAtIso);
+    const validityLabel = hasCustomValidity
+      ? formatDeterministicDateRange(
+          item.validityStartAtIso || snapshot.eventStartAtIso,
+          item.validityEndAtIso || snapshot.eventEndAtIso,
+          snapshot.eventTimezone
+        )
+      : eventDateRange;
+
+    ticketLinesText.push(
+      `- ${qty}x ${tierName} (${subtotalStr})` +
+        (hasCustomValidity ? `\n  Entry validity: ${validityLabel}` : '')
+    );
+
+    ticketRowsHtml.push(`
+      <tr>
+        <td style="padding: 12px 0; border-bottom: 1px solid #22222A; vertical-align: top;">
+          <div style="font-size: 14px; font-weight: 600; color: #FFFFFF;">${escapeHtml(String(qty))} &times; ${escapeHtml(tierName)}</div>
+          <div style="font-size: 12px; color: #8E8E99; margin-top: 4px;">
+            Entry validity: ${escapeHtml(validityLabel)}
+          </div>
+        </td>
+        <td align="right" style="padding: 12px 0; border-bottom: 1px solid #22222A; vertical-align: top; font-size: 14px; font-weight: 600; color: #F5F5F7; white-space: nowrap;">
+          ${escapeHtml(subtotalStr)}
+        </td>
+      </tr>
+    `.trim());
+  }
+
+  const ticketPlural = snapshot.totalTickets === 1 ? 'ticket' : 'tickets';
+
+  const text = [
+    `Hi ${cleanBuyerName},`,
+    '',
+    `Your order is confirmed! Thank you for purchasing ${snapshot.totalTickets} ${ticketPlural} for "${cleanTitle}" on Outside.vip.`,
+    '',
+    `ORDER SUMMARY`,
+    `Order Reference: #${cleanOrderNumber}`,
+    `Purchase Date: ${purchaseDateFormatted}`,
+    `Total Paid: ${totalFormatted}`,
+    '',
+    `EVENT DETAILS`,
+    `Event: ${cleanTitle}`,
+    `Organizer: ${cleanOrganizer}`,
+    `Date & Time: ${eventDateRange}`,
+    `Location: ${venueSummary}`,
+    '',
+    `YOUR TICKETS (${snapshot.totalTickets})`,
+    ...ticketLinesText,
+    '',
+    `HOW TO ACCESS YOUR TICKETS`,
+    `Open your private ticket link below to view your QR passes on your phone or download printable PDF passes for entry:`,
+    cleanUrl,
+    '',
+    `Keep this link private — anyone with this link can view and download your passes.`,
+    '',
+    `Outside.vip`,
+  ].join('\n');
+
+  const escapedBuyerName = escapeHtml(cleanBuyerName);
+  const escapedTitle = escapeHtml(cleanTitle);
+  const escapedOrderNumber = escapeHtml(cleanOrderNumber);
+  const escapedPurchaseDate = escapeHtml(purchaseDateFormatted);
+  const escapedTotal = escapeHtml(totalFormatted);
+  const escapedOrganizer = escapeHtml(cleanOrganizer);
+  const escapedEventDate = escapeHtml(eventDateRange);
+  const escapedVenue = escapeHtml(venueSummary);
+  const escapedUrl = escapeHtml(cleanUrl);
+  const escapedTotalTickets = escapeHtml(String(snapshot.totalTickets));
+
+  const html = `<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en">
+  <head>
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>${escapedTitle} - Order #${escapedOrderNumber}</title>
+  </head>
+  <body style="margin: 0; padding: 24px; background-color: #0A0A0C; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #F5F5F7;">
+    <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="max-width: 580px; margin: 0 auto; background: #121216; border: 1px solid #22222A; border-radius: 16px; overflow: hidden;">
+      <tr>
+        <td style="padding: 32px;">
+          <p style="font-size: 11px; text-transform: uppercase; letter-spacing: 0.14em; color: #FF5500; font-weight: 700; margin: 0 0 10px 0;">Outside.vip Order Confirmation</p>
+          <h1 style="font-size: 24px; font-weight: 700; margin: 0 0 12px 0; color: #FFFFFF; line-height: 1.3;">Your tickets are confirmed</h1>
+          <p style="font-size: 15px; line-height: 1.6; color: #B8B8C2; margin: 0 0 24px 0;">
+            Hi <strong style="color: #FFFFFF;">${escapedBuyerName}</strong>, your purchase of <strong style="color: #FFFFFF;">${escapedTotalTickets} ${ticketPlural}</strong> for <strong style="color: #FFFFFF;">${escapedTitle}</strong> is confirmed.
+          </p>
+
+          <!-- Primary CTA Button -->
+          <table role="presentation" border="0" cellpadding="0" cellspacing="0" style="margin: 0 auto 28px auto;">
+            <tr>
+              <td align="center" bgcolor="#FF5500" style="border-radius: 10px;">
+                <a href="${escapedUrl}" target="_blank" rel="noopener noreferrer" style="font-size: 15px; font-weight: 600; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: #FFFFFF; text-decoration: none; padding: 14px 32px; border-radius: 10px; border: 1px solid #FF5500; display: inline-block; mso-padding-alt: 0;">
+                  <!--[if mso]><i style="letter-spacing: 32px; mso-font-width: -100%; mso-text-raise: 20pt">&nbsp;</i><![endif]-->
+                  <span style="mso-text-raise: 10pt; font-weight: 600; color: #FFFFFF;">View &amp; Download Tickets</span>
+                  <!--[if mso]><i style="letter-spacing: 32px; mso-font-width: -100%">&nbsp;</i><![endif]-->
+                </a>
+              </td>
+            </tr>
+          </table>
+
+          <!-- Event Details Card -->
+          <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="background: #18181F; border: 1px solid #262630; border-radius: 12px; margin-bottom: 20px;">
+            <tr>
+              <td style="padding: 18px 20px;">
+                <p style="font-size: 11px; text-transform: uppercase; letter-spacing: 0.12em; color: #8E8E99; font-weight: 700; margin: 0 0 8px 0;">Event Details</p>
+                <p style="font-size: 16px; font-weight: 700; color: #FFFFFF; margin: 0 0 6px 0;">${escapedTitle}</p>
+                <p style="font-size: 13px; color: #B8B8C2; margin: 0 0 4px 0;"><strong style="color: #E5E5EC;">Presented by:</strong> ${escapedOrganizer}</p>
+                <p style="font-size: 13px; color: #B8B8C2; margin: 0 0 4px 0;"><strong style="color: #E5E5EC;">When:</strong> ${escapedEventDate}</p>
+                <p style="font-size: 13px; color: #B8B8C2; margin: 0;"><strong style="color: #E5E5EC;">Where:</strong> ${escapedVenue}</p>
+              </td>
+            </tr>
+          </table>
+
+          <!-- Order & Ticket Breakdown -->
+          <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="margin-bottom: 20px;">
+            <tr>
+              <td style="padding-bottom: 8px;">
+                <p style="font-size: 11px; text-transform: uppercase; letter-spacing: 0.12em; color: #8E8E99; font-weight: 700; margin: 0;">Order Summary</p>
+              </td>
+            </tr>
+            <tr>
+              <td style="font-size: 13px; color: #B8B8C2; padding-bottom: 12px;">
+                Order <strong style="color: #FFFFFF; font-family: monospace;">#${escapedOrderNumber}</strong> &middot; Purchased ${escapedPurchaseDate}
+              </td>
+            </tr>
+            <tr>
+              <td>
+                <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%">
+                  ${ticketRowsHtml.join('\n')}
+                  <tr>
+                    <td style="padding: 14px 0 4px 0; font-size: 14px; font-weight: 700; color: #FFFFFF;">Total Paid</td>
+                    <td align="right" style="padding: 14px 0 4px 0; font-size: 16px; font-weight: 700; color: #FF5500; white-space: nowrap;">${escapedTotal}</td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+          </table>
+
+          <!-- Retrieval Instructions -->
+          <div style="border-top: 1px solid #22222A; padding-top: 20px; margin-top: 8px;">
+            <p style="font-size: 13px; line-height: 1.6; color: #B8B8C2; margin: 0 0 12px 0;">
+              <strong style="color: #FFFFFF;">How to use your tickets:</strong> Click the button above anytime to view your QR passes on your phone for scanning at the door or download PDF passes for offline access.
+            </p>
+            <p style="font-size: 12px; line-height: 1.5; color: #8E8E99; margin: 0 0 14px 0;">
+              Keep this link private &mdash; anyone with this link can view and download your passes.
+            </p>
+            <p style="font-size: 12px; line-height: 1.5; color: #6E6E78; margin: 0;">
+              If the button above does not work, copy and paste this secure link into your browser:<br />
+              <a href="${escapedUrl}" target="_blank" rel="noopener noreferrer" style="color: #FF5500; text-decoration: underline; word-break: break-all; font-size: 12px; display: inline-block; margin-top: 4px;">${escapedUrl}</a>
+            </p>
+          </div>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>`.trim();
+
+  return { to, from, subject, text, html };
+}
+
+/**
+ * Dispatches a single attempt of a buyer ticket confirmation email via Resend.
+ * Intentionally performs NO inline retries: durable retries, exponential backoff, and
+ * lease management are owned by the PostgreSQL EmailOutbox worker.
+ *
+ * A resolved result indicates provider acceptance (Resend HTTP 200), not confirmed inbox delivery.
+ */
+export async function sendOrderConfirmationEmail(params: {
+  to: string;
+  snapshot: OrderConfirmationContentSnapshot;
+  ticketAccessUrl: string;
+  orderAccessToken: string;
+  idempotencyKey: string;
+}): Promise<EmailDeliveryResult> {
+  const rendered = renderOrderConfirmationEmail({
+    to: params.to,
+    from: params.snapshot.fromEmail,
+    snapshot: params.snapshot,
+    ticketAccessUrl: params.ticketAccessUrl,
+  });
+
+  const sentAt = new Date();
+  const activeNodeEnv = getActiveNodeEnv();
+  const shouldUseResendInTest = env.NODE_ENV === 'test' && Boolean(testOptions.useResendInTest);
+
+  if (activeNodeEnv === 'test' && !shouldUseResendInTest) {
+    const message: OrderConfirmationEmailMessage = {
+      to: rendered.to,
+      from: rendered.from,
+      subject: rendered.subject,
+      text: rendered.text,
+      html: rendered.html,
+      orderNumber: params.snapshot.orderNumber,
+      ticketAccessUrl: params.ticketAccessUrl,
+      idempotencyKey: params.idempotencyKey,
+      templateVersion: params.snapshot.templateVersion,
+      sentAt,
+    };
+    sentOrderConfirmationEmails.push(message);
+    return {
+      sent: true,
+      status: 'recorded',
+      provider: 'test-recorder',
+      messageId: `test_rec_${crypto.randomUUID()}`,
+      from: rendered.from,
+      to: rendered.to,
+      expiresInMinutes: 0,
+      sentAt,
+    };
+  }
+
+  const resendApiKey = resolveResendApiKey();
+  if (!resendApiKey) {
+    console.error(
+      `[EmailService] Order confirmation email aborted for ${maskEmailForLog(rendered.to)} (order=${params.snapshot.orderNumber}): RESEND_API_KEY is not configured.`
+    );
+    throw new EmailDeliveryError(
+      'Email delivery service is not configured. RESEND_API_KEY is missing.',
+      {
+        code: 'EMAIL_SERVICE_UNCONFIGURED',
+        providerStatusCode: null,
+        retryable: false,
+      }
+    );
+  }
+
+  const resend = new Resend(resendApiKey);
+  const timeoutMs = getEffectiveTimeoutMs();
+  const sensitiveValues = [resendApiKey, params.orderAccessToken, params.ticketAccessUrl];
+
+  try {
+    const { messageId } = await sendSingleResendAttempt({
+      resend,
+      from: rendered.from,
+      to: rendered.to,
+      subject: rendered.subject,
+      text: rendered.text,
+      html: rendered.html,
+      idempotencyKey: params.idempotencyKey,
+      timeoutMs,
+    });
+
+    return {
+      sent: true,
+      status: 'sent',
+      provider: 'resend',
+      messageId,
+      from: rendered.from,
+      to: rendered.to,
+      expiresInMinutes: 0,
+      sentAt,
+    };
+  } catch (err) {
+    const deliveryError =
+      err instanceof EmailDeliveryError
+        ? err
+        : classifyProviderError({ message: err instanceof Error ? err.message : undefined });
+
+    const safeDetail = sanitizeEmailLogMessage(
+      deliveryError.providerDetail || deliveryError.message,
+      sensitiveValues
+    );
+
+    console.error(
+      `[EmailService] Order confirmation dispatch failed for ${maskEmailForLog(rendered.to)} (order=${params.snapshot.orderNumber}, code=${deliveryError.code}, status=${deliveryError.providerStatusCode ?? 'network'}): ${safeDetail}`
+    );
+
+    throw new EmailDeliveryError(deliveryError.message, {
+      code: deliveryError.code,
+      providerStatusCode: deliveryError.providerStatusCode,
+      providerErrorName: deliveryError.providerErrorName,
+      retryable: deliveryError.retryable,
+      timedOut: deliveryError.timedOut,
+      providerDetail: safeDetail,
+    });
+  }
+}
+
+/**
+ * Pure deterministic renderer for late-payment refund notifications.
+ * Produces identical subject/text/HTML across retries for Resend idempotency compliance.
+ */
+export function renderLatePaymentRefundEmail(params: {
+  kind: LatePaymentRefundNotificationKind;
+  to: string;
+  from?: string;
+  snapshot: LatePaymentRefundContentSnapshot;
+}): {
+  to: string;
+  from: string;
+  subject: string;
+  text: string;
+  html: string;
+} {
+  const { kind, snapshot } = params;
+  const from = sanitizeHeaderField(
+    params.from || snapshot.fromEmail || resolveEmailFrom()
+  );
+  const to = sanitizeHeaderField(normalizeEmail(params.to));
+  const cleanTitle = sanitizeHeaderField(snapshot.eventTitle || 'Outside.vip Event');
+  const cleanOrderNumber = sanitizeHeaderField(snapshot.orderNumber || 'N/A');
+  const cleanBuyerName = sanitizeHeaderField(snapshot.buyerName || 'Customer') || 'Customer';
+  const cleanReasonSummary = sanitizeHeaderField(
+    snapshot.reasonSummary ||
+      'Your ticket reservation expired before payment settled and the capacity was no longer available.'
+  );
+  const amountFormatted = formatDeterministicMoney(
+    snapshot.refundAmountInCents,
+    snapshot.currency
+  );
+  const refundRef = snapshot.stripeRefundId
+    ? sanitizeHeaderField(snapshot.stripeRefundId)
+    : null;
+  const confirmedAtFormatted = snapshot.confirmedAtIso
+    ? formatDeterministicDateTime(snapshot.confirmedAtIso, 'UTC')
+    : null;
+
+  if (kind === 'CONFIRMED') {
+    const subject = sanitizeHeaderField(
+      `Refund confirmed for ${cleanTitle} — Order #${cleanOrderNumber}`
+    );
+
+    const text = [
+      `Hi ${cleanBuyerName},`,
+      '',
+      `We were unable to issue tickets for your order #${cleanOrderNumber} (${cleanTitle}) because ${cleanReasonSummary}`,
+      '',
+      `Your full refund has been confirmed:`,
+      `Order Reference: #${cleanOrderNumber}`,
+      `Refund Amount: ${amountFormatted}`,
+      ...(refundRef ? [`Refund Reference: ${refundRef}`] : []),
+      ...(confirmedAtFormatted ? [`Confirmed At: ${confirmedAtFormatted}`] : []),
+      '',
+      `Depending on your bank or card issuer, funds typically appear on your statement within 5–10 business days.`,
+      '',
+      `Outside.vip`,
+    ].join('\n');
+
+    const html = `<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+    <title>${escapeHtml(subject)}</title>
+  </head>
+  <body style="margin: 0; padding: 24px; background-color: #0A0A0C; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #F5F5F7;">
+    <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="max-width: 580px; margin: 0 auto; background: #121216; border: 1px solid #22222A; border-radius: 16px; overflow: hidden;">
+      <tr>
+        <td style="padding: 32px;">
+          <p style="font-size: 11px; text-transform: uppercase; letter-spacing: 0.14em; color: #FF5500; font-weight: 700; margin: 0 0 10px 0;">Outside.vip Refund Confirmation</p>
+          <h1 style="font-size: 24px; font-weight: 700; margin: 0 0 12px 0; color: #FFFFFF; line-height: 1.3;">Your full refund is confirmed</h1>
+          <p style="font-size: 15px; line-height: 1.6; color: #B8B8C2; margin: 0 0 20px 0;">
+            Hi <strong style="color: #FFFFFF;">${escapeHtml(cleanBuyerName)}</strong>, we could not issue tickets for <strong style="color: #FFFFFF;">${escapeHtml(cleanTitle)}</strong> (Order <strong style="color: #FFFFFF;">#${escapeHtml(cleanOrderNumber)}</strong>) because ${escapeHtml(cleanReasonSummary)}
+          </p>
+          <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="background: #18181F; border: 1px solid #262630; border-radius: 12px; margin-bottom: 20px;">
+            <tr>
+              <td style="padding: 18px 20px;">
+                <p style="font-size: 13px; color: #B8B8C2; margin: 0 0 6px 0;"><strong style="color: #FFFFFF;">Refund Amount:</strong> ${escapeHtml(amountFormatted)}</p>
+                <p style="font-size: 13px; color: #B8B8C2; margin: 0 0 6px 0;"><strong style="color: #FFFFFF;">Order Reference:</strong> #${escapeHtml(cleanOrderNumber)}</p>
+                ${refundRef ? `<p style="font-size: 13px; color: #B8B8C2; margin: 0 0 6px 0;"><strong style="color: #FFFFFF;">Refund Reference:</strong> ${escapeHtml(refundRef)}</p>` : ''}
+                ${confirmedAtFormatted ? `<p style="font-size: 13px; color: #B8B8C2; margin: 0;"><strong style="color: #FFFFFF;">Confirmed At:</strong> ${escapeHtml(confirmedAtFormatted)}</p>` : ''}
+              </td>
+            </tr>
+          </table>
+          <p style="font-size: 13px; line-height: 1.6; color: #8E8E99; margin: 0;">
+            Depending on your bank or card issuer, funds typically appear on your statement within 5–10 business days.
+          </p>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>`.trim();
+
+    return { to, from, subject, text, html };
+  }
+
+  const subject = sanitizeHeaderField(
+    `Action in progress on your refund for ${cleanTitle} — Order #${cleanOrderNumber}`
+  );
+
+  const text = [
+    `Hi ${cleanBuyerName},`,
+    '',
+    `We were unable to issue tickets for your order #${cleanOrderNumber} (${cleanTitle}) because ${cleanReasonSummary}`,
+    '',
+    `Our support team has been alerted and is handling your full refund of ${amountFormatted} manually.`,
+    `Order Reference: #${cleanOrderNumber}`,
+    `Expected Refund Amount: ${amountFormatted}`,
+    '',
+    `You do not need to take any action — we will update you once the refund is completed.`,
+    '',
+    `Outside.vip`,
+  ].join('\n');
+
+  const html = `<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+    <title>${escapeHtml(subject)}</title>
+  </head>
+  <body style="margin: 0; padding: 24px; background-color: #0A0A0C; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #F5F5F7;">
+    <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="max-width: 580px; margin: 0 auto; background: #121216; border: 1px solid #22222A; border-radius: 16px; overflow: hidden;">
+      <tr>
+        <td style="padding: 32px;">
+          <p style="font-size: 11px; text-transform: uppercase; letter-spacing: 0.14em; color: #FF5500; font-weight: 700; margin: 0 0 10px 0;">Outside.vip Order &amp; Refund Update</p>
+          <h1 style="font-size: 24px; font-weight: 700; margin: 0 0 12px 0; color: #FFFFFF; line-height: 1.3;">Your refund is being handled by our team</h1>
+          <p style="font-size: 15px; line-height: 1.6; color: #B8B8C2; margin: 0 0 20px 0;">
+            Hi <strong style="color: #FFFFFF;">${escapeHtml(cleanBuyerName)}</strong>, we could not issue tickets for <strong style="color: #FFFFFF;">${escapeHtml(cleanTitle)}</strong> (Order <strong style="color: #FFFFFF;">#${escapeHtml(cleanOrderNumber)}</strong>) because ${escapeHtml(cleanReasonSummary)}
+          </p>
+          <p style="font-size: 14px; line-height: 1.6; color: #B8B8C2; margin: 0 0 16px 0;">
+            Our team has been alerted and is manually processing your full refund of <strong style="color: #FFFFFF;">${escapeHtml(amountFormatted)}</strong>. No action is needed from you.
+          </p>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>`.trim();
+
+  return { to, from, subject, text, html };
+}
+
+export async function sendLatePaymentRefundEmail(params: {
+  kind: LatePaymentRefundNotificationKind;
+  to: string;
+  snapshot: LatePaymentRefundContentSnapshot;
+  idempotencyKey: string;
+}): Promise<EmailDeliveryResult> {
+  const rendered = renderLatePaymentRefundEmail({
+    kind: params.kind,
+    to: params.to,
+    from: params.snapshot.fromEmail,
+    snapshot: params.snapshot,
+  });
+
+  const sentAt = new Date();
+  const activeNodeEnv = getActiveNodeEnv();
+  const shouldUseResendInTest = env.NODE_ENV === 'test' && Boolean(testOptions.useResendInTest);
+
+  if (activeNodeEnv === 'test' && !shouldUseResendInTest) {
+    sentLatePaymentRefundEmails.push({
+      kind: params.kind,
+      to: rendered.to,
+      from: rendered.from,
+      subject: rendered.subject,
+      text: rendered.text,
+      html: rendered.html,
+      orderNumber: params.snapshot.orderNumber,
+      orderRefundId: params.snapshot.orderRefundId,
+      idempotencyKey: params.idempotencyKey,
+      templateVersion: params.snapshot.templateVersion,
+      sentAt,
+    });
+
+    return {
+      sent: true,
+      status: 'recorded',
+      provider: 'test-recorder',
+      messageId: `test_rec_${crypto.randomUUID()}`,
+      from: rendered.from,
+      to: rendered.to,
+      expiresInMinutes: 0,
+      sentAt,
+    };
+  }
+
+  const resendApiKey = resolveResendApiKey();
+  if (!resendApiKey) {
+    throw new EmailDeliveryError(
+      'Email delivery service is not configured. RESEND_API_KEY is missing.',
+      {
+        code: 'EMAIL_SERVICE_UNCONFIGURED',
+        providerStatusCode: null,
+        retryable: false,
+      }
+    );
+  }
+
+  const resend = new Resend(resendApiKey);
+  const timeoutMs = getEffectiveTimeoutMs();
+  const sensitiveValues = [resendApiKey];
+
+  try {
+    const { messageId } = await sendSingleResendAttempt({
+      resend,
+      from: rendered.from,
+      to: rendered.to,
+      subject: rendered.subject,
+      text: rendered.text,
+      html: rendered.html,
+      idempotencyKey: params.idempotencyKey,
+      timeoutMs,
+    });
+
+    return {
+      sent: true,
+      status: 'sent',
+      provider: 'resend',
+      messageId,
+      from: rendered.from,
+      to: rendered.to,
+      expiresInMinutes: 0,
+      sentAt,
+    };
+  } catch (err) {
+    const deliveryError =
+      err instanceof EmailDeliveryError
+        ? err
+        : classifyProviderError({ message: err instanceof Error ? err.message : undefined });
+
+    const safeDetail = sanitizeEmailLogMessage(
+      deliveryError.providerDetail || deliveryError.message,
+      sensitiveValues
+    );
+
+    throw new EmailDeliveryError(deliveryError.message, {
+      code: deliveryError.code,
+      providerStatusCode: deliveryError.providerStatusCode,
+      providerErrorName: deliveryError.providerErrorName,
+      retryable: deliveryError.retryable,
+      timedOut: deliveryError.timedOut,
+      providerDetail: safeDetail,
+    });
+  }
+}
+
+/**
+ * Pure deterministic renderer for organizer/admin ticket-refund notifications.
+ * Confirmation emails only reflect confirmed Stripe refunds; manual-review emails
+ * notify the buyer without claiming completion.
+ */
+export function renderBuyerRefundEmail(params: {
+  kind: BuyerRefundNotificationKind;
+  to: string;
+  from?: string;
+  snapshot: BuyerRefundContentSnapshot;
+}): {
+  to: string;
+  from: string;
+  subject: string;
+  text: string;
+  html: string;
+} {
+  const { kind, snapshot } = params;
+  const from = sanitizeHeaderField(
+    params.from || snapshot.fromEmail || resolveEmailFrom() || DEFAULT_EMAIL_FROM
+  );
+  const to = normalizeEmail(params.to);
+  const cleanTitle = sanitizeHeaderField(snapshot.eventTitle || 'Outside.vip Event');
+  const cleanBuyerName = (snapshot.buyerName || 'Customer').trim() || 'Customer';
+  const cleanOrderNumber = sanitizeHeaderField(snapshot.orderNumber);
+  const cleanReason = (snapshot.reasonSummary || 'requested refund').trim();
+  const amountFormatted = `${(snapshot.refundAmountInCents / 100).toFixed(2)} ${(snapshot.currency || 'USD').toUpperCase()}`;
+  const ticketLabel = snapshot.ticketCount === 1 ? '1 ticket' : `${snapshot.ticketCount} tickets`;
+  const scopeLabel = snapshot.isPartialRefund ? `partial ticket refund (${ticketLabel})` : `refund (${ticketLabel})`;
+
+  if (kind === 'CONFIRMED') {
+    const subject = sanitizeHeaderField(
+      `Refund confirmed for ${cleanTitle} — Order #${cleanOrderNumber}`
+    );
+    const refundRefLine = snapshot.stripeRefundId ? `Stripe Refund Reference: ${snapshot.stripeRefundId}` : '';
+
+    const text = [
+      `Hi ${cleanBuyerName},`,
+      '',
+      `Your ${scopeLabel} of ${amountFormatted} for ${cleanTitle} (Order #${cleanOrderNumber}) has been confirmed.`,
+      refundRefLine,
+      `Reason: ${cleanReason}`,
+      '',
+      'Funds typically appear on your payment statement within 5–10 business days.',
+      '',
+      'Outside.vip',
+    ]
+      .filter(Boolean)
+      .join('\n');
+
+    const html = `<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+    <title>${escapeHtml(subject)}</title>
+  </head>
+  <body style="margin: 0; padding: 24px; background-color: #0A0A0C; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #F5F5F7;">
+    <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="max-width: 580px; margin: 0 auto; background: #121216; border: 1px solid #22222A; border-radius: 16px; overflow: hidden;">
+      <tr>
+        <td style="padding: 32px;">
+          <p style="font-size: 11px; text-transform: uppercase; letter-spacing: 0.14em; color: #22C55E; font-weight: 700; margin: 0 0 10px 0;">Outside.vip Refund Confirmed</p>
+          <h1 style="font-size: 24px; font-weight: 700; margin: 0 0 12px 0; color: #FFFFFF; line-height: 1.3;">Your ticket refund has been confirmed</h1>
+          <p style="font-size: 15px; line-height: 1.6; color: #B8B8C2; margin: 0 0 20px 0;">
+            Hi <strong style="color: #FFFFFF;">${escapeHtml(cleanBuyerName)}</strong>, your ${escapeHtml(scopeLabel)} of <strong style="color: #FFFFFF;">${escapeHtml(amountFormatted)}</strong> for <strong style="color: #FFFFFF;">${escapeHtml(cleanTitle)}</strong> (Order <strong style="color: #FFFFFF;">#${escapeHtml(cleanOrderNumber)}</strong>) has been processed.
+          </p>
+          <p style="font-size: 13px; line-height: 1.6; color: #8E8E99; margin: 0;">
+            Depending on your bank or card issuer, funds typically appear on your statement within 5–10 business days.
+          </p>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>`.trim();
+
+    return { to, from, subject, text, html };
+  }
+
+  const subject = sanitizeHeaderField(
+    `Refund review in progress for ${cleanTitle} — Order #${cleanOrderNumber}`
+  );
+  const text = [
+    `Hi ${cleanBuyerName},`,
+    '',
+    `Your ${scopeLabel} of ${amountFormatted} for ${cleanTitle} (Order #${cleanOrderNumber}) requires manual review by our support team.`,
+    `Reason: ${cleanReason}`,
+    '',
+    'This refund has not yet been confirmed as completed. No action is required from you—we will follow up once resolved.',
+    '',
+    'Outside.vip',
+  ].join('\n');
+
+  const html = `<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+    <title>${escapeHtml(subject)}</title>
+  </head>
+  <body style="margin: 0; padding: 24px; background-color: #0A0A0C; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #F5F5F7;">
+    <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="max-width: 580px; margin: 0 auto; background: #121216; border: 1px solid #22222A; border-radius: 16px; overflow: hidden;">
+      <tr>
+        <td style="padding: 32px;">
+          <p style="font-size: 11px; text-transform: uppercase; letter-spacing: 0.14em; color: #F59E0B; font-weight: 700; margin: 0 0 10px 0;">Outside.vip Refund Update</p>
+          <h1 style="font-size: 24px; font-weight: 700; margin: 0 0 12px 0; color: #FFFFFF; line-height: 1.3;">Your refund is under manual review</h1>
+          <p style="font-size: 15px; line-height: 1.6; color: #B8B8C2; margin: 0 0 20px 0;">
+            Hi <strong style="color: #FFFFFF;">${escapeHtml(cleanBuyerName)}</strong>, your ${escapeHtml(scopeLabel)} of <strong style="color: #FFFFFF;">${escapeHtml(amountFormatted)}</strong> for <strong style="color: #FFFFFF;">${escapeHtml(cleanTitle)}</strong> (Order <strong style="color: #FFFFFF;">#${escapeHtml(cleanOrderNumber)}</strong>) is awaiting manual verification by our support team.
+          </p>
+          <p style="font-size: 13px; line-height: 1.6; color: #8E8E99; margin: 0;">
+            We will send confirmation as soon as processing completes.
+          </p>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>`.trim();
+
+  return { to, from, subject, text, html };
+}
+
+export async function sendBuyerRefundEmail(params: {
+  kind: BuyerRefundNotificationKind;
+  to: string;
+  snapshot: BuyerRefundContentSnapshot;
+  idempotencyKey: string;
+}): Promise<EmailDeliveryResult> {
+  const rendered = renderBuyerRefundEmail({
+    kind: params.kind,
+    to: params.to,
+    from: params.snapshot.fromEmail,
+    snapshot: params.snapshot,
+  });
+
+  const sentAt = new Date();
+  const activeNodeEnv = getActiveNodeEnv();
+  const shouldUseResendInTest = env.NODE_ENV === 'test' && Boolean(testOptions.useResendInTest);
+
+  if (activeNodeEnv === 'test' && !shouldUseResendInTest) {
+    sentBuyerRefundEmails.push({
+      kind: params.kind,
+      to: rendered.to,
+      from: rendered.from,
+      subject: rendered.subject,
+      text: rendered.text,
+      html: rendered.html,
+      orderNumber: params.snapshot.orderNumber,
+      orderRefundId: params.snapshot.orderRefundId,
+      idempotencyKey: params.idempotencyKey,
+      templateVersion: params.snapshot.templateVersion,
+      sentAt,
+    });
+
+    return {
+      sent: true,
+      status: 'recorded',
+      provider: 'test-recorder',
+      messageId: `test_rec_${crypto.randomUUID()}`,
+      from: rendered.from,
+      to: rendered.to,
+      expiresInMinutes: 0,
+      sentAt,
+    };
+  }
+
+  const resendApiKey = resolveResendApiKey();
+  if (!resendApiKey) {
+    throw new EmailDeliveryError(
+      'Email delivery service is not configured. RESEND_API_KEY is missing.',
+      {
+        code: 'EMAIL_SERVICE_UNCONFIGURED',
+        providerStatusCode: null,
+        retryable: false,
+      }
+    );
+  }
+
+  const resend = new Resend(resendApiKey);
+  const timeoutMs = getEffectiveTimeoutMs();
+  const sensitiveValues = [resendApiKey];
+
+  try {
+    const { messageId } = await sendSingleResendAttempt({
+      resend,
+      from: rendered.from,
+      to: rendered.to,
+      subject: rendered.subject,
+      text: rendered.text,
+      html: rendered.html,
+      idempotencyKey: params.idempotencyKey,
+      timeoutMs,
+    });
+
+    return {
+      sent: true,
+      status: 'sent',
+      provider: 'resend',
+      messageId,
+      from: rendered.from,
+      to: rendered.to,
+      expiresInMinutes: 0,
+      sentAt,
+    };
+  } catch (err) {
+    const deliveryError =
+      err instanceof EmailDeliveryError
+        ? err
+        : classifyProviderError({ message: err instanceof Error ? err.message : undefined });
+
+    const safeDetail = sanitizeEmailLogMessage(
+      deliveryError.providerDetail || deliveryError.message,
+      sensitiveValues
+    );
+
+    throw new EmailDeliveryError(deliveryError.message, {
+      code: deliveryError.code,
+      providerStatusCode: deliveryError.providerStatusCode,
+      providerErrorName: deliveryError.providerErrorName,
+      retryable: deliveryError.retryable,
+      timedOut: deliveryError.timedOut,
+      providerDetail: safeDetail,
+    });
+  }
+}
+
+export function renderEventCancelledBuyerEmail(params: {
+  to: string;
+  from?: string;
+  snapshot: EventCancelledBuyerContentSnapshot;
+}): {
+  to: string;
+  from: string;
+  subject: string;
+  text: string;
+  html: string;
+} {
+  const { snapshot } = params;
+  const from = sanitizeHeaderField(
+    params.from || snapshot.fromEmail || resolveEmailFrom() || DEFAULT_EMAIL_FROM
+  );
+  const to = sanitizeHeaderField(normalizeEmail(params.to));
+  const cleanTitle = sanitizeHeaderField(snapshot.eventTitle || 'Outside.vip Event');
+  const cleanBuyerName = (snapshot.buyerName || 'Customer').trim() || 'Customer';
+  const cleanOrderNumber = sanitizeHeaderField(snapshot.orderNumber || 'N/A');
+  const cleanReason = (snapshot.cancellationReason || 'Cancelled by event organizer').trim();
+  const ticketLabel = snapshot.ticketCount === 1 ? '1 ticket' : `${snapshot.ticketCount} tickets`;
+  const paidNotice =
+    snapshot.orderTotalInCents > 0
+      ? `Order Total: ${formatDeterministicMoney(snapshot.orderTotalInCents, snapshot.currency)}`
+      : 'Order Type: Free Registration';
+
+  const subject = sanitizeHeaderField(
+    `Event cancelled: ${cleanTitle} — Order #${cleanOrderNumber}`
+  );
+
+  const text = [
+    `Hi ${cleanBuyerName},`,
+    '',
+    `We are writing to inform you that "${cleanTitle}" has been cancelled.`,
+    `Order Reference: #${cleanOrderNumber} (${ticketLabel})`,
+    paidNotice,
+    `Reason: ${cleanReason}`,
+    '',
+    'Important Notice:',
+    '- Your tickets for this cancelled event are no longer valid for admission.',
+    '- Refunds are NOT issued automatically. Refund requests and payouts are handled manually by the event organizer or Outside.vip support.',
+    snapshot.orderTotalInCents > 0
+      ? '- You will receive a separate refund confirmation email only after a refund is manually initiated and completed.'
+      : '- No payment was charged for your free registration.',
+    '',
+    'Outside.vip',
+  ].join('\n');
+
+  const html = `<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+    <title>${escapeHtml(subject)}</title>
+  </head>
+  <body style="margin: 0; padding: 24px; background-color: #0A0A0C; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #F5F5F7;">
+    <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="max-width: 580px; margin: 0 auto; background: #121216; border: 1px solid #22222A; border-radius: 16px; overflow: hidden;">
+      <tr>
+        <td style="padding: 32px;">
+          <p style="font-size: 11px; text-transform: uppercase; letter-spacing: 0.14em; color: #F43F5E; font-weight: 700; margin: 0 0 10px 0;">Outside.vip Event Update</p>
+          <h1 style="font-size: 24px; font-weight: 700; margin: 0 0 12px 0; color: #FFFFFF; line-height: 1.3;">${escapeHtml(cleanTitle)} has been cancelled</h1>
+          <p style="font-size: 15px; line-height: 1.6; color: #B8B8C2; margin: 0 0 18px 0;">
+            Hi <strong style="color: #FFFFFF;">${escapeHtml(cleanBuyerName)}</strong>, <strong style="color: #FFFFFF;">${escapeHtml(cleanTitle)}</strong> (Order <strong style="color: #FFFFFF;">#${escapeHtml(cleanOrderNumber)}</strong> · ${escapeHtml(ticketLabel)}) has been cancelled.
+          </p>
+          <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="background: #18181F; border: 1px solid #262630; border-radius: 12px; margin-bottom: 18px;">
+            <tr>
+              <td style="padding: 16px 20px;">
+                <p style="font-size: 13px; color: #B8B8C2; margin: 0 0 6px 0;"><strong style="color: #FFFFFF;">Cancellation Reason:</strong> ${escapeHtml(cleanReason)}</p>
+                <p style="font-size: 13px; color: #B8B8C2; margin: 0 0 6px 0;"><strong style="color: #FFFFFF;">Admission Status:</strong> Cancelled — tickets are no longer valid for entry.</p>
+                <p style="font-size: 13px; color: #B8B8C2; margin: 0;"><strong style="color: #FFFFFF;">Refund Policy:</strong> Refunds are handled manually and have not been automatically issued.</p>
+              </td>
+            </tr>
+          </table>
+          <p style="font-size: 13px; line-height: 1.6; color: #8E8E99; margin: 0;">
+            ${snapshot.orderTotalInCents > 0 ? 'You will receive a separate confirmation email once a manual refund has been processed and confirmed.' : 'No payment was charged for this free ticket order.'}
+          </p>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>`.trim();
+
+  return { to, from, subject, text, html };
+}
+
+export async function sendEventCancelledBuyerEmail(params: {
+  to: string;
+  snapshot: EventCancelledBuyerContentSnapshot;
+  idempotencyKey: string;
+}): Promise<EmailDeliveryResult> {
+  const rendered = renderEventCancelledBuyerEmail({
+    to: params.to,
+    from: params.snapshot.fromEmail,
+    snapshot: params.snapshot,
+  });
+
+  const sentAt = new Date();
+  const activeNodeEnv = getActiveNodeEnv();
+  const shouldUseResendInTest = env.NODE_ENV === 'test' && Boolean(testOptions.useResendInTest);
+
+  if (activeNodeEnv === 'test' && !shouldUseResendInTest) {
+    sentEventCancelledBuyerEmails.push({
+      to: rendered.to,
+      from: rendered.from,
+      subject: rendered.subject,
+      text: rendered.text,
+      html: rendered.html,
+      eventId: params.snapshot.eventId,
+      orderId: params.snapshot.orderId,
+      orderNumber: params.snapshot.orderNumber,
+      idempotencyKey: params.idempotencyKey,
+      templateVersion: params.snapshot.templateVersion,
+      sentAt,
+    });
+
+    return {
+      sent: true,
+      status: 'recorded',
+      provider: 'test-recorder',
+      messageId: `test_rec_${crypto.randomUUID()}`,
+      from: rendered.from,
+      to: rendered.to,
+      expiresInMinutes: 0,
+      sentAt,
+    };
+  }
+
+  const resendApiKey = resolveResendApiKey();
+  if (!resendApiKey) {
+    throw new EmailDeliveryError(
+      'Email delivery service is not configured. RESEND_API_KEY is missing.',
+      {
+        code: 'EMAIL_SERVICE_UNCONFIGURED',
+        providerStatusCode: null,
+        retryable: false,
+      }
+    );
+  }
+
+  const resend = new Resend(resendApiKey);
+  const timeoutMs = getEffectiveTimeoutMs();
+  const sensitiveValues = [resendApiKey];
+
+  try {
+    const { messageId } = await sendSingleResendAttempt({
+      resend,
+      from: rendered.from,
+      to: rendered.to,
+      subject: rendered.subject,
+      text: rendered.text,
+      html: rendered.html,
+      idempotencyKey: params.idempotencyKey,
+      timeoutMs,
+    });
+
+    return {
+      sent: true,
+      status: 'sent',
+      provider: 'resend',
+      messageId,
+      from: rendered.from,
+      to: rendered.to,
+      expiresInMinutes: 0,
+      sentAt,
+    };
+  } catch (err) {
+    const deliveryError =
+      err instanceof EmailDeliveryError
+        ? err
+        : classifyProviderError({ message: err instanceof Error ? err.message : undefined });
+
+    const safeDetail = sanitizeEmailLogMessage(
+      deliveryError.providerDetail || deliveryError.message,
+      sensitiveValues
+    );
+
+    throw new EmailDeliveryError(deliveryError.message, {
+      code: deliveryError.code,
+      providerStatusCode: deliveryError.providerStatusCode,
+      providerErrorName: deliveryError.providerErrorName,
+      retryable: deliveryError.retryable,
+      timedOut: deliveryError.timedOut,
+      providerDetail: safeDetail,
+    });
+  }
+}
+
+export function renderEventCancelledOrganizerEmail(params: {
+  to: string;
+  from?: string;
+  snapshot: EventCancelledOrganizerContentSnapshot;
+}): {
+  to: string;
+  from: string;
+  subject: string;
+  text: string;
+  html: string;
+} {
+  const { snapshot } = params;
+  const from = sanitizeHeaderField(
+    params.from || snapshot.fromEmail || resolveEmailFrom() || DEFAULT_EMAIL_FROM
+  );
+  const to = sanitizeHeaderField(normalizeEmail(params.to));
+  const cleanTitle = sanitizeHeaderField(snapshot.eventTitle || 'Outside.vip Event');
+  const cleanOrgName = (snapshot.organizerName || 'Organizer').trim() || 'Organizer';
+  const cleanActor = sanitizeHeaderField(snapshot.actorEmail || 'system');
+  const cleanReason = (snapshot.cancellationReason || 'Cancelled').trim();
+
+  const subject = sanitizeHeaderField(`Event cancelled confirmation: ${cleanTitle}`);
+
+  const text = [
+    `Hi ${cleanOrgName},`,
+    '',
+    `Your event "${cleanTitle}" has been marked as cancelled.`,
+    `Cancelled By: ${cleanActor}`,
+    `Cancelled At: ${formatDeterministicDateTime(snapshot.cancelledAtIso, 'UTC')}`,
+    `Reason: ${cleanReason}`,
+    `Affected Completed Orders: ${snapshot.affectedOrdersCount}`,
+    `Pending Checkouts Released: ${snapshot.cancelledPendingOrdersCount}`,
+    '',
+    'Important Financial & Refund Reminders:',
+    '- Buyer refunds were NOT issued automatically. You must initiate refunds manually per order in your Organizer Orders dashboard.',
+    '- Waitlist offers and active check-in admissions for this event have been disabled.',
+    '- Unsettled and unwithdrawn earnings associated with this cancelled event remain held against withdrawal while refunds are processed.',
+    '',
+    'Outside.vip',
+  ].join('\n');
+
+  const html = `<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+    <title>${escapeHtml(subject)}</title>
+  </head>
+  <body style="margin: 0; padding: 24px; background-color: #0A0A0C; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #F5F5F7;">
+    <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="max-width: 580px; margin: 0 auto; background: #121216; border: 1px solid #22222A; border-radius: 16px; overflow: hidden;">
+      <tr>
+        <td style="padding: 32px;">
+          <p style="font-size: 11px; text-transform: uppercase; letter-spacing: 0.14em; color: #F59E0B; font-weight: 700; margin: 0 0 10px 0;">Outside.vip Organizer Notice</p>
+          <h1 style="font-size: 24px; font-weight: 700; margin: 0 0 12px 0; color: #FFFFFF; line-height: 1.3;">${escapeHtml(cleanTitle)} cancelled</h1>
+          <p style="font-size: 15px; line-height: 1.6; color: #B8B8C2; margin: 0 0 18px 0;">
+            Hi <strong style="color: #FFFFFF;">${escapeHtml(cleanOrgName)}</strong>, your event <strong style="color: #FFFFFF;">${escapeHtml(cleanTitle)}</strong> has been cancelled by <strong style="color: #FFFFFF;">${escapeHtml(cleanActor)}</strong>.
+          </p>
+          <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="background: #18181F; border: 1px solid #262630; border-radius: 12px; margin-bottom: 18px;">
+            <tr>
+              <td style="padding: 16px 20px;">
+                <p style="font-size: 13px; color: #B8B8C2; margin: 0 0 6px 0;"><strong style="color: #FFFFFF;">Reason:</strong> ${escapeHtml(cleanReason)}</p>
+                <p style="font-size: 13px; color: #B8B8C2; margin: 0 0 6px 0;"><strong style="color: #FFFFFF;">Affected Completed Orders:</strong> ${snapshot.affectedOrdersCount}</p>
+                <p style="font-size: 13px; color: #B8B8C2; margin: 0;"><strong style="color: #FFFFFF;">Buyer Refunds:</strong> Manual action required — no automatic refunds were issued.</p>
+              </td>
+            </tr>
+          </table>
+          <p style="font-size: 13px; line-height: 1.6; color: #8E8E99; margin: 0;">
+            Ticket sales, admission scans, and future earnings settlements/withdrawals for this event have been disabled/held. Existing completed orders remain visible in your Orders dashboard for manual refund processing.
+          </p>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>`.trim();
+
+  return { to, from, subject, text, html };
+}
+
+export async function sendEventCancelledOrganizerEmail(params: {
+  to: string;
+  snapshot: EventCancelledOrganizerContentSnapshot;
+  idempotencyKey: string;
+}): Promise<EmailDeliveryResult> {
+  const rendered = renderEventCancelledOrganizerEmail({
+    to: params.to,
+    from: params.snapshot.fromEmail,
+    snapshot: params.snapshot,
+  });
+
+  const sentAt = new Date();
+  const activeNodeEnv = getActiveNodeEnv();
+  const shouldUseResendInTest = env.NODE_ENV === 'test' && Boolean(testOptions.useResendInTest);
+
+  if (activeNodeEnv === 'test' && !shouldUseResendInTest) {
+    sentEventCancelledOrganizerEmails.push({
+      to: rendered.to,
+      from: rendered.from,
+      subject: rendered.subject,
+      text: rendered.text,
+      html: rendered.html,
+      eventId: params.snapshot.eventId,
+      idempotencyKey: params.idempotencyKey,
+      templateVersion: params.snapshot.templateVersion,
+      sentAt,
+    });
+
+    return {
+      sent: true,
+      status: 'recorded',
+      provider: 'test-recorder',
+      messageId: `test_rec_${crypto.randomUUID()}`,
+      from: rendered.from,
+      to: rendered.to,
+      expiresInMinutes: 0,
+      sentAt,
+    };
+  }
+
+  const resendApiKey = resolveResendApiKey();
+  if (!resendApiKey) {
+    throw new EmailDeliveryError(
+      'Email delivery service is not configured. RESEND_API_KEY is missing.',
+      {
+        code: 'EMAIL_SERVICE_UNCONFIGURED',
+        providerStatusCode: null,
+        retryable: false,
+      }
+    );
+  }
+
+  const resend = new Resend(resendApiKey);
+  const timeoutMs = getEffectiveTimeoutMs();
+  const sensitiveValues = [resendApiKey];
+
+  try {
+    const { messageId } = await sendSingleResendAttempt({
+      resend,
+      from: rendered.from,
+      to: rendered.to,
+      subject: rendered.subject,
+      text: rendered.text,
+      html: rendered.html,
+      idempotencyKey: params.idempotencyKey,
+      timeoutMs,
+    });
+
+    return {
+      sent: true,
+      status: 'sent',
+      provider: 'resend',
+      messageId,
+      from: rendered.from,
+      to: rendered.to,
+      expiresInMinutes: 0,
+      sentAt,
+    };
+  } catch (err) {
+    const deliveryError =
+      err instanceof EmailDeliveryError
+        ? err
+        : classifyProviderError({ message: err instanceof Error ? err.message : undefined });
+
+    const safeDetail = sanitizeEmailLogMessage(
+      deliveryError.providerDetail || deliveryError.message,
+      sensitiveValues
+    );
+
+    throw new EmailDeliveryError(deliveryError.message, {
+      code: deliveryError.code,
+      providerStatusCode: deliveryError.providerStatusCode,
+      providerErrorName: deliveryError.providerErrorName,
+      retryable: deliveryError.retryable,
+      timedOut: deliveryError.timedOut,
+      providerDetail: safeDetail,
+    });
+  }
 }

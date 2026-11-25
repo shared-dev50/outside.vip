@@ -64,10 +64,10 @@ describe('Account, Role, Email Verification, Organizer Onboarding & Admin Archit
     seededActiveTierId = validTier ? validTier.id : chosenEvent!.ticketTiers[0].id;
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     resetSentVerificationEmails();
     resetRecordedAdminAuditLogs();
-    resetVerificationRateLimits();
+    await resetVerificationRateLimits();
     vi.restoreAllMocks();
   });
 
@@ -553,6 +553,8 @@ describe('Account, Role, Email Verification, Organizer Onboarding & Admin Archit
     it('6c. Paid event publishing succeeds once Stripe Connect Express account has active transfers and completed onboarding', async () => {
       vi.spyOn(stripe.accounts, 'retrieve').mockResolvedValue({
         id: 'acct_incomplete_test_01',
+        country: 'US',
+        default_currency: 'usd',
         details_submitted: true,
         charges_enabled: true,
         payouts_enabled: true,

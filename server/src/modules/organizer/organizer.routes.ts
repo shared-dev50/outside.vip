@@ -1,8 +1,10 @@
 import { Router } from 'express';
+import { Role } from '@prisma/client';
 import {
   requireAuth,
   requireVerifiedEmail,
   requireFreshUserVerification,
+  requireRole,
 } from '../../middleware/auth.js';
 import {
   getDashboardStats,
@@ -26,6 +28,11 @@ import {
   upsertOrganizerWorkspace,
   getOrganizerOrders,
 } from './organizer.controller.js';
+import {
+  handleGetOrderRefunds,
+  handleInitiateOrderRefund,
+  handlePreviewOrderRefund,
+} from '../refunds/refund.controller.js';
 import { handleGetOrganizerWaitlist } from '../waitlist/waitlist.controller.js';
 import { uploadCoverMiddleware } from '../../middleware/upload.js';
 import { financeRouter } from '../finance/finance.routes.js';
@@ -56,9 +63,29 @@ organizerRouter.post('/upload', uploadCoverMiddleware.single('image'), handleDir
 
 organizerRouter.get('/dashboard', getDashboardStats);
 organizerRouter.get('/orders', getOrganizerOrders);
+organizerRouter.get(
+  '/orders/:orderId/refunds',
+  requireRole(Role.ORGANIZER, Role.ADMIN),
+  handleGetOrderRefunds
+);
+organizerRouter.post(
+  '/orders/:orderId/refunds/preview',
+  requireRole(Role.ORGANIZER, Role.ADMIN),
+  handlePreviewOrderRefund
+);
+organizerRouter.post(
+  '/orders/:orderId/refunds',
+  requireRole(Role.ORGANIZER, Role.ADMIN),
+  handleInitiateOrderRefund
+);
 organizerRouter.post('/earnings-preview', getOrganizerEarningsPreview);
-organizerRouter.get('/payout-details', getOrganizerPayoutDetails);
-organizerRouter.put('/payout-details', requireFreshUserVerification, updateOrganizerPayoutDetails);
+organizerRouter.get('/payout-details', requireRole(Role.ORGANIZER, Role.ADMIN), getOrganizerPayoutDetails);
+organizerRouter.put(
+  '/payout-details',
+  requireFreshUserVerification,
+  requireRole(Role.ORGANIZER, Role.ADMIN),
+  updateOrganizerPayoutDetails
+);
 organizerRouter.get('/events', listOrganizerEvents);
 organizerRouter.post('/events', createOrganizerEvent);
 organizerRouter.get('/events/:id', getOrganizerEventById);
