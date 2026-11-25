@@ -47,6 +47,31 @@ export const changePasswordSchema = z.object({
   newPassword: z.string().min(8, 'New password must be at least 8 characters long'),
 });
 
+export const forgotPasswordSchema = z.object({
+  email: z.string().trim().email('Please provide a valid email address'),
+});
+
+export const validateResetTokenSchema = z.object({
+  token: z.string().trim().min(1, 'Reset token is required'),
+});
+
+export const resetPasswordSchema = z
+  .object({
+    token: z.string().trim().min(1, 'Reset token is required'),
+    newPassword: z
+      .string()
+      .min(8, 'Password must be at least 8 characters long')
+      .max(128, 'Password must be at most 128 characters long'),
+    confirmPassword: z.string().optional(),
+  })
+  .refine(
+    (data) => data.confirmPassword === undefined || data.newPassword === data.confirmPassword,
+    {
+      message: 'Passwords do not match',
+      path: ['confirmPassword'],
+    }
+  );
+
 export const updateUserStatusSchema = z.object({
   status: z.enum(['ACTIVE', 'SUSPENDED', 'DISABLED']),
   reason: z.string().trim().max(500).optional(),
@@ -60,4 +85,7 @@ export type VerifyEmailInput = z.infer<typeof verifyEmailSchema>;
 export type ResendVerificationInput = z.infer<typeof resendVerificationSchema>;
 export type UpdateProfileInput = z.infer<typeof updateProfileSchema>;
 export type ChangePasswordInput = z.infer<typeof changePasswordSchema>;
+export type ForgotPasswordInput = z.infer<typeof forgotPasswordSchema>;
+export type ValidateResetTokenInput = z.infer<typeof validateResetTokenSchema>;
+export type ResetPasswordInput = z.infer<typeof resetPasswordSchema>;
 export type UpdateUserStatusInput = z.infer<typeof updateUserStatusSchema>;

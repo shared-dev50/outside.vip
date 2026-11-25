@@ -734,6 +734,25 @@ export const api = {
         method: 'POST',
         body: JSON.stringify(payload),
       }),
+    forgotPassword: (payload: { email: string }) =>
+      request<{ message: string; expiresInMinutes: number }>('/auth/forgot-password', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }),
+    validateResetToken: (payload: { token: string }) =>
+      request<{ valid: true; expiresInMinutes: number }>('/auth/reset-password/validate', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }),
+    resetPassword: (payload: {
+      token: string;
+      newPassword: string;
+      confirmPassword?: string;
+    }) =>
+      request<{ message: string }>('/auth/reset-password', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }),
     register: (data: { email: string; password: string; name: string; role?: string; organizerDisplayName?: string }) =>
       request<{ user: User; csrfToken?: string; verificationRequired?: boolean }>('/auth/register', {
         method: 'POST',

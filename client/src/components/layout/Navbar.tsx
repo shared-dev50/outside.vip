@@ -28,7 +28,8 @@ export const Navbar: React.FC = () => {
     location.pathname.startsWith('/login') ||
     location.pathname.startsWith('/signin') ||
     location.pathname.startsWith('/register') ||
-    location.pathname.startsWith('/forgot-password');
+    location.pathname.startsWith('/forgot-password') ||
+    location.pathname.startsWith('/reset-password');
 
 
   useEffect(() => {

@@ -93,7 +93,10 @@ export function csrfProtection(req: Request, _res: Response, next: NextFunction)
         requestPath.startsWith('/api/auth/login') ||
         requestPath.startsWith('/api/auth/register') ||
         requestPathname === '/api/auth/otp/request' ||
-        requestPathname === '/api/auth/otp/verify';
+        requestPathname === '/api/auth/otp/verify' ||
+        requestPathname === '/api/auth/forgot-password' ||
+        requestPathname === '/api/auth/reset-password' ||
+        requestPathname === '/api/auth/reset-password/validate';
 
       if (!incomingToken || typeof incomingToken !== 'string') {
         if (!isCredentialAuthEntry) {

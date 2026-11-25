@@ -14,6 +14,7 @@ import { ScannerPage } from './pages/ScannerPage';
 import { OrderConfirmationPage } from './pages/OrderConfirmationPage';
 import { FinanceOrganizationPage } from './pages/FinanceOrganizationPage';
 import { AuthPage } from './pages/AuthPage';
+import { ResetPasswordPage } from './pages/ResetPasswordPage';
 import { StaffInvitationPage } from './pages/StaffInvitationPage';
 import { TeamInvitationPage } from './pages/TeamInvitationPage';
 import { HostDashboardPage } from './pages/HostDashboardPage';
@@ -34,6 +35,7 @@ export const App: React.FC = () => {
     location.pathname.startsWith('/signin') ||
     location.pathname.startsWith('/register') ||
     location.pathname.startsWith('/forgot-password') ||
+    location.pathname.startsWith('/reset-password') ||
     location.pathname.startsWith('/teams') ||
     location.pathname.startsWith('/staff/invitations');
 
@@ -52,6 +54,7 @@ export const App: React.FC = () => {
           <Route path="/signin" element={<AuthPage />} />
           <Route path="/register" element={<AuthPage />} />
           <Route path="/forgot-password" element={<AuthPage />} />
+          <Route path="/reset-password" element={<ResetPasswordPage />} />
           <Route path="/events" element={<DiscoverPage />} />
           <Route path="/events/:slug" element={<EventDetailPage />} />
 

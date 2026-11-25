@@ -4,6 +4,9 @@ import {
   login,
   requestLoginOtp,
   verifyLoginOtp,
+  forgotPassword,
+  validateResetToken,
+  resetPassword,
   logout,
   logoutAll,
   listSessions,
@@ -32,6 +35,9 @@ authRouter.post('/register', register);
 authRouter.post('/login', login);
 authRouter.post('/otp/request', requestLoginOtp);
 authRouter.post('/otp/verify', verifyLoginOtp);
+authRouter.post('/forgot-password', forgotPassword);
+authRouter.post('/reset-password/validate', validateResetToken);
+authRouter.post('/reset-password', resetPassword);
 authRouter.post('/logout', logout);
 authRouter.post('/logout-all', requireAuth, requireFreshUserVerification, logoutAll);
 authRouter.get('/sessions', requireAuth, listSessions);

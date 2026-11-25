@@ -18,6 +18,10 @@ import {
   revokeSession,
   revokeAllUserSessions,
   invalidateUserAuthCache,
+  getCachedUserSessionVersion,
+  setCachedUserSessionVersion,
+  getEmergencySessionVersionFloor,
+  recordEmergencySessionVersionFloor,
 } from '../lib/session.service.js';
 import { getRedisClient } from '../lib/redis.js';
 
@@ -56,11 +60,23 @@ export async function loadUserAuthFromPostgres(
       role: true,
       emailVerified: true,
       status: true,
+      sessionVersion: true,
     },
   });
 
   if (!dbUser || !dbUser.email) {
     return null;
+  }
+
+  const dbSessionVersion =
+    typeof (dbUser as { sessionVersion?: number }).sessionVersion === 'number'
+      ? (dbUser as { sessionVersion: number }).sessionVersion
+      : 0;
+
+  try {
+    await setCachedUserSessionVersion(dbUser.id, dbSessionVersion);
+  } catch {
+    // Non-fatal if Redis cache write fails during DB fallback
   }
 
   return {
@@ -70,6 +86,55 @@ export async function loadUserAuthFromPostgres(
     emailVerified: dbUser.emailVerified,
     accountStatus: dbUser.status ?? AccountStatus.ACTIVE,
   };
+}
+
+export async function loadUserSessionVersionFromPostgres(userId: string): Promise<number | null> {
+  if (!prisma.user || typeof prisma.user.findUnique !== 'function') {
+    return null;
+  }
+
+  const dbUser = await prisma.user.findUnique({
+    where: { id: userId },
+    select: {
+      id: true,
+      sessionVersion: true,
+    },
+  });
+
+  if (!dbUser) {
+    return null;
+  }
+
+  return typeof (dbUser as { sessionVersion?: number }).sessionVersion === 'number'
+    ? (dbUser as { sessionVersion: number }).sessionVersion
+    : 0;
+}
+
+/**
+ * Authoritative cross-instance check against PostgreSQL's `SessionInvalidation` table.
+ * Fails closed on database errors so a stale Redis cache hit can never authorize
+ * an invalidated session if post-commit Redis revocation/cache-update failed.
+ */
+export async function loadAuthoritativeMinSessionVersionFromPostgres(
+  userId: string
+): Promise<number | null> {
+  if (
+    !prisma.sessionInvalidation ||
+    typeof prisma.sessionInvalidation.findUnique !== 'function'
+  ) {
+    return null;
+  }
+
+  const row = await prisma.sessionInvalidation.findUnique({
+    where: { userId },
+    select: { minSessionVersion: true },
+  });
+
+  if (!row) {
+    return 0;
+  }
+
+  return typeof row.minSessionVersion === 'number' ? row.minSessionVersion : 0;
 }
 
 /**
@@ -197,6 +262,53 @@ export async function authenticateUser(
       );
     }
 
+    // M-02: Enforce durable multi-instance sessionVersion check.
+    // In-process floor and Redis cache act only as fast lower-bound filters; accepting a session
+    // ALWAYS checks PostgreSQL `SessionInvalidation` so a stale Redis cache hit ('0') can never
+    // revive or honor an invalidated session across instances if Redis invalidation failed.
+    const sessionVer =
+      typeof sessionRecord.sessionVersion === 'number' ? sessionRecord.sessionVersion : 0;
+    const emergencyMinVer = getEmergencySessionVersionFloor(sessionRecord.userId);
+    if (emergencyMinVer !== null && sessionVer < emergencyMinVer) {
+      await revokeSession(sessionRecord.sessionId, sessionRecord.userId).catch(() => {});
+      await invalidateUserAuthCache(sessionRecord.userId).catch(() => {});
+      if (cookieToken) {
+        clearSessionCookie(res);
+      }
+      return next();
+    }
+
+    const cachedMinVer = await getCachedUserSessionVersion(sessionRecord.userId);
+    if (cachedMinVer !== null && sessionVer < cachedMinVer) {
+      await revokeSession(sessionRecord.sessionId, sessionRecord.userId).catch(() => {});
+      await invalidateUserAuthCache(sessionRecord.userId).catch(() => {});
+      if (cookieToken) {
+        clearSessionCookie(res);
+      }
+      return next();
+    }
+
+    const authoritativeMinVer = await loadAuthoritativeMinSessionVersionFromPostgres(
+      sessionRecord.userId
+    );
+    if (authoritativeMinVer !== null && sessionVer < authoritativeMinVer) {
+      recordEmergencySessionVersionFloor(sessionRecord.userId, authoritativeMinVer);
+      await revokeSession(sessionRecord.sessionId, sessionRecord.userId).catch(() => {});
+      await invalidateUserAuthCache(sessionRecord.userId).catch(() => {});
+      await setCachedUserSessionVersion(sessionRecord.userId, authoritativeMinVer).catch(() => {});
+      if (cookieToken) {
+        clearSessionCookie(res);
+      }
+      return next();
+    }
+
+    if (
+      authoritativeMinVer !== null &&
+      (cachedMinVer === null || authoritativeMinVer > cachedMinVer)
+    ) {
+      await setCachedUserSessionVersion(sessionRecord.userId, authoritativeMinVer).catch(() => {});
+    }
+
     req.session = sessionRecord;
     req.user = {
       userId: authUser.userId,
@@ -312,6 +424,29 @@ export async function requireFreshUserVerification(
         `Your account has been ${freshRecord.accountStatus.toLowerCase()}.`,
         `ACCOUNT_${freshRecord.accountStatus}`
       );
+    }
+
+    if (req.session) {
+      const sessionVer =
+        typeof req.session.sessionVersion === 'number' ? req.session.sessionVersion : 0;
+      const emergencyMinVer = getEmergencySessionVersionFloor(req.user.userId);
+      const [dbSessionVer, authoritativeMinVer, cachedVer] = await Promise.all([
+        loadUserSessionVersionFromPostgres(req.user.userId),
+        loadAuthoritativeMinSessionVersionFromPostgres(req.user.userId),
+        getCachedUserSessionVersion(req.user.userId),
+      ]);
+      const candidates = [emergencyMinVer, dbSessionVer, authoritativeMinVer, cachedVer].filter(
+        (v): v is number => v !== null
+      );
+      const effectiveVer = candidates.length > 0 ? Math.max(...candidates) : null;
+
+      if (effectiveVer !== null && sessionVer < effectiveVer) {
+        recordEmergencySessionVersionFloor(req.user.userId, effectiveVer);
+        await revokeSession(req.session.sessionId, req.user.userId).catch(() => {});
+        await setCachedUserSessionVersion(req.user.userId, effectiveVer).catch(() => {});
+        clearSessionCookie(res);
+        throw new UnauthorizedError('Session invalidated due to a password change.');
+      }
     }
 
     req.user.role = freshRecord.role;
