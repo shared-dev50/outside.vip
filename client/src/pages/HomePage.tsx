@@ -189,7 +189,7 @@ export const HomePage: React.FC = () => {
             </div>
           )}
 
-          {!isLoading && allEvents.length === 0 && (
+          {!isLoading && !error && allEvents.length === 0 && (
             <div className="p-12 text-center text-stone-500 text-xs font-mono uppercase tracking-wider">
               No live public events found in catalogue.
             </div>
