@@ -246,7 +246,13 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
   }
 
   if (!response.ok || !json.success) {
+    const detailMessage = Array.isArray((json.error as any)?.details)
+      ? (json.error as any).details.find(
+          (d: any) => typeof d?.message === 'string' && d.message.trim().length > 0
+        )?.message
+      : undefined;
     const message =
+      (json.error?.message === 'Validation failed' && detailMessage) ||
       json.error?.message ||
       (json as any)?.message ||
       (json.data as any)?.message ||

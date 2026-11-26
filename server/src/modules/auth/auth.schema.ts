@@ -1,8 +1,24 @@
 import { z } from 'zod';
+import { PASSWORD_MAX_LENGTH, evaluatePasswordPolicy } from './passwordPolicy.js';
+
+export const passwordPolicySchema = z.string().superRefine((password, ctx) => {
+  const evaluation = evaluatePasswordPolicy(password);
+  for (const message of evaluation.errors) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message,
+    });
+  }
+});
+
+export const boundedPasswordPolicySchema = passwordPolicySchema.refine(
+  (password) => password.length <= PASSWORD_MAX_LENGTH,
+  `Password must be at most ${PASSWORD_MAX_LENGTH} characters long`
+);
 
 export const registerSchema = z.object({
   email: z.string().trim().email('Please provide a valid email address'),
-  password: z.string().min(8, 'Password must be at least 8 characters long'),
+  password: passwordPolicySchema,
   name: z.string().trim().min(2, 'Name must be at least 2 characters long'),
   role: z.string().optional(),
   organizerDisplayName: z.string().trim().min(2).optional(),
@@ -44,7 +60,7 @@ export const updateProfileSchema = z.object({
 
 export const changePasswordSchema = z.object({
   currentPassword: z.string().min(1, 'Current password is required'),
-  newPassword: z.string().min(8, 'New password must be at least 8 characters long'),
+  newPassword: passwordPolicySchema,
 });
 
 export const forgotPasswordSchema = z.object({
@@ -58,10 +74,7 @@ export const validateResetTokenSchema = z.object({
 export const resetPasswordSchema = z
   .object({
     token: z.string().trim().min(1, 'Reset token is required'),
-    newPassword: z
-      .string()
-      .min(8, 'Password must be at least 8 characters long')
-      .max(128, 'Password must be at most 128 characters long'),
+    newPassword: boundedPasswordPolicySchema,
     confirmPassword: z.string().optional(),
   })
   .refine(
