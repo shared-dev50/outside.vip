@@ -5,7 +5,6 @@ import {
   ZoomOut,
   RotateCcw,
   Check,
-  Lock,
   Crop as CropIcon,
   Maximize2,
   Sparkles,
@@ -16,6 +15,7 @@ import {
   computeCropBounds,
   createCroppedImageFile,
   formatBytes,
+  resolveAspectRatio,
 } from '../../lib/imageCrop';
 
 export interface ImageCropModalProps {
@@ -42,13 +42,14 @@ export const ImageCropModal: React.FC<ImageCropModalProps> = ({
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [aspectRatio, setAspectRatio] = useState<CropAspectRatio>(
-    mode === 'cover' ? '16:10' : '4:3'
+    mode === 'cover' ? '4:5' : '4:3'
   );
 
   const [isDragging, setIsDragging] = useState(false);
   const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
   const [touchStartDist, setTouchStartDist] = useState<number | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [cropError, setCropError] = useState<string | null>(null);
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const previewCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -64,6 +65,8 @@ export const ImageCropModal: React.FC<ImageCropModalProps> = ({
       setNaturalHeight(0);
       setZoom(1);
       setPan({ x: 0, y: 0 });
+      setCropError(null);
+      imageElementRef.current = null;
       if (objectUrlRef.current) {
         URL.revokeObjectURL(objectUrlRef.current);
         objectUrlRef.current = null;
@@ -71,28 +74,35 @@ export const ImageCropModal: React.FC<ImageCropModalProps> = ({
       return;
     }
 
+    let isCancelled = false;
+    setImageLoaded(false);
+    setCropError(null);
     setZoom(1);
     setPan({ x: 0, y: 0 });
-    setAspectRatio(mode === 'cover' ? '16:10' : '4:3');
+    setAspectRatio(mode === 'cover' ? '4:5' : '4:3');
 
     const url = URL.createObjectURL(file);
     objectUrlRef.current = url;
 
     const img = new Image();
-    img.src = url;
     img.onload = () => {
+      if (isCancelled) return;
       imageElementRef.current = img;
       setNaturalWidth(img.naturalWidth);
       setNaturalHeight(img.naturalHeight);
       setImageLoaded(true);
     };
     img.onerror = () => {
+      if (isCancelled) return;
       setImageLoaded(false);
+      setCropError('Unable to decode this image file. Please try another JPEG, PNG, or WebP.');
     };
+    img.src = url;
 
     return () => {
-      if (objectUrlRef.current) {
-        URL.revokeObjectURL(objectUrlRef.current);
+      isCancelled = true;
+      if (objectUrlRef.current === url) {
+        URL.revokeObjectURL(url);
         objectUrlRef.current = null;
       }
     };
@@ -318,10 +328,18 @@ export const ImageCropModal: React.FC<ImageCropModalProps> = ({
 
   // Execute high-resolution client crop and trigger confirmation
   const handleConfirm = async () => {
-    if (!imageElementRef.current || !file || isProcessing) return;
+    const activeImage = imageElementRef.current;
+    if (!activeImage || !file || isProcessing) return;
 
     try {
       setIsProcessing(true);
+      setCropError(null);
+
+      const srcWidth = activeImage.naturalWidth || naturalWidth;
+      const srcHeight = activeImage.naturalHeight || naturalHeight;
+      if (srcWidth <= 0 || srcHeight <= 0) {
+        throw new Error('Image dimensions could not be resolved.');
+      }
 
       const container = containerRef.current;
       const rect = container?.getBoundingClientRect();
@@ -331,8 +349,8 @@ export const ImageCropModal: React.FC<ImageCropModalProps> = ({
       const bounds = computeCropBounds({
         viewportWidth: viewW,
         viewportHeight: viewH,
-        naturalWidth,
-        naturalHeight,
+        naturalWidth: srcWidth,
+        naturalHeight: srcHeight,
         aspectRatio,
         zoom,
         panX: pan.x,
@@ -341,7 +359,7 @@ export const ImageCropModal: React.FC<ImageCropModalProps> = ({
       });
 
       const cropped = await createCroppedImageFile({
-        imageElement: imageElementRef.current,
+        imageElement: activeImage,
         sourceCropX: bounds.sourceCropX,
         sourceCropY: bounds.sourceCropY,
         sourceCropWidth: bounds.sourceCropWidth,
@@ -353,8 +371,9 @@ export const ImageCropModal: React.FC<ImageCropModalProps> = ({
       });
 
       onConfirm(cropped.file, cropped.previewUrl);
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to crop image:', err);
+      setCropError(err?.message || 'Failed to generate cropped image. Please try again.');
     } finally {
       setIsProcessing(false);
     }
@@ -365,9 +384,21 @@ export const ImageCropModal: React.FC<ImageCropModalProps> = ({
   const modalTitle =
     title || (mode === 'cover' ? 'Crop & Frame Cover Artwork' : 'Crop Gallery Photo');
 
-  const previewRatio = mode === 'cover' ? 1.6 : aspectRatio === 'free' ? (naturalWidth / naturalHeight || 1.33) : (aspectRatio === '16:9' ? 16/9 : aspectRatio === '1:1' ? 1 : 4/3);
-  const previewBoxW = 120;
-  const previewBoxH = Math.round(previewBoxW / previewRatio);
+  const activeRatioOption = CROP_ASPECT_RATIOS.find((r) => r.id === aspectRatio);
+  const availableRatios =
+    mode === 'cover'
+      ? CROP_ASPECT_RATIOS
+      : CROP_ASPECT_RATIOS.filter((r) => r.id !== '16:10');
+
+  const previewRatio = resolveAspectRatio(aspectRatio, naturalWidth, naturalHeight);
+  const maxPreviewW = 112;
+  const maxPreviewH = 92;
+  let previewBoxW = maxPreviewW;
+  let previewBoxH = Math.round(previewBoxW / previewRatio);
+  if (previewBoxH > maxPreviewH) {
+    previewBoxH = maxPreviewH;
+    previewBoxW = Math.round(previewBoxH * previewRatio);
+  }
 
   return (
     <div
@@ -385,12 +416,12 @@ export const ImageCropModal: React.FC<ImageCropModalProps> = ({
               <h2 className="text-sm font-display font-black uppercase tracking-tight text-white flex items-center gap-2">
                 <span>{modalTitle}</span>
                 {mode === 'cover' ? (
-                  <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-amber-500/10 text-amber-300 border border-amber-500/30 flex items-center gap-1 font-semibold">
-                    <Lock className="w-2.5 h-2.5" /> 16:10 Ratio
+                  <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-amber-500/10 text-amber-300 border border-amber-500/30 font-semibold">
+                    {activeRatioOption?.label || aspectRatio}
                   </span>
                 ) : (
                   <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-stone-800 text-stone-300 border border-stone-700">
-                    Gallery Crop
+                    Gallery Crop · {activeRatioOption?.label || aspectRatio}
                   </span>
                 )}
               </h2>
@@ -455,36 +486,55 @@ export const ImageCropModal: React.FC<ImageCropModalProps> = ({
 
           <div className="grid grid-cols-1 md:grid-cols-12 gap-3.5 items-center bg-stone-950/60 p-3.5 rounded-xl border border-stone-800/80">
             <div className="md:col-span-5 flex flex-col gap-1.5">
-              <span className="text-[11px] font-mono uppercase tracking-wider text-stone-400 font-bold">
-                {mode === 'cover' ? 'Aspect Ratio (Fixed 16:10)' : 'Aspect Ratio Preset'}
-              </span>
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[11px] font-mono uppercase tracking-wider text-stone-400 font-bold">
+                  Aspect Ratio
+                </span>
+                {mode === 'cover' && (
+                  <span className="text-[10px] font-mono text-amber-300/90">
+                    4:5 Recommended
+                  </span>
+                )}
+              </div>
 
-              {mode === 'cover' ? (
-                <div className="text-xs font-mono text-stone-300 bg-stone-900 px-3 py-2 rounded-lg border border-stone-800 flex items-center gap-2">
-                  <Lock className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                  <span>16:10 Widescreen (Outside.vip flyer standard)</span>
-                </div>
-              ) : (
-                <div className="flex flex-wrap gap-1.5">
-                  {CROP_ASPECT_RATIOS.filter((r) => r.id !== '16:10').map((ratio) => (
+              <div className="flex flex-wrap gap-1.5">
+                {availableRatios.map((ratio) => {
+                  const isRecommended = mode === 'cover' && ratio.id === '4:5';
+                  const isSelected = aspectRatio === ratio.id;
+                  return (
                     <button
                       key={ratio.id}
                       type="button"
+                      aria-pressed={isSelected}
+                      title={ratio.description}
                       onClick={() => {
                         setAspectRatio(ratio.id);
                         setPan({ x: 0, y: 0 });
                       }}
-                      className={`px-2.5 py-1.5 rounded-lg text-xs font-mono font-medium transition-colors border ${
-                        aspectRatio === ratio.id
+                      className={`px-2 py-1 rounded-lg text-[11px] font-mono font-medium transition-colors border inline-flex items-center gap-1 ${
+                        isSelected
                           ? 'bg-stone-100 text-stone-950 border-white font-bold shadow-xs'
+                          : isRecommended
+                          ? 'bg-amber-500/15 text-amber-200 border-amber-400/50 hover:bg-amber-500/25'
                           : 'bg-stone-900 text-stone-400 border-stone-800 hover:text-stone-200 hover:bg-stone-850'
                       }`}
                     >
-                      {ratio.label}
+                      <span>{ratio.label}</span>
+                      {isRecommended && (
+                        <span
+                          className={`text-[9px] uppercase tracking-wide px-1 rounded ${
+                            isSelected
+                              ? 'bg-stone-900 text-[#D2FF00]'
+                              : 'bg-amber-400/20 text-amber-200'
+                          }`}
+                        >
+                          Rec
+                        </span>
+                      )}
                     </button>
-                  ))}
-                </div>
-              )}
+                  );
+                })}
+              </div>
             </div>
 
             <div className="md:col-span-4 flex flex-col gap-1.5">
@@ -530,7 +580,7 @@ export const ImageCropModal: React.FC<ImageCropModalProps> = ({
                   ref={previewCanvasRef}
                   width={previewBoxW}
                   height={previewBoxH}
-                  className="w-full h-full block object-cover"
+                  className="w-full h-full block"
                 />
               </div>
               <div className="text-[10px] font-mono text-stone-400 space-y-0.5">
@@ -545,9 +595,15 @@ export const ImageCropModal: React.FC<ImageCropModalProps> = ({
         </div>
 
         <div className="px-5 py-3.5 border-t border-stone-800 bg-stone-950/60 flex flex-wrap items-center justify-between gap-3">
-          <p className="text-[11px] font-mono text-stone-500 hidden sm:block">
-            Scroll or pinch to zoom • Drag to center framing
-          </p>
+          {cropError ? (
+            <p role="alert" className="text-[11px] font-mono text-rose-400">
+              {cropError}
+            </p>
+          ) : (
+            <p className="text-[11px] font-mono text-stone-500 hidden sm:block">
+              Scroll or pinch to zoom • Drag to center framing
+            </p>
+          )}
           <div className="flex items-center gap-2.5 ml-auto">
             <button
               type="button"

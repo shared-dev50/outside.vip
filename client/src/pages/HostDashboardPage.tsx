@@ -27,6 +27,7 @@ import {
   Share2,
 } from 'lucide-react';
 import { SocialShareModal } from '../components/promotions/SocialShareModal';
+import { EventCoverImage } from '../components/events/EventCoverImage';
 
 export interface HostDashboardPageProps {
   initialEvents?: HostAssignedEventItem[];
@@ -378,20 +379,16 @@ export const HostDashboardPage: React.FC<HostDashboardPageProps> = ({
               <div className="bg-white rounded-2xl border border-stone-200/90 overflow-hidden shadow-xs">
                 <div className="p-6 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-5 border-b border-stone-100">
                   <div className="flex items-center gap-4 min-w-0">
-                    <div className="w-16 h-16 rounded-xl overflow-hidden bg-stone-100 border border-stone-200 shrink-0 relative shadow-2xs">
-                      <img
-                        src={
-                          activeEvent.coverImageUrl ||
-                          'https://images.unsplash.com/photo-1514525253161-7a46d19cd819?auto=format&fit=crop&w=400&q=80'
-                        }
-                        alt={activeEvent.title}
-                        className="w-full h-full object-cover"
-                        onError={(e) => {
-                          e.currentTarget.src =
-                            'https://images.unsplash.com/photo-1514525253161-7a46d19cd819?auto=format&fit=crop&w=400&q=80';
-                        }}
-                      />
-                    </div>
+                    <EventCoverImage
+                      src={
+                        activeEvent.coverImageUrl ||
+                        'https://images.unsplash.com/photo-1514525253161-7a46d19cd819?auto=format&fit=crop&w=400&q=80'
+                      }
+                      alt={activeEvent.title}
+                      mode="fixed"
+                      fallbackSrc="https://images.unsplash.com/photo-1514525253161-7a46d19cd819?auto=format&fit=crop&w=400&q=80"
+                      containerClassName="w-16 h-16 rounded-xl bg-stone-900 border border-stone-200 shrink-0 shadow-2xs"
+                    />
                     <div className="space-y-1 min-w-0">
                       <div className="flex items-center gap-2">
                         <span className="px-2 py-0.5 rounded-full text-[10px] font-mono uppercase font-bold bg-amber-50 text-amber-800 border border-amber-300">

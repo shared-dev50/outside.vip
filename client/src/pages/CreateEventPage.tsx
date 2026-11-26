@@ -7,6 +7,7 @@ import { useOptionalAuth } from '../context/AuthContext';
 import { EmailVerificationGate } from '../components/auth/EmailVerificationGate';
 import { AuthFormCard } from '../components/auth/AuthFormCard';
 import { PasswordInput } from '../components/common/PasswordInput';
+import { EventCoverImage } from '../components/events/EventCoverImage';
 import {
   EventCategory,
   RecurrenceFrequency,
@@ -87,22 +88,22 @@ import {
 
 export type WizardStep = 1 | 2 | 3 | 4;
 
-const PRESET_COVERS = [
+export const PRESET_COVERS = [
   {
     name: 'Open Air Stage',
-    url: 'https://images.unsplash.com/photo-1514525253161-7a46d19cd819?auto=format&fit=crop&w=1600&q=85',
+    url: 'https://images.unsplash.com/photo-1514525253161-7a46d19cd819?auto=format&fit=crop&w=1200&h=1500&q=85',
   },
   {
     name: 'Industrial Rave',
-    url: 'https://images.unsplash.com/photo-1470225620780-dba8ba36b745?auto=format&fit=crop&w=1600&q=85',
+    url: 'https://images.unsplash.com/photo-1470225620780-dba8ba36b745?auto=format&fit=crop&w=1200&h=1500&q=85',
   },
   {
-    name: 'Coastal Sunset',
-    url: 'https://images.unsplash.com/photo-1533174072545-7a4b6ad7a6c3?auto=format&fit=crop&w=1600&q=85',
+    name: 'Midnight Crowd',
+    url: 'https://images.unsplash.com/photo-1516450360452-9312f5e86fc7?auto=format&fit=crop&w=1200&h=1500&q=85',
   },
   {
-    name: 'Sound System',
-    url: 'https://images.unsplash.com/photo-1492684223066-81342ee5ff30?auto=format&fit=crop&w=1600&q=85',
+    name: 'Live Spotlight',
+    url: 'https://images.unsplash.com/photo-1501281668745-f7f57925c3b4?auto=format&fit=crop&w=1200&h=1500&q=85',
   },
 ];
 
@@ -196,6 +197,7 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
   const galleryAbortControllerRef = useRef<AbortController | null>(null);
   const isSubmittingRef = useRef<boolean>(false);
   const createdDraftIdRef = useRef<string | null>(null);
+  const hydratedEventKeyRef = useRef<string | null>(null);
   const handledStripeReturnRef = useRef<boolean>(false);
   const isMountedRef = useRef<boolean>(true);
 
@@ -316,6 +318,14 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
   useEffect(() => {
     if (existingData?.event) {
       const evt = existingData.event;
+      const syncKey = `${evt.id}:${evt.updatedAt || ''}:${evt.coverImageUrl || ''}`;
+      if (hydratedEventKeyRef.current === syncKey) {
+        return;
+      }
+      if (hasUnsavedChanges && hydratedEventKeyRef.current !== null) {
+        return;
+      }
+      hydratedEventKeyRef.current = syncKey;
       setTitle(evt.title);
       setDescription(evt.description || '');
       setCategory(evt.category);
@@ -1262,6 +1272,9 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
       queryClient.invalidateQueries({ queryKey: ['organizer-events'] });
       queryClient.invalidateQueries({ queryKey: ['organizer-event', eventId] });
       queryClient.invalidateQueries({ queryKey: ['events'] });
+      queryClient.invalidateQueries({ queryKey: ['homepage-events'] });
+      queryClient.invalidateQueries({ queryKey: ['events-discover'] });
+      queryClient.invalidateQueries({ queryKey: ['event'] });
 
       showNotification(
         'success',
@@ -2031,7 +2044,7 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
                         Cover Artwork & Flyer Poster <span className="text-rose-600">*</span>
                       </h3>
                       <p className="text-xs text-stone-500 mt-0.5 font-sans">
-                        Upload a high-resolution 16:10 flyer, supply an image URL, or select from curated Outside.vip presets.
+                        Upload a high-resolution 4:5 portrait poster, supply an image URL, or select from curated Outside.vip presets.
                       </p>
                     </div>
 
@@ -2148,7 +2161,7 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
                                   : 'bg-white border-stone-200 hover:border-stone-400'
                               }`}
                             >
-                              <div className="aspect-[16/10] rounded overflow-hidden bg-stone-900">
+                              <div className="aspect-[4/5] rounded overflow-hidden bg-stone-900">
                                 <img
                                   src={preset.url}
                                   alt={preset.name}
@@ -2166,17 +2179,18 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
                       {coverImageUrl && (
                         <div className="space-y-1.5 pt-2">
                           <span className="text-xs font-mono text-stone-500">Active Artwork Preview:</span>
-                          <div className="relative aspect-[16/10] rounded-xl overflow-hidden bg-stone-900 border border-stone-200 max-w-lg">
-                            <img
-                              src={coverImageUrl}
-                              alt="Cover Preview"
-                              className="w-full h-full object-cover"
-                            />
-                            <div className="absolute bottom-3 right-3 px-3 py-1 rounded bg-black/80 backdrop-blur-md text-[11px] font-mono text-white border border-white/20 flex items-center gap-1.5">
+                          <EventCoverImage
+                            src={coverImageUrl}
+                            alt="Cover Preview"
+                            mode="natural"
+                            maxNaturalHeroHeight={420}
+                            containerClassName="rounded-xl bg-stone-100 border border-stone-200 max-w-lg"
+                          >
+                            <div className="absolute bottom-3 right-3 z-10 px-3 py-1 rounded bg-black/80 backdrop-blur-md text-[11px] font-mono text-white border border-white/20 flex items-center gap-1.5">
                               {coverImagePublicId && <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>}
                               {coverImagePublicId ? 'Cloudinary Hosted Flyer' : 'Active Flyer Preview'}
                             </div>
-                          </div>
+                          </EventCoverImage>
                         </div>
                       )}
                     </div>
@@ -3329,33 +3343,33 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
                   </div>
                   <div className="max-w-sm mx-auto">
                     <div className="rounded-xl overflow-hidden border border-stone-200 bg-white text-stone-900 shadow-md p-3.5 space-y-3">
-                      <div className="aspect-[16/10] relative overflow-hidden rounded-lg bg-stone-900">
-                        <img
-                          src={coverImageUrl}
-                          alt="Cover"
-                          className="w-full h-full object-cover"
-                        />
-                        <div className="absolute top-2.5 right-2.5 px-2 py-0.5 rounded bg-black/80 text-white font-mono text-[10px] font-bold uppercase">
+                      <EventCoverImage
+                        src={coverImageUrl}
+                        alt="Cover"
+                        mode="poster"
+                        containerClassName="rounded-lg border border-stone-200/60"
+                      >
+                        <div className="absolute top-2.5 right-2.5 z-10 px-2 py-0.5 rounded bg-black/80 text-white font-mono text-[10px] font-bold uppercase">
                           {category}
                         </div>
                         {isRecurring && (
-                          <div className="absolute bottom-2.5 left-2.5 px-2 py-0.5 rounded bg-blue-900/90 text-white font-mono text-[10px] font-bold uppercase flex items-center gap-1">
+                          <div className="absolute bottom-2.5 left-2.5 z-10 px-2 py-0.5 rounded bg-blue-900/90 text-white font-mono text-[10px] font-bold uppercase flex items-center gap-1">
                             <Repeat className="w-3 h-3" />
                             <span>Series</span>
                           </div>
                         )}
                         {isPasswordProtected && (
-                          <div className="absolute top-2.5 left-2.5 px-2 py-0.5 rounded bg-amber-600/95 text-white font-mono text-[10px] font-bold uppercase flex items-center gap-1">
+                          <div className="absolute top-2.5 left-2.5 z-10 px-2 py-0.5 rounded bg-amber-600/95 text-white font-mono text-[10px] font-bold uppercase flex items-center gap-1">
                             <Lock className="w-3 h-3" />
                             <span>Password Protected</span>
                           </div>
                         )}
                         {!showOnExplore && (
-                          <div className="absolute bottom-2.5 right-2.5 px-2 py-0.5 rounded bg-stone-800/90 text-stone-300 font-mono text-[10px] font-bold uppercase">
+                          <div className="absolute bottom-2.5 right-2.5 z-10 px-2 py-0.5 rounded bg-stone-800/90 text-stone-300 font-mono text-[10px] font-bold uppercase">
                             Direct Link Only
                           </div>
                         )}
-                      </div>
+                      </EventCoverImage>
 
                       <div className="space-y-1.5">
                         <div className="text-[11px] font-mono uppercase tracking-wider text-stone-500 font-bold">

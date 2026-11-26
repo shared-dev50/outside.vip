@@ -4,22 +4,57 @@
  * responsive aspect ratios, high-quality canvas cropping, and compression.
  */
 
-export type CropAspectRatio = '16:10' | '4:3' | '16:9' | '1:1' | 'free';
+export type CropAspectRatio =
+  | '16:10'
+  | '16:9'
+  | '4:3'
+  | '1:1'
+  | '3:4'
+  | '4:5'
+  | '2:3'
+  | 'free';
+
+export type AspectRatioCategory = 'landscape' | 'square' | 'portrait' | 'original';
 
 export interface AspectRatioOption {
   id: CropAspectRatio;
   label: string;
   ratio: number | null; // null for free/original
+  category: AspectRatioCategory;
   description: string;
 }
 
 export const CROP_ASPECT_RATIOS: AspectRatioOption[] = [
-  { id: '16:10', label: '16:10 Flyer', ratio: 16 / 10, description: 'Outside.vip event flyer format' },
-  { id: '4:3', label: '4:3 Standard', ratio: 4 / 3, description: 'Standard photo landscape' },
-  { id: '16:9', label: '16:9 Cinema', ratio: 16 / 9, description: 'Widescreen landscape' },
-  { id: '1:1', label: '1:1 Square', ratio: 1 / 1, description: 'Square profile & avatar' },
-  { id: 'free', label: 'Original', ratio: null, description: 'Preserve original image ratio' },
+  { id: '4:5', label: '4:5', ratio: 4 / 5, category: 'portrait', description: 'Recommended Outside.vip event poster ratio' },
+  { id: '3:4', label: '3:4', ratio: 3 / 4, category: 'portrait', description: 'Classic poster portrait' },
+  { id: '2:3', label: '2:3', ratio: 2 / 3, category: 'portrait', description: 'Tall vertical poster' },
+  { id: '1:1', label: '1:1', ratio: 1 / 1, category: 'square', description: 'Square frame' },
+  { id: '16:9', label: '16:9', ratio: 16 / 9, category: 'landscape', description: 'Widescreen landscape' },
+  { id: '4:3', label: '4:3', ratio: 4 / 3, category: 'landscape', description: 'Standard photo landscape' },
+  { id: '16:10', label: '16:10 Flyer', ratio: 16 / 10, category: 'landscape', description: 'Classic widescreen flyer' },
+  { id: 'free', label: 'Original', ratio: null, category: 'original', description: 'Preserve original image ratio' },
 ];
+
+/**
+ * Selects a sensible initial crop ratio for cover artwork based on natural image orientation
+ * so portrait posters are not inadvertently cropped to landscape when opened.
+ */
+export function getDefaultCoverAspectRatio(naturalWidth: number, naturalHeight: number): CropAspectRatio {
+  if (naturalWidth <= 0 || naturalHeight <= 0) {
+    return '16:10';
+  }
+  const ratio = naturalWidth / naturalHeight;
+  if (naturalHeight > naturalWidth) {
+    if (Math.abs(ratio - 3 / 4) <= 0.03) return '3:4';
+    if (Math.abs(ratio - 4 / 5) <= 0.03) return '4:5';
+    if (Math.abs(ratio - 2 / 3) <= 0.03) return '2:3';
+    return 'free';
+  }
+  if (Math.abs(ratio - 1) <= 0.03) {
+    return '1:1';
+  }
+  return '16:10';
+}
 
 export const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 export const MAX_RAW_FILE_SIZE = 15 * 1024 * 1024;

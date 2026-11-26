@@ -6,6 +6,7 @@ import { useOptionalAuth } from '../context/AuthContext';
 import { resolveOrganizerEventUiPermissions } from '../lib/eventPermissions';
 import { TicketTier, User } from '../types';
 import { calculateDisplayPriceFromGross, calculateCheckoutFeeBreakdown } from '../lib/fees';
+import { EventCoverImage } from '../components/events/EventCoverImage';
 import {
   Calendar,
   MapPin,
@@ -269,22 +270,19 @@ export const EventPreviewPage: React.FC<EventPreviewPageProps> = ({ initialUser 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-10 items-start">
           <div className="lg:col-span-7 space-y-6">
-            <div className="relative aspect-[16/10] rounded-xl overflow-hidden bg-gray-100 border border-gray-200 shadow-sm">
-              <img
-                src={event.coverImageUrl}
-                alt={event.title}
-                className="w-full h-full object-cover"
-                onError={(e) => {
-                  e.currentTarget.src =
-                    'https://images.unsplash.com/photo-1514525253161-7a46d19cd819?auto=format&fit=crop&w=1600&q=85';
-                }}
-              />
-              <div className="absolute top-3 left-3">
+            <EventCoverImage
+              src={event.coverImageUrl}
+              alt={event.title}
+              mode="natural"
+              fallbackSrc="https://images.unsplash.com/photo-1514525253161-7a46d19cd819?auto=format&fit=crop&w=1600&q=85"
+              containerClassName="rounded-xl bg-stone-100 border border-gray-200 shadow-sm"
+            >
+              <div className="absolute top-3 left-3 z-10">
                 <span className="px-2.5 py-1 rounded bg-black/80 backdrop-blur-md text-[#D2FF00] font-mono font-bold text-[11px] uppercase tracking-wider border border-white/10">
                   {event.category}
                 </span>
               </div>
-            </div>
+            </EventCoverImage>
 
             <div className="space-y-2">
               <h1 className="font-display font-extrabold text-2xl sm:text-3xl md:text-4xl text-gray-900 tracking-tight leading-tight">

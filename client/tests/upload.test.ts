@@ -5,6 +5,8 @@ import {
   calculateMaxPan,
   clampPan,
   resolveAspectRatio,
+  getDefaultCoverAspectRatio,
+  CROP_ASPECT_RATIOS,
   formatBytes,
 } from '../src/lib/imageCrop';
 import { uploadImageWithProgress } from '../src/lib/uploadService';
@@ -66,6 +68,36 @@ describe('Image Crop & Optimization Utilities', () => {
 
     it('resolves free/original ratio using natural image dimensions', () => {
       expect(resolveAspectRatio('free', 2500, 1000)).toBe(2.5);
+      expect(resolveAspectRatio('free', 1200, 1800)).toBeCloseTo(2 / 3, 3);
+    });
+
+    it('resolves portrait ratios 3:4, 4:5, and 2:3', () => {
+      expect(resolveAspectRatio('3:4', 1200, 1600)).toBeCloseTo(0.75, 3);
+      expect(resolveAspectRatio('4:5', 1080, 1350)).toBeCloseTo(0.8, 3);
+      expect(resolveAspectRatio('2:3', 1000, 1500)).toBeCloseTo(2 / 3, 3);
+    });
+
+    it('exposes landscape, square, portrait, and original presets in CROP_ASPECT_RATIOS with 4:5 recommended first', () => {
+      const ids = CROP_ASPECT_RATIOS.map((r) => r.id);
+      expect(ids[0]).toBe('4:5');
+      expect(CROP_ASPECT_RATIOS[0].description.toLowerCase()).toContain('recommended');
+      expect(ids).toEqual(
+        expect.arrayContaining(['16:9', '4:3', '16:10', '1:1', '3:4', '4:5', '2:3', 'free'])
+      );
+    });
+  });
+
+  describe('getDefaultCoverAspectRatio', () => {
+    it('auto-selects matching portrait preset for portrait cover images', () => {
+      expect(getDefaultCoverAspectRatio(1200, 1600)).toBe('3:4');
+      expect(getDefaultCoverAspectRatio(1080, 1350)).toBe('4:5');
+      expect(getDefaultCoverAspectRatio(1000, 1500)).toBe('2:3');
+      expect(getDefaultCoverAspectRatio(800, 1600)).toBe('free');
+    });
+
+    it('preserves landscape 16:10 and square 1:1 defaults cleanly', () => {
+      expect(getDefaultCoverAspectRatio(1000, 1000)).toBe('1:1');
+      expect(getDefaultCoverAspectRatio(1920, 1080)).toBe('16:10');
     });
   });
 
@@ -137,6 +169,33 @@ describe('Image Crop & Optimization Utilities', () => {
 
       expect(result.outputWidth).toBeLessThanOrEqual(800);
       expect(result.outputHeight).toBeLessThanOrEqual(600);
+    });
+
+    it('computes unstretched portrait output dimensions for 3:4, 4:5, and 2:3 posters', () => {
+      const portraitCases: Array<{ ratio: '3:4' | '4:5' | '2:3'; expected: number }> = [
+        { ratio: '3:4', expected: 3 / 4 },
+        { ratio: '4:5', expected: 4 / 5 },
+        { ratio: '2:3', expected: 2 / 3 },
+      ];
+
+      for (const { ratio, expected } of portraitCases) {
+        const result = computeCropBounds({
+          viewportWidth: 640,
+          viewportHeight: 480,
+          naturalWidth: 2400,
+          naturalHeight: 3600,
+          aspectRatio: ratio,
+          zoom: 1,
+          panX: 0,
+          panY: 0,
+          maxOutputDimension: 1920,
+        });
+
+        expect(result.outputHeight).toBeGreaterThan(result.outputWidth);
+        expect(result.outputHeight).toBeLessThanOrEqual(1920);
+        expect(result.outputWidth / result.outputHeight).toBeCloseTo(expected, 2);
+        expect(result.sourceCropWidth / result.sourceCropHeight).toBeCloseTo(expected, 2);
+      }
     });
   });
 
