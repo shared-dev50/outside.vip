@@ -6,6 +6,7 @@ import { resolveOrganizerEventUiPermissions } from '../lib/eventPermissions';
 import { useOptionalAuth } from '../context/AuthContext';
 import { EmailVerificationGate } from '../components/auth/EmailVerificationGate';
 import { AuthFormCard } from '../components/auth/AuthFormCard';
+import { PasswordInput } from '../components/common/PasswordInput';
 import {
   EventCategory,
   RecurrenceFrequency,
@@ -23,7 +24,6 @@ import {
   Calendar,
   Ticket,
   Eye,
-  EyeOff,
   Plus,
   Trash2,
   Sparkles,
@@ -225,7 +225,6 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
   const [hideGuestCount, setHideGuestCount] = useState(false);
   const [isPasswordProtected, setIsPasswordProtected] = useState(false);
   const [password, setPassword] = useState('');
-  const [showPasswordText, setShowPasswordText] = useState(false);
 
   const [features, setFeatures] = useState<EventFeature[]>([]);
   const [isAddingFeature, setIsAddingFeature] = useState(false);
@@ -3008,34 +3007,28 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
 
                     {isPasswordProtected && (
                       <div className="pt-2 border-t border-stone-100 max-w-md">
-                        <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5">
+                        <label
+                          htmlFor="event-protection-password"
+                          className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5"
+                        >
                           {isEditing && existingData?.event?.isPasswordProtected
                             ? 'Update Password (leave blank to keep current)'
                             : 'Set Access Password'} <span className="text-rose-600">*</span>
                         </label>
-                        <div className="relative">
-                          <input
-                            type={showPasswordText ? 'text' : 'password'}
-                            placeholder={
-                              isEditing && existingData?.event?.isPasswordProtected
-                                ? '•••••••• (Enter new password to change)'
-                                : 'Enter secret event password'
-                            }
-                            value={password}
-                            onChange={(e) => {
-                              setPassword(e.target.value);
-                              setHasUnsavedChanges(true);
-                            }}
-                            className="w-full px-3.5 py-2.5 rounded-lg bg-[#FAF8F5] border border-stone-300 text-stone-900 placeholder-stone-400 text-xs focus:outline-none focus:border-stone-900 focus:bg-white transition-colors font-mono pr-10"
-                          />
-                          <button
-                            type="button"
-                            onClick={() => setShowPasswordText(!showPasswordText)}
-                            className="absolute right-2.5 top-1/2 -translate-y-1/2 text-stone-500 hover:text-stone-800 p-1"
-                          >
-                            {showPasswordText ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                          </button>
-                        </div>
+                        <PasswordInput
+                          id="event-protection-password"
+                          placeholder={
+                            isEditing && existingData?.event?.isPasswordProtected
+                              ? '•••••••• (Enter new password to change)'
+                              : 'Enter secret event password'
+                          }
+                          value={password}
+                          onChange={(e) => {
+                            setPassword(e.target.value);
+                            setHasUnsavedChanges(true);
+                          }}
+                          className="w-full pl-3.5 pr-11 py-2.5 rounded-lg bg-[#FAF8F5] border border-stone-300 text-stone-900 placeholder-stone-400 text-xs focus:outline-none focus:border-stone-900 focus:bg-white transition-colors font-mono"
+                        />
                         <p className="text-[10px] font-mono text-stone-500 mt-1">
                           Protected with secure bcrypt encryption. Never exposed in URLs or frontend code.
                         </p>

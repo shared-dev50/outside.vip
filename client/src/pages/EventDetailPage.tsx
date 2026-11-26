@@ -5,6 +5,7 @@ import { api } from '../lib/api';
 import { TicketTier, CheckoutSessionResult, WaitlistOfferInfo } from '../types';
 import { CheckoutDialog } from '../components/events/CheckoutDialog';
 import { JoinWaitlistDialog } from '../components/events/JoinWaitlistDialog';
+import { PasswordInput } from '../components/common/PasswordInput';
 import { calculateCheckoutFeeBreakdown, calculateDisplayPriceFromGross } from '../lib/fees';
 import { getYouTubeEmbedUrl } from '../lib/youtube';
 import { validateAndNormalizePhone } from '../lib/phone';
@@ -19,8 +20,6 @@ import {
   Check,
   AlertCircle,
   Lock,
-  Eye,
-  EyeOff,
   Users,
   Sparkles,
   Image as ImageIcon,
@@ -38,7 +37,6 @@ export const EventDetailPage: React.FC = () => {
     return null;
   });
   const [passwordInput, setPasswordInput] = useState('');
-  const [showPassword, setShowPassword] = useState(false);
   const [isVerifyingPassword, setIsVerifyingPassword] = useState(false);
   const [passwordError, setPasswordError] = useState<string | null>(null);
   const [activeGalleryModalImage, setActiveGalleryModalImage] = useState<string | null>(null);
@@ -581,26 +579,17 @@ export const EventDetailPage: React.FC = () => {
                 <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5">
                   Access Password
                 </label>
-                <div className="relative">
-                  <input
-                    type={showPassword ? 'text' : 'password'}
-                    placeholder="Enter password..."
-                    value={passwordInput}
-                    onChange={(e) => {
-                      setPasswordInput(e.target.value);
-                      if (passwordError) setPasswordError(null);
-                    }}
-                    autoFocus
-                    className="w-full px-3.5 py-2.5 rounded-lg bg-white border border-stone-300 text-stone-900 placeholder-stone-400 text-sm font-mono focus:outline-none focus:border-stone-900 transition-colors pr-10"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowPassword(!showPassword)}
-                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-stone-500 hover:text-stone-800 p-1"
-                  >
-                    {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                  </button>
-                </div>
+                <PasswordInput
+                  id="event-access-password"
+                  placeholder="Enter password..."
+                  value={passwordInput}
+                  onChange={(e) => {
+                    setPasswordInput(e.target.value);
+                    if (passwordError) setPasswordError(null);
+                  }}
+                  autoFocus
+                  className="w-full pl-3.5 pr-11 py-2.5 rounded-lg bg-white border border-stone-300 text-stone-900 placeholder-stone-400 text-sm font-mono focus:outline-none focus:border-stone-900 transition-colors"
+                />
               </div>
 
               {passwordError && (

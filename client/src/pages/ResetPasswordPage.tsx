@@ -16,6 +16,7 @@ import {
   evaluatePasswordPolicy,
 } from '../lib/passwordPolicy';
 import { PasswordRequirementsChecklist } from '../components/auth/PasswordRequirementsChecklist';
+import { PasswordInput } from '../components/common/PasswordInput';
 
 type TokenState = 'loading' | 'valid' | 'invalid' | 'success' | 'transient-error';
 
@@ -270,11 +271,10 @@ export const ResetPasswordPage: React.FC = () => {
                   New Password
                 </label>
                 <div className="relative">
-                  <Lock className="w-4 h-4 text-stone-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
-                  <input
+                  <Lock className="w-4 h-4 text-stone-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none z-10" />
+                  <PasswordInput
                     id="reset-new-password"
                     name="newPassword"
-                    type="password"
                     autoComplete="new-password"
                     required
                     minLength={PASSWORD_MIN_LENGTH}
@@ -282,7 +282,7 @@ export const ResetPasswordPage: React.FC = () => {
                     value={newPassword}
                     onChange={(e) => setNewPassword(e.target.value)}
                     placeholder="At least 8 chars, A-Z, 0-9 & symbol"
-                    className="w-full pl-10 pr-3.5 py-2.5 rounded-xl bg-[#FAF8F5] border border-stone-300 text-sm text-stone-900 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-stone-900 focus:border-stone-900 transition-all"
+                    className="w-full pl-10 pr-11 py-2.5 rounded-xl bg-[#FAF8F5] border border-stone-300 text-sm text-stone-900 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-stone-900 focus:border-stone-900 transition-all"
                   />
                 </div>
                 <PasswordRequirementsChecklist password={newPassword} />
@@ -296,11 +296,10 @@ export const ResetPasswordPage: React.FC = () => {
                   Confirm New Password
                 </label>
                 <div className="relative">
-                  <Lock className="w-4 h-4 text-stone-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
-                  <input
+                  <Lock className="w-4 h-4 text-stone-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none z-10" />
+                  <PasswordInput
                     id="reset-confirm-password"
                     name="confirmPassword"
-                    type="password"
                     autoComplete="new-password"
                     required
                     minLength={PASSWORD_MIN_LENGTH}
@@ -308,7 +307,7 @@ export const ResetPasswordPage: React.FC = () => {
                     value={confirmPassword}
                     onChange={(e) => setConfirmPassword(e.target.value)}
                     placeholder="Re-enter your new password"
-                    className="w-full pl-10 pr-3.5 py-2.5 rounded-xl bg-[#FAF8F5] border border-stone-300 text-sm text-stone-900 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-stone-900 focus:border-stone-900 transition-all"
+                    className="w-full pl-10 pr-11 py-2.5 rounded-xl bg-[#FAF8F5] border border-stone-300 text-sm text-stone-900 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-stone-900 focus:border-stone-900 transition-all"
                   />
                 </div>
               </div>
