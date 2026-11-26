@@ -45,6 +45,7 @@ const TicketQrCode: React.FC<{ token: string; size?: number }> = ({ token, size 
     <img
       src={qrDataUrl}
       alt={`Ticket QR Code for ${token}`}
+      data-qr-surface
       className="w-28 h-28 rounded-lg shadow-xs bg-white"
     />
   );
@@ -477,7 +478,10 @@ export const OrderConfirmationPage: React.FC = () => {
               <div className="p-6 md:p-8 md:col-span-4 bg-gray-50 flex flex-col items-center justify-center text-center space-y-3">
                 {isTicketEligible && tkt.ticketToken ? (
                   <>
-                    <div className="p-3 rounded-2xl bg-white border border-gray-200 shadow-sm flex items-center justify-center">
+                    <div
+                      data-qr-surface
+                      className="p-3 rounded-2xl bg-white dark:bg-white border border-gray-200 dark:border-gray-200 shadow-sm flex items-center justify-center"
+                    >
                       <TicketQrCode token={tkt.ticketToken} size={112} />
                     </div>
 

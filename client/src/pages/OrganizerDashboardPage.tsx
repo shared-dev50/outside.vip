@@ -57,10 +57,9 @@ export const OrganizerDashboardPage: React.FC<OrganizerDashboardPageProps> = ({
 
   // Sync body background with page theme to prevent bounce discoloration
   useEffect(() => {
-    const originalBg = document.body.style.backgroundColor;
-    document.body.style.backgroundColor = '#FAF8F5';
+    document.body.classList?.add('theme-editorial-body');
     return () => {
-      document.body.style.backgroundColor = originalBg;
+      document.body.classList?.remove('theme-editorial-body');
     };
   }, []);
 

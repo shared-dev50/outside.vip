@@ -52,11 +52,11 @@ export const PosterCard: React.FC<PosterCardProps> = ({
     >
       <div
         className={`rounded-sm transition-all duration-500 ease-out p-2.5 sm:p-3 relative ${isElevated
-            ? 'bg-[#EAE4D9] border border-[#DDD5C7] shadow-[0_25px_45px_-12px_rgba(40,30,20,0.22)]'
-            : 'bg-transparent border border-transparent hover:bg-[#F2ECE1]/60 hover:border-[#E2DAD0]'
+            ? 'bg-[#EAE4D9] dark:bg-[#171922] border border-[#DDD5C7] dark:border-[#2E3446] shadow-[0_25px_45px_-12px_rgba(40,30,20,0.22)] dark:shadow-[0_25px_45px_-12px_rgba(0,0,0,0.65)]'
+            : 'bg-transparent border border-transparent hover:bg-[#F2ECE1]/60 dark:hover:bg-[#1A1D27] hover:border-[#E2DAD0] dark:hover:border-[#2A2F3D]'
           }`}
       >
-        <div className="relative aspect-[3/4] w-full overflow-hidden bg-stone-900 border border-stone-800/80 shadow-inner">
+        <div className="relative aspect-[3/4] w-full overflow-hidden bg-stone-900 border border-stone-800/80 dark:border-[#2E3446] shadow-inner">
           <img
             src={event.coverImageUrl}
             alt={event.title}

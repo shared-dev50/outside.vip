@@ -10,10 +10,9 @@ import { TapeRibbons } from '../components/home/TapeRibbons';
 export const HomePage: React.FC = () => {
   // Sync body background with homepage canvas to eliminate any white overscroll bounce
   useEffect(() => {
-    const originalBg = document.body.style.backgroundColor;
-    document.body.style.backgroundColor = '#FAF8F5';
+    document.body.classList?.add('theme-editorial-body');
     return () => {
-      document.body.style.backgroundColor = originalBg;
+      document.body.classList?.remove('theme-editorial-body');
     };
   }, []);
 

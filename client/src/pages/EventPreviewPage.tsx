@@ -415,7 +415,7 @@ export const EventPreviewPage: React.FC<EventPreviewPageProps> = ({ initialUser 
                   {uiPerms.canManageTickets && (
                     <Link
                       to={uiPerms.editPath}
-                      className="inline-block text-xs font-mono text-black font-semibold underline"
+                      className="inline-block text-xs font-mono text-black dark:text-[#F3F1EC] font-semibold underline"
                     >
                       Add Ticket Tiers in Editor →
                     </Link>
