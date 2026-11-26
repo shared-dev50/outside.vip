@@ -41,8 +41,10 @@ export const App: React.FC = () => {
 
   return (
     <div
-      className={`min-h-screen flex flex-col font-sans selection:bg-stone-900 selection:text-white ${
-        isEditorial ? 'bg-[#FAF8F5] text-stone-900' : 'bg-white text-gray-900'
+      className={`min-h-screen flex flex-col font-sans selection:bg-stone-900 selection:text-white dark:selection:bg-[#F3F1EC] dark:selection:text-[#0D0E12] ${
+        isEditorial
+          ? 'bg-[#FAF8F5] dark:bg-[#0D0E12] text-stone-900 dark:text-[#F3F1EC]'
+          : 'bg-white dark:bg-[#0D0E12] text-gray-900 dark:text-[#F3F1EC]'
       }`}
     >
       <Navbar />

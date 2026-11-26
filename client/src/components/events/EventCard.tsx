@@ -2,16 +2,17 @@ import React from 'react';
 import { Link } from 'react-router-dom';
 import { ArrowRight } from 'lucide-react';
 import { Event } from '../../types';
+import { EventCoverImage } from './EventCoverImage';
 
 interface EventCardProps {
   event: Event;
-  aspectRatio?: '16/10' | '4/3' | '3/2';
+  aspectRatio?: '4/5' | '16/10' | '4/3' | '3/2';
   priority?: boolean;
 }
 
 export const EventCard: React.FC<EventCardProps> = ({
   event,
-  aspectRatio = '16/10',
+  aspectRatio = '4/5',
 }) => {
   // Formats date parts: "SUN", "18", "APR 24"
   const getBadgeDate = (dateString: string) => {
@@ -48,20 +49,18 @@ export const EventCard: React.FC<EventCardProps> = ({
       className="group flex flex-col justify-between text-left transition-all duration-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-stone-900 rounded-lg p-2.5 sm:p-3 bg-white border border-stone-200/80 hover:border-stone-400 hover:shadow-md"
     >
       <div className="space-y-3.5">
-        <div
-          className={`relative ${aspectClass} w-full overflow-hidden rounded-md bg-stone-900`}
+        <EventCoverImage
+          src={event.coverImageUrl}
+          alt={event.title}
+          mode={aspectRatio === '4/5' ? 'poster' : 'fixed'}
+          loading="lazy"
+          containerClassName={
+            aspectRatio === '4/5'
+              ? 'rounded-md border border-stone-200/60'
+              : `${aspectClass} w-full rounded-md bg-stone-900`
+          }
+          imgClassName="group-hover:scale-[1.03] transition-transform duration-500 ease-out"
         >
-          <img
-            src={event.coverImageUrl}
-            alt={event.title}
-            loading="lazy"
-            className="w-full h-full object-cover group-hover:scale-[1.03] transition-transform duration-500 ease-out"
-            onError={(e) => {
-              e.currentTarget.src =
-                'https://images.unsplash.com/photo-1514525253161-7a46d19cd819?auto=format&fit=crop&w=1200&q=80';
-            }}
-          />
-
           {event.isSoldOut && (
             <div className="absolute top-2.5 right-2.5 z-10">
               <span className="px-2 py-0.5 rounded bg-black/90 text-white font-mono text-[10px] font-bold uppercase tracking-wider backdrop-blur-xs">
@@ -70,8 +69,8 @@ export const EventCard: React.FC<EventCardProps> = ({
             </div>
           )}
 
-          <div className="absolute inset-0 pointer-events-none border border-black/10 rounded-md" />
-        </div>
+          <div className="absolute inset-0 pointer-events-none border border-black/10 rounded-md z-10" />
+        </EventCoverImage>
 
         <div>
           <div className="inline-flex flex-col items-center justify-center border border-stone-300/90 rounded-sm overflow-hidden bg-white shadow-xs w-11 text-center select-none">

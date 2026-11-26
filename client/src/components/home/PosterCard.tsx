@@ -1,6 +1,7 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
 import { Event } from '../../types';
+import { EventCoverImage } from '../events/EventCoverImage';
 
 interface PosterCardProps {
   event: Event;
@@ -52,22 +53,18 @@ export const PosterCard: React.FC<PosterCardProps> = ({
     >
       <div
         className={`rounded-sm transition-all duration-500 ease-out p-2.5 sm:p-3 relative ${isElevated
-            ? 'bg-[#EAE4D9] border border-[#DDD5C7] shadow-[0_25px_45px_-12px_rgba(40,30,20,0.22)]'
-            : 'bg-transparent border border-transparent hover:bg-[#F2ECE1]/60 hover:border-[#E2DAD0]'
+            ? 'bg-[#EAE4D9] dark:bg-[#171922] border border-[#DDD5C7] dark:border-[#2E3446] shadow-[0_25px_45px_-12px_rgba(40,30,20,0.22)] dark:shadow-[0_25px_45px_-12px_rgba(0,0,0,0.65)]'
+            : 'bg-transparent border border-transparent hover:bg-[#F2ECE1]/60 dark:hover:bg-[#1A1D27] hover:border-[#E2DAD0] dark:hover:border-[#2A2F3D]'
           }`}
       >
-        <div className="relative aspect-[3/4] w-full overflow-hidden bg-stone-900 border border-stone-800/80 shadow-inner">
-          <img
-            src={event.coverImageUrl}
-            alt={event.title}
-            loading="lazy"
-            className="w-full h-full object-cover group-hover:scale-[1.04] transition-transform duration-700 ease-out"
-            onError={(e) => {
-              e.currentTarget.src =
-                'https://images.unsplash.com/photo-1514525253161-7a46d19cd819?auto=format&fit=crop&w=1200&q=80';
-            }}
-          />
-
+        <EventCoverImage
+          src={event.coverImageUrl}
+          alt={event.title}
+          mode="poster"
+          loading="lazy"
+          containerClassName="border border-stone-200/80 dark:border-[#2E3446] shadow-inner"
+          imgClassName="group-hover:scale-[1.04] transition-transform duration-700 ease-out"
+        >
           {event.isSoldOut && (
             <div className="absolute top-2.5 right-2.5 z-10">
               <span className="px-2 py-0.5 rounded bg-black/90 text-white font-mono text-[10px] font-bold uppercase tracking-wider">
@@ -76,8 +73,8 @@ export const PosterCard: React.FC<PosterCardProps> = ({
             </div>
           )}
 
-          <div className="absolute inset-0 pointer-events-none border border-black/10" />
-        </div>
+          <div className="absolute inset-0 pointer-events-none border border-black/10 z-10" />
+        </EventCoverImage>
 
         <div className="pt-2.5 sm:pt-3 pb-2 sm:pb-2.5 space-y-1 sm:space-y-1.5">
           <h3

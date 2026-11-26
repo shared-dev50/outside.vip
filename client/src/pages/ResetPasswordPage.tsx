@@ -10,6 +10,13 @@ import {
 } from 'lucide-react';
 import { api } from '../lib/api';
 import { useOptionalAuth } from '../context/AuthContext';
+import {
+  PASSWORD_MAX_LENGTH,
+  PASSWORD_MIN_LENGTH,
+  evaluatePasswordPolicy,
+} from '../lib/passwordPolicy';
+import { PasswordRequirementsChecklist } from '../components/auth/PasswordRequirementsChecklist';
+import { PasswordInput } from '../components/common/PasswordInput';
 
 type TokenState = 'loading' | 'valid' | 'invalid' | 'success' | 'transient-error';
 
@@ -84,13 +91,16 @@ export const ResetPasswordPage: React.FC = () => {
     e.preventDefault();
     setFormError(null);
 
-    if (newPassword.length < 8) {
-      setFormError('Password must be at least 8 characters long.');
+    const passwordEvaluation = evaluatePasswordPolicy(newPassword);
+    if (!passwordEvaluation.valid) {
+      setFormError(
+        passwordEvaluation.firstError || 'Password does not meet security requirements.'
+      );
       return;
     }
 
-    if (newPassword.length > 128) {
-      setFormError('Password must be at most 128 characters long.');
+    if (newPassword.length > PASSWORD_MAX_LENGTH) {
+      setFormError(`Password must be at most ${PASSWORD_MAX_LENGTH} characters long.`);
       return;
     }
 
@@ -261,21 +271,21 @@ export const ResetPasswordPage: React.FC = () => {
                   New Password
                 </label>
                 <div className="relative">
-                  <Lock className="w-4 h-4 text-stone-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
-                  <input
+                  <Lock className="w-4 h-4 text-stone-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none z-10" />
+                  <PasswordInput
                     id="reset-new-password"
                     name="newPassword"
-                    type="password"
                     autoComplete="new-password"
                     required
-                    minLength={8}
-                    maxLength={128}
+                    minLength={PASSWORD_MIN_LENGTH}
+                    maxLength={PASSWORD_MAX_LENGTH}
                     value={newPassword}
                     onChange={(e) => setNewPassword(e.target.value)}
-                    placeholder="Minimum 8 characters"
-                    className="w-full pl-10 pr-3.5 py-2.5 rounded-xl bg-[#FAF8F5] border border-stone-300 text-sm text-stone-900 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-stone-900 focus:border-stone-900 transition-all"
+                    placeholder="At least 8 chars, A-Z, 0-9 & symbol"
+                    className="w-full pl-10 pr-11 py-2.5 rounded-xl bg-[#FAF8F5] border border-stone-300 text-sm text-stone-900 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-stone-900 focus:border-stone-900 transition-all"
                   />
                 </div>
+                <PasswordRequirementsChecklist password={newPassword} />
               </div>
 
               <div>
@@ -286,19 +296,18 @@ export const ResetPasswordPage: React.FC = () => {
                   Confirm New Password
                 </label>
                 <div className="relative">
-                  <Lock className="w-4 h-4 text-stone-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
-                  <input
+                  <Lock className="w-4 h-4 text-stone-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none z-10" />
+                  <PasswordInput
                     id="reset-confirm-password"
                     name="confirmPassword"
-                    type="password"
                     autoComplete="new-password"
                     required
-                    minLength={8}
-                    maxLength={128}
+                    minLength={PASSWORD_MIN_LENGTH}
+                    maxLength={PASSWORD_MAX_LENGTH}
                     value={confirmPassword}
                     onChange={(e) => setConfirmPassword(e.target.value)}
                     placeholder="Re-enter your new password"
-                    className="w-full pl-10 pr-3.5 py-2.5 rounded-xl bg-[#FAF8F5] border border-stone-300 text-sm text-stone-900 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-stone-900 focus:border-stone-900 transition-all"
+                    className="w-full pl-10 pr-11 py-2.5 rounded-xl bg-[#FAF8F5] border border-stone-300 text-sm text-stone-900 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-stone-900 focus:border-stone-900 transition-all"
                   />
                 </div>
               </div>

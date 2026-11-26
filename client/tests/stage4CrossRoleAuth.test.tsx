@@ -262,10 +262,15 @@ describe('Authentication Stage 4: Cross-Role Navigation, Unified OTP Login & Das
     });
 
     it('renders absolute Navbar links (/orders, /teams) cleanly from nested routes without obsolete /atendees link', () => {
+      const organizerUser: User = {
+        ...baseAttendeeUser,
+        id: 'usr-org-navbar',
+        role: 'ORGANIZER',
+      };
       const html = renderToString(
         <QueryClientProvider client={queryClient}>
           <MemoryRouter initialEntries={['/organizer/finance']}>
-            <AuthContext.Provider value={createMockAuth(baseAttendeeUser)}>
+            <AuthContext.Provider value={createMockAuth(organizerUser)}>
               <Navbar />
             </AuthContext.Provider>
           </MemoryRouter>

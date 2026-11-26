@@ -10,10 +10,9 @@ import { TapeRibbons } from '../components/home/TapeRibbons';
 export const HomePage: React.FC = () => {
   // Sync body background with homepage canvas to eliminate any white overscroll bounce
   useEffect(() => {
-    const originalBg = document.body.style.backgroundColor;
-    document.body.style.backgroundColor = '#FAF8F5';
+    document.body.classList?.add('theme-editorial-body');
     return () => {
-      document.body.style.backgroundColor = originalBg;
+      document.body.classList?.remove('theme-editorial-body');
     };
   }, []);
 
@@ -101,7 +100,7 @@ export const HomePage: React.FC = () => {
                     i === 2 ? '-translate-y-4 shadow-xl bg-stone-200/60' : ''
                   }`}
                 >
-                  <div className="aspect-[3/4] bg-stone-200 rounded-sm" />
+                  <div className="aspect-[4/5] bg-stone-200 rounded-sm" />
                   <div className="space-y-1.5 pt-0.5">
                     <div className="h-4 w-5/6 bg-stone-200 rounded" />
                     <div className="h-3 w-3/4 bg-stone-200 rounded" />
@@ -190,7 +189,7 @@ export const HomePage: React.FC = () => {
             </div>
           )}
 
-          {!isLoading && allEvents.length === 0 && (
+          {!isLoading && !error && allEvents.length === 0 && (
             <div className="p-12 text-center text-stone-500 text-xs font-mono uppercase tracking-wider">
               No live public events found in catalogue.
             </div>

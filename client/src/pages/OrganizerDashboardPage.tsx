@@ -13,6 +13,7 @@ import {
   OrganizerWorkspaceSetupBanner,
 } from '../components/auth/EmailVerificationGate';
 import { AuthFormCard } from '../components/auth/AuthFormCard';
+import { EventCoverImage } from '../components/events/EventCoverImage';
 import {
   Plus,
   Users,
@@ -57,10 +58,9 @@ export const OrganizerDashboardPage: React.FC<OrganizerDashboardPageProps> = ({
 
   // Sync body background with page theme to prevent bounce discoloration
   useEffect(() => {
-    const originalBg = document.body.style.backgroundColor;
-    document.body.style.backgroundColor = '#FAF8F5';
+    document.body.classList?.add('theme-editorial-body');
     return () => {
-      document.body.style.backgroundColor = originalBg;
+      document.body.classList?.remove('theme-editorial-body');
     };
   }, []);
 
@@ -646,17 +646,13 @@ export const OrganizerDashboardPage: React.FC<OrganizerDashboardPageProps> = ({
                       >
                         <td className="px-6 py-4.5 align-middle">
                           <div className="flex items-center gap-3.5">
-                            <div className="w-14 h-14 rounded-xl overflow-hidden bg-stone-100 border border-stone-200/80 shrink-0 relative shadow-2xs">
-                              <img
-                                src={evt.coverImageUrl}
-                                alt={evt.title}
-                                className="w-full h-full object-cover"
-                                onError={(e) => {
-                                  e.currentTarget.src =
-                                    'https://images.unsplash.com/photo-1514525253161-7a46d19cd819?auto=format&fit=crop&w=400&q=80';
-                                }}
-                              />
-                            </div>
+                            <EventCoverImage
+                              src={evt.coverImageUrl}
+                              alt={evt.title}
+                              mode="fixed"
+                              fallbackSrc="https://images.unsplash.com/photo-1514525253161-7a46d19cd819?auto=format&fit=crop&w=400&q=80"
+                              containerClassName="w-14 h-14 rounded-xl bg-stone-900 border border-stone-200/80 shrink-0 shadow-2xs"
+                            />
                             <div className="space-y-1 min-w-0">
                               <div className="flex items-center gap-2">
                                 <span className="font-bold text-stone-900 text-sm truncate max-w-sm xl:max-w-md group-hover:text-stone-700 transition-colors">

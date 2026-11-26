@@ -352,7 +352,7 @@ export const LocationAutocompleteInput: React.FC<LocationAutocompleteInputProps>
       )}
 
       {!isManualMode && value.placeId && !isChangingLocation && (
-        <div className="rounded-xl border border-emerald-200/80 bg-gradient-to-b from-emerald-50/40 to-white p-4 space-y-4 shadow-sm transition-all">
+        <div className="rounded-xl border border-emerald-200/80 dark:border-emerald-800/40 bg-gradient-to-b from-emerald-50/40 dark:from-emerald-950/30 to-white dark:to-[#15171E] p-4 space-y-4 shadow-sm transition-all">
           <div className="flex items-start justify-between gap-3">
             <div className="flex items-start gap-3 min-w-0">
               <div className="w-9 h-9 rounded-lg bg-emerald-100 text-emerald-800 flex items-center justify-center shrink-0 mt-0.5 shadow-sm">

@@ -3,13 +3,56 @@
 @tailwind utilities;
 
 @layer base {
-  :root {
+  :root,
+  [data-theme="light"] {
     color-scheme: light;
+    --bg-canvas: #ffffff;
+    --bg-editorial: #faf8f5;
+    --bg-surface: #ffffff;
+    --bg-surface-elevated: #ffffff;
+    --bg-surface-subtle: #f5f5f4;
+    --bg-surface-muted: #efece5;
+    --bg-surface-hover: #f2ece1;
+    --bg-input: #ffffff;
+    --border-subtle: #e7e5e4;
+    --border-strong: #d6d3d1;
+    --text-primary: #1c1917;
+    --text-secondary: #44403c;
+    --text-muted: #78716c;
+    --scrollbar-track: #ffffff;
+    --scrollbar-thumb: #e5e7eb;
+    --scrollbar-thumb-hover: #d1d5db;
+  }
+
+  [data-theme="dark"] {
+    color-scheme: dark;
+    --bg-canvas: #0d0e12;
+    --bg-editorial: #0d0e12;
+    --bg-surface: #15171e;
+    --bg-surface-elevated: #1c1f28;
+    --bg-surface-subtle: #1f232d;
+    --bg-surface-muted: #242834;
+    --bg-surface-hover: #282d3b;
+    --bg-input: #12141a;
+    --border-subtle: #2a2f3d;
+    --border-strong: #3a4154;
+    --text-primary: #f3f1ec;
+    --text-secondary: #cbc6bc;
+    --text-muted: #958f86;
+    --scrollbar-track: #0d0e12;
+    --scrollbar-thumb: #2b3140;
+    --scrollbar-thumb-hover: #3d4558;
   }
 
   body {
-    @apply bg-white text-gray-900 antialiased selection:bg-gray-900 selection:text-white;
+    background-color: var(--bg-canvas);
+    color: var(--text-primary);
+    @apply antialiased selection:bg-gray-900 selection:text-white dark:selection:bg-[#F3F1EC] dark:selection:text-[#0D0E12];
     font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  }
+
+  body.theme-editorial-body {
+    background-color: var(--bg-editorial);
   }
 }
 
@@ -19,16 +62,312 @@
 }
 
 ::-webkit-scrollbar-track {
-  background: #FFFFFF;
+  background: var(--scrollbar-track);
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #E5E7EB;
+  background: var(--scrollbar-thumb);
   border-radius: 3px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #D1D5DB;
+  background: var(--scrollbar-thumb-hover);
+}
+
+/* Zero-specificity baseline dark theme mappings so explicit Tailwind dark: classes always win,
+   while preserving intentional QR quiet zones ([data-qr-surface]) and preserved dark chrome ([data-theme-preserve]). */
+:where(html.dark) .bg-white:not([data-qr-surface]):not([data-qr-surface] *):not([data-theme-preserve]) {
+  background-color: var(--bg-surface);
+}
+
+:where(html.dark) .bg-white\/95 {
+  background-color: rgba(21, 23, 30, 0.95);
+}
+
+:where(html.dark) .bg-white\/90 {
+  background-color: rgba(21, 23, 30, 0.9);
+}
+
+:where(html.dark) .bg-white\/80 {
+  background-color: rgba(21, 23, 30, 0.8);
+}
+
+:where(html.dark) .bg-white\/70 {
+  background-color: rgba(28, 31, 40, 0.78);
+}
+
+:where(html.dark) .bg-white\/60 {
+  background-color: rgba(28, 31, 40, 0.65);
+}
+
+:where(html.dark) .bg-\[\#FAF8F5\],
+:where(html.dark) .bg-\[\#FAF9F6\] {
+  background-color: var(--bg-editorial);
+}
+
+:where(html.dark) .bg-\[\#FAF8F5\]\/95 {
+  background-color: rgba(13, 14, 18, 0.95);
+}
+
+:where(html.dark) .bg-\[\#EFECE5\],
+:where(html.dark) .bg-\[\#F5F2EC\],
+:where(html.dark) .bg-\[\#F2ECE1\] {
+  background-color: var(--bg-surface-muted);
+}
+
+:where(html.dark) .bg-\[\#EFECE5\]\/80 {
+  background-color: rgba(36, 40, 52, 0.85);
+}
+
+:where(html.dark) .bg-\[\#EAE4D9\] {
+  background-color: var(--bg-surface);
+}
+
+:where(html.dark) .bg-stone-50,
+:where(html.dark) .bg-gray-50 {
+  background-color: var(--bg-surface-subtle);
+}
+
+:where(html.dark) .bg-stone-50\/50,
+:where(html.dark) .bg-gray-50\/50,
+:where(html.dark) .bg-gray-50\/60 {
+  background-color: rgba(31, 35, 45, 0.65);
+}
+
+:where(html.dark) .bg-stone-100,
+:where(html.dark) .bg-gray-100 {
+  background-color: var(--bg-surface-muted);
+}
+
+:where(html.dark) .bg-stone-200,
+:where(html.dark) .bg-stone-200\/70,
+:where(html.dark) .bg-gray-200 {
+  background-color: #2c3140;
+}
+
+:where(html.dark) .bg-stone-300,
+:where(html.dark) .bg-gray-300 {
+  background-color: #3a4154;
+}
+
+:where(html.dark) .bg-gray-200\/80 {
+  background-color: rgba(44, 49, 64, 0.85);
+}
+
+:where(html.dark) .hover\:bg-stone-50:hover,
+:where(html.dark) .hover\:bg-gray-50:hover,
+:where(html.dark) .hover\:bg-stone-100:hover,
+:where(html.dark) .hover\:bg-gray-100:hover,
+:where(html.dark) .hover\:bg-white:hover,
+:where(html.dark) .hover\:bg-\[\#F2ECE1\]\/60:hover {
+  background-color: var(--bg-surface-hover);
+}
+
+:where(html.dark) .focus\:bg-white:focus {
+  background-color: var(--bg-surface-elevated);
+}
+
+:where(html.dark) .border-stone-200,
+:where(html.dark) .border-stone-200\/80,
+:where(html.dark) .border-stone-200\/60,
+:where(html.dark) .border-gray-200,
+:where(html.dark) .border-\[\#DDD5C7\],
+:where(html.dark) .border-\[\#D8D2C5\],
+:where(html.dark) .border-\[\#E5DFD3\] {
+  border-color: var(--border-subtle);
+}
+
+:where(html.dark) .border-stone-100,
+:where(html.dark) .border-gray-100 {
+  border-color: #232734;
+}
+
+:where(html.dark) .border-stone-300,
+:where(html.dark) .border-gray-300 {
+  border-color: var(--border-strong);
+}
+
+:where(html.dark) .divide-stone-200 > :not([hidden]) ~ :not([hidden]),
+:where(html.dark) .divide-gray-200 > :not([hidden]) ~ :not([hidden]) {
+  border-color: var(--border-subtle);
+}
+
+:where(html.dark) .divide-stone-100 > :not([hidden]) ~ :not([hidden]),
+:where(html.dark) .divide-gray-100 > :not([hidden]) ~ :not([hidden]) {
+  border-color: #232734;
+}
+
+:where(html.dark) .text-stone-900,
+:where(html.dark) .text-gray-900,
+:where(html.dark) .text-black,
+:where(html.dark) .text-stone-800,
+:where(html.dark) .text-gray-800 {
+  color: var(--text-primary);
+}
+
+:where(html.dark) .text-stone-700,
+:where(html.dark) .text-gray-700,
+:where(html.dark) .text-stone-600,
+:where(html.dark) .text-gray-600,
+:where(html.dark) .text-\[\#5C5346\] {
+  color: var(--text-secondary);
+}
+
+:where(html.dark) .text-stone-500,
+:where(html.dark) .text-gray-500,
+:where(html.dark) .text-stone-400,
+:where(html.dark) .text-gray-400,
+:where(html.dark) .text-\[\#7A7165\],
+:where(html.dark) .text-\[\#96846D\] {
+  color: var(--text-muted);
+}
+
+:where(html.dark) .text-\[\#D8D2C5\] {
+  color: #2e3342;
+}
+
+:where(html.dark) .hover\:text-stone-900:hover,
+:where(html.dark) .hover\:text-gray-900:hover,
+:where(html.dark) .hover\:text-black:hover,
+:where(html.dark) .hover\:text-stone-700:hover,
+:where(html.dark) .hover\:text-gray-700:hover {
+  color: var(--text-primary);
+}
+
+:where(html.dark) .focus\:border-stone-900:focus,
+:where(html.dark) .focus\:border-gray-900:focus,
+:where(html.dark) .focus-within\:border-gray-900:focus-within,
+:where(html.dark) .hover\:border-stone-300:hover,
+:where(html.dark) .hover\:border-stone-400:hover,
+:where(html.dark) .hover\:border-stone-900:hover {
+  border-color: #6b7280;
+}
+
+:where(html.dark) .focus\:ring-stone-900:focus,
+:where(html.dark) .focus\:ring-gray-900:focus,
+:where(html.dark) .focus-within\:ring-gray-900:focus-within {
+  --tw-ring-color: #6b7280;
+}
+
+:where(html.dark) .placeholder-stone-400::placeholder,
+:where(html.dark) .placeholder-gray-400::placeholder,
+:where(html.dark) input::placeholder,
+:where(html.dark) textarea::placeholder {
+  color: #6f7687;
+}
+
+:where(html.dark) button.bg-stone-900,
+:where(html.dark) button.bg-gray-900,
+:where(html.dark) a.bg-stone-900,
+:where(html.dark) a.bg-gray-900 {
+  background-color: #f3f1ec;
+  color: #121318;
+}
+
+:where(html.dark) button.bg-stone-900:hover,
+:where(html.dark) button.bg-gray-900:hover,
+:where(html.dark) button.hover\:bg-stone-800:hover,
+:where(html.dark) button.hover\:bg-black:hover,
+:where(html.dark) a.bg-stone-900:hover,
+:where(html.dark) a.bg-gray-900:hover,
+:where(html.dark) a.hover\:bg-stone-800:hover,
+:where(html.dark) a.hover\:bg-black:hover {
+  background-color: #ffffff;
+  color: #0d0e12;
+}
+
+:where(html.dark) .group:hover .group-hover\:bg-stone-900 {
+  background-color: #f3f1ec;
+  color: #121318;
+}
+
+:where(html.dark) .group:hover .group-hover\:text-white {
+  color: #121318;
+}
+
+/* Status pills, banners, and alerts in dark mode */
+:where(html.dark) .bg-emerald-50 {
+  background-color: rgba(16, 185, 129, 0.14);
+}
+:where(html.dark) .bg-emerald-100 {
+  background-color: rgba(16, 185, 129, 0.2);
+}
+:where(html.dark) .border-emerald-200 {
+  border-color: rgba(16, 185, 129, 0.34);
+}
+:where(html.dark) .text-emerald-700,
+:where(html.dark) .text-emerald-800,
+:where(html.dark) .text-emerald-900 {
+  color: #6ee7b7;
+}
+
+:where(html.dark) .bg-amber-50 {
+  background-color: rgba(245, 158, 11, 0.14);
+}
+:where(html.dark) .bg-amber-100 {
+  background-color: rgba(245, 158, 11, 0.2);
+}
+:where(html.dark) .border-amber-200,
+:where(html.dark) .border-amber-200\/60,
+:where(html.dark) .border-amber-300 {
+  border-color: rgba(245, 158, 11, 0.34);
+}
+:where(html.dark) .text-amber-700,
+:where(html.dark) .text-amber-800,
+:where(html.dark) .text-amber-900 {
+  color: #fcd34d;
+}
+
+:where(html.dark) .bg-rose-50,
+:where(html.dark) .bg-red-50 {
+  background-color: rgba(244, 63, 94, 0.14);
+}
+:where(html.dark) .bg-rose-100,
+:where(html.dark) .bg-red-100 {
+  background-color: rgba(244, 63, 94, 0.22);
+}
+:where(html.dark) .border-rose-200,
+:where(html.dark) .border-red-200 {
+  border-color: rgba(244, 63, 94, 0.34);
+}
+:where(html.dark) .text-rose-600,
+:where(html.dark) .text-rose-700,
+:where(html.dark) .text-rose-800,
+:where(html.dark) .text-rose-900,
+:where(html.dark) .text-red-700,
+:where(html.dark) .text-red-800 {
+  color: #fda4af;
+}
+
+:where(html.dark) .bg-blue-50,
+:where(html.dark) .bg-indigo-50 {
+  background-color: rgba(99, 102, 241, 0.15);
+}
+:where(html.dark) .bg-blue-100,
+:where(html.dark) .bg-indigo-100 {
+  background-color: rgba(99, 102, 241, 0.22);
+}
+:where(html.dark) .border-blue-200,
+:where(html.dark) .border-indigo-200,
+:where(html.dark) .border-indigo-200\/60 {
+  border-color: rgba(99, 102, 241, 0.34);
+}
+:where(html.dark) .text-blue-700,
+:where(html.dark) .text-blue-800,
+:where(html.dark) .text-indigo-700,
+:where(html.dark) .text-indigo-800 {
+  color: #a5b4fc;
+}
+
+:where(html.dark) .bg-purple-50 {
+  background-color: rgba(168, 85, 247, 0.15);
+}
+:where(html.dark) .border-purple-200 {
+  border-color: rgba(168, 85, 247, 0.34);
+}
+:where(html.dark) .text-purple-700,
+:where(html.dark) .text-purple-800 {
+  color: #d8b4fe;
 }
 
 @keyframes marquee {

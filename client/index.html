@@ -10,13 +10,43 @@
     <link rel="manifest" href="/site.webmanifest" />
     <meta name="theme-color" content="#000000" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script>
+      (function () {
+        try {
+          var key = 'outside_theme_preference';
+          var stored = null;
+          try {
+            stored = window.localStorage.getItem(key);
+          } catch (e) {}
+          var pref = stored === 'light' || stored === 'dark' || stored === 'system' ? stored : 'system';
+          var resolved =
+            pref === 'light' || pref === 'dark'
+              ? pref
+              : window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches
+                ? 'dark'
+                : 'light';
+          var root = document.documentElement;
+          root.setAttribute('data-theme', resolved);
+          if (resolved === 'dark') {
+            root.classList.add('dark');
+          } else {
+            root.classList.remove('dark');
+          }
+          root.style.colorScheme = resolved;
+          var meta = document.querySelector('meta[name="theme-color"]');
+          if (meta) {
+            meta.setAttribute('content', resolved === 'dark' ? '#0D0E12' : '#FAF8F5');
+          }
+        } catch (e) {}
+      })();
+    </script>
     <title>Outside.vip — Event Discovery & Tickets</title>
     <meta name="description" content="Discover upcoming events, find your people, and get tickets on Outside.vip." />
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   </head>
-  <body class="bg-white text-gray-900 font-sans antialiased selection:bg-gray-900 selection:text-white min-h-screen">
+  <body class="bg-white dark:bg-[#0D0E12] text-gray-900 dark:text-[#F3F1EC] font-sans antialiased selection:bg-gray-900 selection:text-white dark:selection:bg-[#F3F1EC] dark:selection:text-[#0D0E12] min-h-screen">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

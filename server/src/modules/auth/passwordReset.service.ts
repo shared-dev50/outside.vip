@@ -31,6 +31,7 @@ import {
   isEmailOutboxWorkerRunning,
   triggerEmailOutboxDispatch,
 } from '../notifications/emailOutboxWorker.js';
+import { PASSWORD_MAX_LENGTH, evaluatePasswordPolicy } from './passwordPolicy.js';
 
 export const PASSWORD_RESET_EXPIRY_MINUTES = 30;
 export const PASSWORD_RESET_EXPIRY_MS = PASSWORD_RESET_EXPIRY_MINUTES * 60 * 1000;
@@ -363,6 +364,20 @@ export async function completePasswordReset(params: {
     throw new BadRequestError(
       'This password reset link is invalid or has expired. Please request a new one.',
       'INVALID_RESET_TOKEN'
+    );
+  }
+
+  const passwordEvaluation = evaluatePasswordPolicy(params.newPassword);
+  if (!passwordEvaluation.valid) {
+    throw new BadRequestError(
+      passwordEvaluation.firstError || 'Password does not meet security requirements.',
+      'WEAK_PASSWORD'
+    );
+  }
+  if (params.newPassword.length > PASSWORD_MAX_LENGTH) {
+    throw new BadRequestError(
+      `Password must be at most ${PASSWORD_MAX_LENGTH} characters long.`,
+      'PASSWORD_TOO_LONG'
     );
   }
 

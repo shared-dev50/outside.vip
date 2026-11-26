@@ -2,6 +2,7 @@ import React, { createContext, useContext, useState, useEffect, useCallback, use
 import { QueryClientContext } from '@tanstack/react-query';
 import { User } from '../types';
 import { api, setActiveCsrfToken } from '../lib/api';
+import { clearAuthenticatedQueries } from '../lib/queryCache';
 
 interface AuthContextType {
   user: User | null;
@@ -42,7 +43,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
       setUser((prev) => {
         if (prev && prev.id !== fetchedUser.id) {
-          queryClient?.clear();
+          clearAuthenticatedQueries(queryClient);
         }
         return fetchedUser;
       });
@@ -50,7 +51,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     } catch {
       setActiveCsrfToken(null);
       setUser(null);
-      queryClient?.clear();
+      clearAuthenticatedQueries(queryClient);
       return null;
     }
   }, [queryClient]);
@@ -70,7 +71,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         if (!isMounted) return;
         setActiveCsrfToken(null);
         setUser(null);
-        queryClient?.clear();
       } finally {
         if (isMounted) {
           setIsLoading(false);
@@ -82,11 +82,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return () => {
       isMounted = false;
     };
-  }, [queryClient]);
+  }, []);
 
   const login = useCallback(async (email: string, password: string) => {
     const data = await api.auth.login({ email, password });
-    queryClient?.clear();
+    clearAuthenticatedQueries(queryClient);
     if (data.csrfToken) {
       setActiveCsrfToken(data.csrfToken);
     }
@@ -104,7 +104,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const verifyLoginOtp = useCallback(async (email: string, code: string): Promise<User> => {
     const data = await api.auth.verifyLoginOtp({ email, code });
-    queryClient?.clear();
+    clearAuthenticatedQueries(queryClient);
     if (data.csrfToken) {
       setActiveCsrfToken(data.csrfToken);
     }
@@ -115,7 +115,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const clearSessionState = useCallback(() => {
     setActiveCsrfToken(null);
     setUser(null);
-    queryClient?.clear();
+    clearAuthenticatedQueries(queryClient);
   }, [queryClient]);
 
   const register = useCallback(async (input: {
@@ -126,7 +126,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     organizerDisplayName?: string;
   }) => {
     const data = await api.auth.register(input);
-    queryClient?.clear();
+    clearAuthenticatedQueries(queryClient);
     if (data.csrfToken) {
       setActiveCsrfToken(data.csrfToken);
     }
@@ -158,7 +158,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     } finally {
       setActiveCsrfToken(null);
       setUser(null);
-      queryClient?.clear();
+      clearAuthenticatedQueries(queryClient);
     }
   }, [queryClient]);
 

@@ -7,6 +7,7 @@ import { getStripePromise } from '../../lib/stripe';
 import { api } from '../../lib/api';
 import { calculateCheckoutFeeBreakdown } from '../../lib/fees';
 import { validateAndNormalizePhone } from '../../lib/phone';
+import { useOptionalTheme } from '../../context/ThemeContext';
 
 export interface CheckoutDialogProps {
   isOpen: boolean;
@@ -58,6 +59,8 @@ const PaymentContent: React.FC<PaymentContentProps> = ({
   const stripe = useStripe();
   const elements = useElements();
   const navigate = useNavigate();
+  const themeContext = useOptionalTheme();
+  const isDarkTheme = themeContext?.resolvedTheme === 'dark';
 
   const [name, setName] = useState(attendeeName);
   const [email, setEmail] = useState(attendeeEmail);
@@ -563,16 +566,16 @@ const PaymentContent: React.FC<PaymentContentProps> = ({
                     style: {
                       base: {
                         fontSize: '13px',
-                        color: '#111827',
+                        color: isDarkTheme ? '#F3F1EC' : '#111827',
                         fontFamily: 'Inter, system-ui, -apple-system, sans-serif',
                         '::placeholder': {
-                          color: '#9ca3af',
+                          color: isDarkTheme ? '#6F7687' : '#9ca3af',
                         },
-                        iconColor: '#374151',
+                        iconColor: isDarkTheme ? '#D1D5DB' : '#374151',
                       },
                       invalid: {
-                        color: '#e11d48',
-                        iconColor: '#e11d48',
+                        color: isDarkTheme ? '#FDA4AF' : '#e11d48',
+                        iconColor: isDarkTheme ? '#FDA4AF' : '#e11d48',
                       },
                     },
                     hidePostalCode: false,

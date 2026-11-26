@@ -5,6 +5,8 @@ import { api } from '../lib/api';
 import { TicketTier, CheckoutSessionResult, WaitlistOfferInfo } from '../types';
 import { CheckoutDialog } from '../components/events/CheckoutDialog';
 import { JoinWaitlistDialog } from '../components/events/JoinWaitlistDialog';
+import { PasswordInput } from '../components/common/PasswordInput';
+import { EventCoverImage } from '../components/events/EventCoverImage';
 import { calculateCheckoutFeeBreakdown, calculateDisplayPriceFromGross } from '../lib/fees';
 import { getYouTubeEmbedUrl } from '../lib/youtube';
 import { validateAndNormalizePhone } from '../lib/phone';
@@ -19,8 +21,6 @@ import {
   Check,
   AlertCircle,
   Lock,
-  Eye,
-  EyeOff,
   Users,
   Sparkles,
   Image as ImageIcon,
@@ -38,7 +38,6 @@ export const EventDetailPage: React.FC = () => {
     return null;
   });
   const [passwordInput, setPasswordInput] = useState('');
-  const [showPassword, setShowPassword] = useState(false);
   const [isVerifyingPassword, setIsVerifyingPassword] = useState(false);
   const [passwordError, setPasswordError] = useState<string | null>(null);
   const [activeGalleryModalImage, setActiveGalleryModalImage] = useState<string | null>(null);
@@ -537,13 +536,15 @@ export const EventDetailPage: React.FC = () => {
         </div>
 
         <div className="max-w-xl mx-auto space-y-6 pt-4">
-          <div className="relative aspect-[16/10] rounded-xl overflow-hidden bg-stone-900 border border-stone-200 shadow-md">
-            <img
-              src={event.coverImageUrl}
-              alt={event.title}
-              className="w-full h-full object-cover filter blur-[2px] brightness-75 scale-105"
-            />
-            <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/40 to-transparent flex flex-col justify-end p-6 text-white space-y-1.5">
+          <EventCoverImage
+            src={event.coverImageUrl}
+            alt={event.title}
+            mode="fixed"
+            fallbackSrc="https://images.unsplash.com/photo-1514525253161-7a46d19cd819?auto=format&fit=crop&w=1600&q=85"
+            containerClassName="aspect-[16/10] rounded-xl bg-stone-900 border border-stone-200 shadow-md"
+            imgClassName="filter blur-[2px] brightness-75 scale-105"
+          >
+            <div className="absolute inset-0 z-10 bg-gradient-to-t from-black/80 via-black/40 to-transparent flex flex-col justify-end p-6 text-white space-y-1.5">
               <div className="flex items-center gap-2">
                 <span className="px-2.5 py-0.5 rounded bg-amber-600 text-white font-mono text-[10px] font-bold uppercase flex items-center gap-1">
                   <Lock className="w-3 h-3" />
@@ -560,7 +561,7 @@ export const EventDetailPage: React.FC = () => {
                 <p className="text-stone-300 text-xs sm:text-sm line-clamp-2">{event.tagline}</p>
               )}
             </div>
-          </div>
+          </EventCoverImage>
 
           <div className="bg-[#FAF8F5] border border-stone-200 rounded-xl p-6 sm:p-8 space-y-5 text-center shadow-xs">
             <div className="w-12 h-12 rounded-full bg-amber-100 border border-amber-200 text-amber-800 flex items-center justify-center mx-auto shadow-2xs">
@@ -581,26 +582,17 @@ export const EventDetailPage: React.FC = () => {
                 <label className="block text-xs font-mono uppercase text-stone-700 font-bold mb-1.5">
                   Access Password
                 </label>
-                <div className="relative">
-                  <input
-                    type={showPassword ? 'text' : 'password'}
-                    placeholder="Enter password..."
-                    value={passwordInput}
-                    onChange={(e) => {
-                      setPasswordInput(e.target.value);
-                      if (passwordError) setPasswordError(null);
-                    }}
-                    autoFocus
-                    className="w-full px-3.5 py-2.5 rounded-lg bg-white border border-stone-300 text-stone-900 placeholder-stone-400 text-sm font-mono focus:outline-none focus:border-stone-900 transition-colors pr-10"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowPassword(!showPassword)}
-                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-stone-500 hover:text-stone-800 p-1"
-                  >
-                    {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                  </button>
-                </div>
+                <PasswordInput
+                  id="event-access-password"
+                  placeholder="Enter password..."
+                  value={passwordInput}
+                  onChange={(e) => {
+                    setPasswordInput(e.target.value);
+                    if (passwordError) setPasswordError(null);
+                  }}
+                  autoFocus
+                  className="w-full pl-3.5 pr-11 py-2.5 rounded-lg bg-white border border-stone-300 text-stone-900 placeholder-stone-400 text-sm font-mono focus:outline-none focus:border-stone-900 transition-colors"
+                />
               </div>
 
               {passwordError && (
@@ -672,24 +664,21 @@ export const EventDetailPage: React.FC = () => {
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-10 items-start">
         <div className="lg:col-span-7 space-y-6">
-          <div className="relative aspect-[16/10] rounded-lg overflow-hidden bg-gray-100 border border-gray-200">
-            <img
-              src={event.coverImageUrl}
-              alt={event.title}
-              className="w-full h-full object-cover"
-              onError={(e) => {
-                e.currentTarget.src =
-                  'https://images.unsplash.com/photo-1514525253161-7a46d19cd819?auto=format&fit=crop&w=1600&q=85';
-              }}
-            />
+          <EventCoverImage
+            src={event.coverImageUrl}
+            alt={event.title}
+            mode="natural"
+            fallbackSrc="https://images.unsplash.com/photo-1514525253161-7a46d19cd819?auto=format&fit=crop&w=1600&q=85"
+            containerClassName="rounded-lg border border-gray-200 bg-stone-100"
+          >
             {event.isSoldOut && (
-              <div className="absolute top-3 right-3">
+              <div className="absolute top-3 right-3 z-10">
                 <span className="px-2.5 py-1 rounded bg-black text-white font-mono font-bold text-xs uppercase">
                   Sold Out
                 </span>
               </div>
             )}
-          </div>
+          </EventCoverImage>
 
           <div className="space-y-2">
             <h1 className="font-display font-extrabold text-2xl sm:text-3xl md:text-4xl text-gray-900 tracking-tight leading-tight">

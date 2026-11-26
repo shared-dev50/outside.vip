@@ -3,17 +3,17 @@ import { Link } from 'react-router-dom';
 
 export const Footer: React.FC = () => {
   return (
-    <footer className="border-t border-stone-200/80 bg-[#FAF9F6] text-stone-600">
+    <footer className="border-t border-stone-200/80 dark:border-[#2A2F3D] bg-[#FAF9F6] dark:bg-[#0D0E12] text-stone-600 dark:text-[#CBC6BC]">
       <div className="max-w-7xl xl:max-w-[1536px] mx-auto px-4 sm:px-6 lg:px-8 xl:px-10 py-12 sm:py-16">
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-10 lg:gap-16 items-start">
           <div className="lg:col-span-7 space-y-4">
             <Link
               to="/"
-              className="inline-block group focus:outline-none focus-visible:ring-2 focus-visible:ring-stone-900 rounded"
+              className="inline-block group focus:outline-none focus-visible:ring-2 focus-visible:ring-stone-900 dark:focus-visible:ring-[#F3F1EC] rounded"
               aria-label="Outside.vip homepage"
             >
-              <span className="font-display font-black text-2xl tracking-tight text-stone-900 group-hover:opacity-85 transition-opacity">
-                outside<span className="text-stone-400 font-normal">.vip</span>
+              <span className="font-display font-black text-2xl tracking-tight text-stone-900 dark:text-[#F3F1EC] group-hover:opacity-85 transition-opacity">
+                outside<span className="text-stone-400 dark:text-[#958F86] font-normal">.vip</span>
               </span>
             </Link>
 

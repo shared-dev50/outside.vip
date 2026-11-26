@@ -14,6 +14,9 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { api, setActiveCsrfToken } from '../../lib/api';
+import { PASSWORD_MIN_LENGTH, evaluatePasswordPolicy } from '../../lib/passwordPolicy';
+import { PasswordRequirementsChecklist } from './PasswordRequirementsChecklist';
+import { PasswordInput } from '../common/PasswordInput';
 
 export type AuthViewMode = 'login' | 'otp-login' | 'register' | 'forgot-password';
 
@@ -196,8 +199,11 @@ export const AuthFormCard: React.FC<AuthFormCardProps> = ({
           setIsSubmitting(false);
           return;
         }
-        if (password.length < 8) {
-          setError('Password must be at least 8 characters long.');
+        const passwordEvaluation = evaluatePasswordPolicy(password);
+        if (!passwordEvaluation.valid) {
+          setError(
+            passwordEvaluation.firstError || 'Password does not meet security requirements.'
+          );
           setIsSubmitting(false);
           return;
         }
@@ -416,20 +422,25 @@ export const AuthFormCard: React.FC<AuthFormCardProps> = ({
                 )}
               </div>
               <div className="relative">
-                <Lock className="w-4 h-4 text-stone-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
-                <input
+                <Lock className="w-4 h-4 text-stone-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none z-10" />
+                <PasswordInput
+                  key={`auth-password-${mode}`}
                   id="auth-password"
                   name="password"
-                  type="password"
                   autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
                   required
-                  minLength={mode === 'register' ? 8 : 1}
+                  minLength={mode === 'register' ? PASSWORD_MIN_LENGTH : 1}
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  placeholder={mode === 'register' ? 'Minimum 8 characters' : 'Enter your password'}
-                  className="w-full pl-10 pr-3.5 py-2.5 rounded-xl bg-[#FAF8F5] border border-stone-300 text-sm text-stone-900 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-stone-900 focus:border-stone-900 transition-all"
+                  placeholder={
+                    mode === 'register'
+                      ? 'At least 8 chars, A-Z, 0-9 & symbol'
+                      : 'Enter your password'
+                  }
+                  className="w-full pl-10 pr-11 py-2.5 rounded-xl bg-[#FAF8F5] border border-stone-300 text-sm text-stone-900 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-stone-900 focus:border-stone-900 transition-all"
                 />
               </div>
+              {mode === 'register' && <PasswordRequirementsChecklist password={password} />}
             </div>
           )}
 

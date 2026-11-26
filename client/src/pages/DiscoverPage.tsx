@@ -255,7 +255,7 @@ export const DiscoverPage: React.FC = () => {
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6 pt-2">
             {[1, 2, 3, 4, 5, 6, 7, 8].map((i) => (
               <div key={i} className="animate-pulse space-y-3 bg-white p-3 rounded-lg border border-stone-200">
-                <div className="aspect-[16/10] bg-stone-200 rounded-md" />
+                <div className="aspect-[4/5] bg-stone-200 rounded-md" />
                 <div className="w-11 h-12 bg-stone-200 rounded-sm" />
                 <div className="h-4 w-3/4 bg-stone-200 rounded" />
                 <div className="h-3 w-1/2 bg-stone-200 rounded" />
@@ -301,7 +301,7 @@ export const DiscoverPage: React.FC = () => {
               <div className="space-y-8">
                 <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-5 sm:gap-6">
                   {events.map((event) => (
-                    <EventCard key={event.id} event={event} aspectRatio="16/10" />
+                    <EventCard key={event.id} event={event} aspectRatio="4/5" />
                   ))}
                 </div>
 

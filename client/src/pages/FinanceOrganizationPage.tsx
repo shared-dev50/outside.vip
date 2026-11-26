@@ -104,10 +104,9 @@ export const FinanceOrganizationPage: React.FC = () => {
   const clearSessionState = auth?.clearSessionState;
 
   useEffect(() => {
-    const originalBg = document.body.style.backgroundColor;
-    document.body.style.backgroundColor = '#FAF8F5';
+    document.body.classList?.add('theme-editorial-body');
     return () => {
-      document.body.style.backgroundColor = originalBg;
+      document.body.classList?.remove('theme-editorial-body');
     };
   }, []);
 
