@@ -203,6 +203,8 @@ export interface Event {
   minPriceInCents?: number;
   currency?: string;
   isSoldOut?: boolean;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export type OrgType = 'Company' | 'Partnership' | 'NGO/Non-profit' | 'Other';

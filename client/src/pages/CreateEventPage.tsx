@@ -318,7 +318,7 @@ export const CreateEventPage: React.FC<CreateEventPageProps> = ({
   useEffect(() => {
     if (existingData?.event) {
       const evt = existingData.event;
-      const syncKey = `${evt.id}:${evt.updatedAt || ''}:${evt.coverImageUrl || ''}`;
+      const syncKey = `${evt.id}:${evt.updatedAt || ''}:${evt.coverImageUrl || ''}:${evt.status || ''}`;
       if (hydratedEventKeyRef.current === syncKey) {
         return;
       }
