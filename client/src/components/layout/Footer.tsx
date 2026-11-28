@@ -10,10 +10,10 @@ export const Footer: React.FC = () => {
             <Link
               to="/"
               className="inline-block group focus:outline-none focus-visible:ring-2 focus-visible:ring-stone-900 dark:focus-visible:ring-[#F3F1EC] rounded"
-              aria-label="Outside.vip homepage"
+              aria-label="Out-side.vip homepage"
             >
               <span className="font-display font-black text-2xl tracking-tight text-stone-900 dark:text-[#F3F1EC] group-hover:opacity-85 transition-opacity">
-                outside<span className="text-stone-400 dark:text-[#958F86] font-normal">.vip</span>
+                out-side<span className="text-stone-400 dark:text-[#958F86] font-normal">.vip</span>
               </span>
             </Link>
 
@@ -72,7 +72,7 @@ export const Footer: React.FC = () => {
 
         <div className="mt-12 sm:mt-16 pt-6 border-t border-stone-200/60 flex flex-col sm:flex-row items-center justify-between gap-3 text-[11px] font-mono text-stone-400">
           <div>
-            &copy; 2026 Outside.vip
+            &copy; 2026 Out-side.vip
           </div>
           <div>
             Made for going out there.
